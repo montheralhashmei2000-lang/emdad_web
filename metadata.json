@@ -1,0 +1,6 @@
+{
+  "name": "نظام الإمداد والتموين",
+  "description": "Emdad System — نظام الإمداد والتموين",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

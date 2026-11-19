@@ -1,0 +1,634 @@
+// المرحلة 1 — الأساس: الألوان والخطوط والتنسيق والتواريخ — الاختبارات (المواصفة الواجبة التحويل إلى Vitest)
+// عدد الملفات: 7
+// فهرس الملفات:
+//   - test/ids_test.dart (72 سطر)
+//   - test/iso_date_strict_test.dart (46 سطر)
+//   - test/number_format_test.dart (128 سطر)
+//   - test/fonts_test.dart (65 سطر)
+//   - test/app_space_test.dart (151 سطر)
+//   - test/menu_doors_test.dart (72 سطر)
+//   - test/contrast_tokens_test.dart (75 سطر)
+
+
+// ==================== FILE: test/ids_test.dart ====================
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/ids.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/catalog_repo.dart';
+import 'package:imdad/data/repos/movements_repo.dart';
+
+/// حراسة عيب حقيقي ظهر في الاختبار: المعرّف المبني على الوقت وحده يتكرر
+/// حين يُكتب سجلّان في الملّي ثانية نفسها، فيطمس أحدهما الآخر.
+void main() {
+  test('عشرة آلاف معرّف متتالٍ بلا تكرار', () {
+    final ids = <String>{};
+    for (var i = 0; i < 10000; i++) {
+      ids.add(Ids.next('x'));
+    }
+    expect(ids.length, 10000);
+  });
+
+  test('سجلّان يُحفظان في اللحظة نفسها يبقيان سجلّين', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final catalog = CatalogRepo(db);
+
+    // حفظ متتالٍ بلا أي فاصل زمني — هذا ما كان يُسقط أحد السجلين.
+    await catalog.saveUnit(code: 'C1', name: 'معسكر أ', type: 'camp');
+    await catalog.saveUnit(code: 'U1', name: 'كتيبة أ', type: 'unit');
+    await catalog.saveUnit(code: 'U2', name: 'كتيبة ب', type: 'unit');
+
+    final units = await catalog.units();
+    expect(units.map((u) => u.name).toSet(), {'معسكر أ', 'كتيبة أ', 'كتيبة ب'});
+  });
+
+  test('سند بعدة أصناف يحفظ كل سطوره', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final catalog = CatalogRepo(db);
+    final moves = MovementsRepo(db);
+    await catalog.saveWarehouse(code: 'W1', name: 'المخزن الرئيسي');
+
+    final lines = <DocLineInput>[];
+    for (var i = 1; i <= 25; i++) {
+      final id = await catalog.saveItem(
+        code: 'I$i',
+        name: 'صنف $i',
+        baseUnit: 'كجم',
+        units: const [ItemUnit(name: 'كجم', factor: 1, isBase: true)],
+      );
+      lines.add(DocLineInput(
+        itemId: id,
+        itemCode: 'I$i',
+        itemName: 'صنف $i',
+        unitName: 'كجم',
+        factor: 1,
+        qty: i.toDouble(),
+      ));
+    }
+
+    final res = await moves.saveReceipt(
+      warehouse: 'المخزن الرئيسي',
+      supplier: 'مورد',
+      date: '2026-09-17',
+      lines: lines,
+    );
+    expect(res.ok, isTrue, reason: res.error);
+
+    final saved = await db.select(db.receipts).get();
+    expect(saved.length, 25);
+    final balances = await moves.balances(warehouse: 'المخزن الرئيسي');
+    expect(balances.length, 25);
+  });
+}
+// ==================== END FILE: test/ids_test.dart ====================
+
+// ==================== FILE: test/iso_date_strict_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/print/print_format.dart';
+import 'package:imdad/core/ui/imd_form.dart';
+import 'package:imdad/core/ui/imd_format.dart';
+import 'package:imdad/domain/iso_date.dart';
+
+/// `DateTime.tryParse('2026-02-30')` يعيد 2026-03-02 بدل null، فكان تاريخٌ
+/// مستحيلٌ وصل بالمزامنة أو الاستيراد يُطبع على السند **يومًا آخر صحيح الشكل**.
+void main() {
+  group('parseIsoDay', () {
+    test('يقبل الحقيقي والختم الذي يبدأ به', () {
+      expect(parseIsoDay('2026-05-15'), DateTime(2026, 5, 15));
+      expect(parseIsoDay('2026-05-15T10:30:00'), DateTime(2026, 5, 15));
+      expect(parseIsoDay('2026-05-15 10:30:00'), DateTime(2026, 5, 15));
+      expect(parseIsoDay('2024-02-29'), DateTime(2024, 2, 29), reason: 'سنة كبيسة');
+    });
+
+    test('يرفض المستحيل ولا يُدوِّره', () {
+      for (final bad in ['2026-02-30', '2025-02-29', '2026-13-01', '2026-00-10', '2026-04-31', '2026-05-00', '', 'x', '15-05-2026']) {
+        expect(parseIsoDay(bad), isNull, reason: bad);
+      }
+    });
+
+    test('isIsoDay دقيق الطول', () {
+      expect(isIsoDay('2026-05-15'), isTrue);
+      expect(isIsoDay('2026-05-15T10:00'), isFalse);
+      expect(isIsoDay('2026-02-30'), isFalse);
+    });
+  });
+
+  test('الطباعة والعرض يعيدان المستحيل كما هو', () {
+    expect(printDate('2026-05-15'), '${lrm}2026-05-15$lrm');
+    expect(printDate('2026-02-30'), '2026-02-30');
+    expect(arDay('2026-02-30'), arDigits('2026-02-30'));
+    expect(arDay('2026-05-15'), arDateText('2026-05-15'));
+  });
+
+  test('منتقي التاريخ يُفتح على يومٍ داخل مداه', () {
+    final now = DateTime(2026, 10, 22);
+    expect(ImdDateField.initialFor('1999-12-31', now: now), DateTime(2000));
+    expect(ImdDateField.initialFor('2150-01-01', now: now), DateTime(2100));
+    expect(ImdDateField.initialFor('2026-02-30', now: now), now);
+    expect(ImdDateField.initialFor('2026-05-15', now: now), DateTime(2026, 5, 15));
+  });
+}
+// ==================== END FILE: test/iso_date_strict_test.dart ====================
+
+// ==================== FILE: test/number_format_test.dart ====================
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/print/print_format.dart';
+import 'package:imdad/core/ui/imd_format.dart';
+import 'package:imdad/core/ui/imd_numbers.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/settings_repo.dart';
+
+/// تنسيق الأرقام إعدادٌ واحد تتبعه الشاشات والمطبوعات.
+///
+/// كانت الصورة مثبَّتةً في موضعين لا يعرف أحدهما الآخر: `nf()` هنديةً بفاصلةٍ
+/// ونقطة، و`printNum()/printMoney()` لاتينيةً بـ`intl`. فمن أراد تغيير خانات
+/// المبالغ أو فاصل الآلاف لم يجد مكانًا يغيّره منه.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  tearDown(() => ImdNumbers.apply(const ImdNumberPrefs()));
+
+  group('الافتراضات لم تتغيّر', () {
+    test('الشاشات: هنديةٌ بفاصلةٍ ونقطة وبلا أصفار زائدة', () {
+      expect(nf(1234567), '١,٢٣٤,٥٦٧');
+      expect(nf(12.5), '١٢.٥');
+      expect(nf(2.500), '٢.٥', reason: 'الأصفار الزائدة تُقصّ');
+      expect(nf(0), '٠');
+      expect(nf(null), '٠');
+    });
+
+    test('المطبوعات: لاتينيةٌ كما في ملفات Excel المعتمدة', () {
+      expect(printNum(2200), '2,200');
+      expect(printNum(12.5), '12.5');
+      expect(printMoney(30000), '30,000.00');
+      expect(printDate('2026-05-15'), '${lrm}2026-05-15$lrm', reason: 'علامة الاتجاه تحيط باللاتيني (انظر print_date_bidi)');
+    });
+
+    test('السالب تسبقه علامة اتجاه فلا تقفز شرطته', () {
+      expect(nf(-5), startsWith('؜-'));
+      expect(nf(-5), endsWith('٥'));
+    });
+  });
+
+  group('صورة الأرقام تتبع الإعداد', () {
+    test('شاشاتٌ لاتينية', () {
+      ImdNumbers.apply(const ImdNumberPrefs(uiDigits: ImdDigits.latin));
+      expect(nf(1234.5), '1,234.5');
+      expect(arDigits('2026-10-09'), '2026-10-09');
+    });
+
+    test('مطبوعاتٌ هندية', () {
+      ImdNumbers.apply(const ImdNumberPrefs(printDigits: ImdDigits.arabic));
+      expect(printNum(2200), '٢,٢٠٠');
+      expect(printDate('2026-05-15'), '٢٠٢٦-٠٥-١٥');
+    });
+
+    test('التواريخ تتبع صورة الشاشات', () {
+      expect(arDigits('2026-10-09'), '٢٠٢٦-١٠-٠٩');
+    });
+  });
+
+  group('الفواصل والخانات', () {
+    test('فاصل الآلاف والعشريّ', () {
+      ImdNumbers.apply(const ImdNumberPrefs(thousands: ' ', decimal: '٫'));
+      expect(nf(1234.5), '١ ٢٣٤٫٥');
+      ImdNumbers.apply(const ImdNumberPrefs(thousands: ''));
+      expect(nf(1234567), '١٢٣٤٥٦٧');
+    });
+
+    test('خانات الكميات تُقصّ أصفارها، وخانات المبالغ ثابتة', () {
+      ImdNumbers.apply(const ImdNumberPrefs(qtyDecimals: 1, moneyDecimals: 3));
+      expect(nf(2.567), '٢.٦', reason: 'تُقرَّب إلى خانةٍ واحدة');
+      expect(nfMoney(120), '١٢٠.٠٠٠', reason: 'المبلغ يُدقَّق بخاناته فلا تُقصّ');
+      ImdNumbers.apply(const ImdNumberPrefs(moneyDecimals: 0));
+      expect(printMoney(30000), '30,000');
+    });
+
+    test('بلا خاناتٍ عشرية للكميات', () {
+      ImdNumbers.apply(const ImdNumberPrefs(qtyDecimals: 0));
+      expect(nf(2.6), '٣');
+    });
+  });
+
+  group('القراءة من القاعدة', () {
+    test('يُحفظ ويُقرأ ويسري على الشاشات والمطبوعات معًا', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final repo = SettingsRepo(db);
+
+      expect((await repo.numbers()), const ImdNumberPrefs(),
+          reason: 'بلا صفٍّ محفوظ: الافتراضات');
+
+      await repo.saveNumbers(const ImdNumberPrefs(
+        uiDigits: ImdDigits.latin,
+        printDigits: ImdDigits.arabic,
+        moneyDecimals: 3,
+      ));
+      // `saveNumbers` تُفعّله فورًا فلا يُحفظ شيءٌ ويُعرض غيره.
+      expect(nf(10), '10');
+      expect(printMoney(10), '١٠.٠٠٠');
+
+      ImdNumbers.apply(const ImdNumberPrefs());
+      await repo.loadNumbers();
+      expect(nf(10), '10', reason: 'القراءة من القاعدة تُعيد ما حُفظ');
+    });
+
+    test('صفٌّ تالفٌ لا يكسر كل رقمٍ في النظام', () async {
+      final bad = ImdNumberPrefs.fromMap(const {
+        'uiDigits': 'hieroglyph',
+        'thousands': '☠',
+        'decimal': '☠',
+        'qtyDecimals': 99,
+        'moneyDecimals': -3,
+      });
+      expect(bad, const ImdNumberPrefs(), reason: 'يعود بالافتراضات كلّها');
+    });
+
+    test('الصفّ يدور كاملًا بلا فقد', () {
+      const p = ImdNumberPrefs(
+        uiDigits: ImdDigits.latin,
+        printDigits: ImdDigits.arabic,
+        thousands: ' ',
+        decimal: '٫',
+        qtyDecimals: 1,
+        moneyDecimals: 3,
+      );
+      expect(ImdNumberPrefs.fromMap(p.toMap()), p);
+    });
+  });
+}
+// ==================== END FILE: test/number_format_test.dart ====================
+
+// ==================== FILE: test/fonts_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/ui/imd_fonts.dart';
+
+/// خط الواجهة صار خيارًا في الإعدادات. القيمة القادمة من قاعدة بيانات قديمة أو
+/// من ملف مزامنة من إصدار آخر قد تكون مجهولة — ويجب ألّا تكسر الواجهة.
+void main() {
+  test('الخطوط المطروحة كلها بأسماء وأوصاف', () {
+    expect(ImdFonts.all.length, 4);
+    for (final f in ImdFonts.all) {
+      expect(f.family.isNotEmpty, isTrue);
+      expect(f.label.isNotEmpty, isTrue);
+      expect(f.note.isNotEmpty, isTrue);
+    }
+  });
+
+  test('الافتراضي ضمن المطروح', () {
+    expect(ImdFonts.all.map((f) => f.family), contains(ImdFonts.defaultFamily));
+  });
+
+  test('قيمة مجهولة تسقط إلى الافتراضي بلا خطأ', () {
+    expect(ImdFonts.normalize('خط غير موجود'), ImdFonts.defaultFamily);
+    expect(ImdFonts.normalize(''), ImdFonts.defaultFamily);
+    expect(ImdFonts.normalize(null), ImdFonts.defaultFamily);
+  });
+
+  test('القيمة المعروفة تبقى كما هي', () {
+    for (final f in ImdFonts.all) {
+      expect(ImdFonts.normalize(f.family), f.family);
+    }
+  });
+
+  test('Amiri ليس خيار واجهة — يبقى للطباعة وحدها', () {
+    expect(ImdFonts.all.map((f) => f.family), isNot(contains('Amiri')));
+    expect(ImdFonts.normalize('Amiri'), ImdFonts.defaultFamily);
+  });
+
+  group('خطوط الطباعة', () {
+    test('كل خط طباعة له ملفان بوزنين مختلفين', () {
+      for (final f in ImdPrintFonts.all) {
+        expect(f.regular.endsWith('.ttf'), isTrue, reason: f.family);
+        expect(f.bold.endsWith('.ttf'), isTrue, reason: f.family);
+        expect(f.regular, isNot(f.bold), reason: '${f.family}: العريض غير العادي');
+      }
+    });
+
+    test('المجهول يسقط إلى الافتراضي فلا تفشل الطباعة', () {
+      expect(ImdPrintFonts.normalize('Traditional Arabic'), ImdPrintFonts.defaultFamily);
+      expect(ImdPrintFonts.normalize(null), ImdPrintFonts.defaultFamily);
+      expect(ImdPrintFonts.of('خط مجهول').family, ImdPrintFonts.defaultFamily);
+    });
+
+    test('Amiri خيار طباعة رغم استبعاده من الواجهة', () {
+      expect(ImdPrintFonts.all.map((f) => f.family), contains('Amiri'));
+      expect(ImdFonts.all.map((f) => f.family), isNot(contains('Amiri')));
+    });
+
+    test('الخطوط الملكية غير مطروحة (ترخيص)', () {
+      final families = ImdPrintFonts.all.map((f) => f.family).toList();
+      for (final owned in const ['Traditional Arabic', 'Simplified Arabic', 'Arial']) {
+        expect(families, isNot(contains(owned)));
+      }
+    });
+  });
+}
+// ==================== END FILE: test/fonts_test.dart ====================
+
+// ==================== FILE: test/app_space_test.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/domain/app_space.dart';
+import 'package:imdad/features/home/space_chooser_screen.dart';
+
+/// مساحتا العمل: الإمداد والمحروقات.
+///
+/// القاعدة التي تحرسها هذه الاختبارات: **من يملك مساحةً واحدة لا يُسأل**.
+/// شاشةُ اختيارٍ بخيارٍ واحد متاح ليست اختيارًا، بل نقرةٌ تُدفع كل يوم.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('ما يملكه المستخدم من مساحات', () {
+    test('من له صفحات الإمداد وحدها يملك مساحةً واحدة', () {
+      final spaces =
+          AppSpace.availableFor((p) => AppSpace.pages[AppSpace.supply]!.contains(p));
+      expect(spaces, [AppSpace.supply]);
+    });
+
+    test('من له صفحات المحروقات وحدها يملك مساحةً واحدة', () {
+      final spaces =
+          AppSpace.availableFor((p) => AppSpace.pages[AppSpace.fuel]!.contains(p));
+      expect(spaces, [AppSpace.fuel]);
+    });
+
+    test('من له الاثنتان يملكهما', () {
+      expect(AppSpace.availableFor((_) => true), AppSpace.all);
+    });
+
+    test('الإعدادات وحدها لا تمنح مساحة', () {
+      // وإلا رأى مساحةً فارغة إلا من إعداداتٍ عامة.
+      expect(AppSpace.availableFor((p) => p == 'settings'), isEmpty);
+    });
+  });
+
+  group('أي مساحة تُفتح', () {
+    test('صاحب مساحةٍ واحدة يدخلها بلا سؤال', () {
+      expect(
+        AppSpace.resolve(available: [AppSpace.fuel], saved: null),
+        AppSpace.fuel,
+      );
+    });
+
+    test('صاحب المساحتين بلا اختيار محفوظ يُسأل', () {
+      expect(AppSpace.resolve(available: AppSpace.all, saved: null), isNull);
+    });
+
+    test('الاختيار المحفوظ يُحترم فلا يُسأل مرتين', () {
+      expect(
+        AppSpace.resolve(available: AppSpace.all, saved: AppSpace.fuel),
+        AppSpace.fuel,
+      );
+    });
+
+    test('محفوظٌ لم يعد متاحًا لا يحبس صاحبه', () {
+      // تغيّرت صلاحياته فلم تبقَ له إلا الإمداد — لا يُفتح على المحروقات.
+      expect(
+        AppSpace.resolve(available: [AppSpace.supply], saved: AppSpace.fuel),
+        AppSpace.supply,
+      );
+    });
+
+    test('بلا مساحة أصلًا لا شيء يُفتح', () {
+      expect(AppSpace.resolve(available: const [], saved: AppSpace.fuel), isNull);
+    });
+  });
+
+  group('الفصل بعد إخراج المشترك', () {
+    test('لا بند مشترك: كل بند لقسمه', () {
+      // المستخدم أراد الفصل نهائيًّا، فلم يبقَ بندٌ يظهر في القسمين.
+      expect(AppSpace.shows(AppSpace.supply, AppSpace.fuel), isFalse);
+      expect(AppSpace.shows(AppSpace.fuel, AppSpace.supply), isFalse);
+    });
+
+    test('صفحات الإمداد لا تتضمن شيئًا من المحروقات', () {
+      final supply = AppSpace.pages[AppSpace.supply]!;
+      expect(supply.where((p) => p.startsWith('fuel')), isEmpty);
+    });
+
+    test('صفحات المحروقات كلها تبدأ بـfuel', () {
+      final fuel = AppSpace.pages[AppSpace.fuel]!;
+      expect(fuel.every((p) => p.startsWith('fuel')), isTrue);
+    });
+  });
+
+  group('ترشيح البنود', () {
+    test('المشترك يظهر في المساحتين', () {
+      expect(AppSpace.shows(AppSpace.both, AppSpace.supply), isTrue);
+      expect(AppSpace.shows(AppSpace.both, AppSpace.fuel), isTrue);
+    });
+
+    test('بند القسم لا يظهر في غيره', () {
+      expect(AppSpace.shows(AppSpace.fuel, AppSpace.supply), isFalse);
+      expect(AppSpace.shows(AppSpace.supply, AppSpace.fuel), isFalse);
+    });
+  });
+
+  group('شاشة الاختيار', () {
+    Widget host(Widget child) => MaterialApp(
+          theme: AppTheme.light(),
+          locale: const Locale('ar'),
+          home: Directionality(textDirection: TextDirection.rtl, child: child),
+        );
+
+    testWidgets('تعرض المساحتين بوصفيهما', (tester) async {
+      await tester.pumpWidget(host(SpaceChooserScreen(
+        spaces: AppSpace.all,
+        userName: 'المنذر',
+        onPick: (_) {},
+      )));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('الإمداد والتموين'), findsWidgets);
+      expect(find.text('المحروقات'), findsWidgets);
+      expect(find.textContaining('المنذر'), findsWidgets);
+      expect(find.textContaining('تفريدة الوقود'), findsWidgets,
+          reason: 'الوصف يُعرّف بالقسم قبل دخوله');
+    });
+
+    testWidgets('النقر يعيد المساحة المختارة', (tester) async {
+      String? picked;
+      await tester.pumpWidget(host(SpaceChooserScreen(
+        spaces: AppSpace.all,
+        userName: '',
+        onPick: (v) => picked = v,
+      )));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('المحروقات').first);
+      await tester.pumpAndSettle();
+      expect(picked, AppSpace.fuel);
+    });
+
+    testWidgets('تُبنى على عرض ضيّق بلا فيض', (tester) async {
+      tester.view.physicalSize = const Size(420, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(host(SpaceChooserScreen(
+        spaces: AppSpace.all,
+        userName: 'أمين',
+        onPick: (_) {},
+      )));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+// ==================== END FILE: test/app_space_test.dart ====================
+
+// ==================== FILE: test/menu_doors_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/perm.dart';
+import 'package:imdad/domain/menu_doors.dart';
+
+/// أبواب القائمة وصلاحياتها.
+///
+/// **بابٌ يشير إلى نفسه يُسقط القائمة كلها.** فحصُ الصلاحية يستدعي نفسه بلا
+/// نهاية فيفيض المكدّس؛ وفي نسخة الإصدار لا تظهر رسالة، بل مستطيلٌ رمادي
+/// مكان الشريط الجانبي. وقع ذلك فعلًا في `supplyReports`، ولذلك هذا الملف.
+void main() {
+  group('سلامة الخريطة', () {
+    test('لا بابَ يشير إلى نفسه', () {
+      expect(selfReferencingDoors(), isEmpty,
+          reason: 'تبويبةٌ تحمل اسم بابها تُدخل الفحص في تكرارٍ لا نهائي');
+    });
+
+    test('لا بابَ فارغ', () {
+      for (final e in kMenuDoors.entries) {
+        expect(e.value, isNotEmpty, reason: 'الباب «${e.key}» بلا تبويبات');
+      }
+    });
+
+    test('كل تبويبةٍ صلاحيةٌ معروفة', () {
+      for (final e in kMenuDoors.entries) {
+        for (final tab in e.value) {
+          // التبويبة صلاحيةٌ معرَّفة، أو بابٌ آخر بتبويباته.
+          expect(Perm.labels.containsKey(tab) || kMenuDoors.containsKey(tab),
+              isTrue,
+              reason: 'التبويبة «$tab» في «${e.key}» بلا صلاحية معرَّفة');
+        }
+      }
+    });
+
+    test('لا تبويبةَ تتكرر في بابين', () {
+      final seen = <String, String>{};
+      for (final e in kMenuDoors.entries) {
+        for (final tab in e.value) {
+          expect(seen.containsKey(tab), isFalse,
+              reason: '«$tab» في «${e.key}» و«${seen[tab]}» معًا');
+          seen[tab] = e.key;
+        }
+      }
+    });
+  });
+
+  group('فتح الباب', () {
+    test('يُفتح لمن ملك تبويبةً واحدة', () {
+      expect(menuDoorAllows('supplyMoves', (p) => p == 'issue'), isTrue);
+    });
+
+    test('يُغلق عمّن لم يملك شيئًا منه', () {
+      expect(menuDoorAllows('supplyMoves', (p) => p == 'items'), isFalse);
+    });
+
+    test('بابٌ مجهول لا يُفتح', () {
+      expect(menuDoorAllows('لا-شيء', (_) => true), isFalse);
+    });
+
+    test('بابٌ يشير إلى نفسه لا يتكرر إلى ما لا نهاية', () {
+      // الحارس يتخطّى التبويبة التي تحمل اسم بابها، فلو دخلت الخريطة يومًا
+      // لم تسقط القائمة — يُغلق الباب ولا يفيض المكدّس.
+      var calls = 0;
+      final ok = menuDoorAllows('supplyData', (p) {
+        calls++;
+        return p == 'supplyData';
+      });
+      expect(ok, isFalse);
+      expect(calls, lessThan(20), reason: 'الفحص لم يتوقف');
+    });
+  });
+}
+// ==================== END FILE: test/menu_doors_test.dart ====================
+
+// ==================== FILE: test/contrast_tokens_test.dart ====================
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/ui/imd_tokens.dart';
+
+/// التباين (WCAG 2.1 AA، 1.4.3): كل زوج «نصٌّ على خلفية» في لوحات الألوان الستّ
+/// يبلغ ٤٫٥:١ — كان غير مقيس (CLAUDE.md §9). الألوان الشفافة (الخلفيات «Soft» في
+/// الداكن) تُركَّب فوق السطح قبل الحساب، كما تُرسم فعلًا.
+double _lum(Color c) {
+  double ch(double v) => v <= 0.03928 ? v / 12.92 : math.pow((v + 0.055) / 1.055, 2.4).toDouble();
+  return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+}
+
+Color _over(Color top, Color base) => Color.alphaBlend(top, base);
+
+double ratio(Color fg, Color bg) {
+  final a = _lum(fg), b = _lum(bg);
+  return (math.max(a, b) + 0.05) / (math.min(a, b) + 0.05);
+}
+
+const palettes = {
+  'light': ImdColors.light,
+  'dark': ImdColors.dark,
+  'classicLight': ImdColors.classicLight,
+  'fuel': ImdColors.fuel,
+  'fuelLight': ImdColors.fuelLight,
+  'fuelDark': ImdColors.fuelDark,
+};
+
+/// (الاسم، النص، الخلفية) لكل زوجٍ يُرسم في الواجهة نصًّا.
+List<(String, Color, Color)> pairs(ImdColors c) {
+  Color s(Color soft) => _over(soft, c.surface);
+  return [
+    ('text/bg', c.text, c.bg),
+    ('text/surface', c.text, c.surface),
+    ('text/tableHead', c.text, _over(c.tableHead, c.surface)),
+    ('text2/surface', c.text2, c.surface),
+    ('muted/surface', c.muted, c.surface),
+    ('muted/bg', c.muted, c.bg),
+    ('muted/subtle', c.muted, _over(c.subtle, c.surface)),
+    ('faint/surface', c.faint, c.surface),
+    ('faint/bg', c.faint, c.bg),
+    ('faint/subtle', c.faint, _over(c.subtle, c.surface)),
+    ('orange onAccent/accent', c.orangeAccent.onAccent, c.orangeAccent.accent),
+    ('onAccent/accent', c.onAccent, c.accent),
+    ('accent/surface', c.accent, c.surface),
+    ('accent/accentSoft', c.accent, s(c.accentSoft)),
+    ('danger/surface', c.danger, c.surface),
+    ('danger/dangerSoft', c.danger, s(c.dangerSoft)),
+    ('success/surface', c.success, c.surface),
+    ('success/successSoft', c.success, s(c.successSoft)),
+    ('warn/surface', c.warn, c.surface),
+    ('warn/warnSoft', c.warn, s(c.warnSoft)),
+    ('info/surface', c.info, c.surface),
+    ('info/infoSoft', c.info, s(c.infoSoft)),
+    ('sideText/side', c.sideText, c.side),
+    ('sideText/sideActive', c.sideText, c.sideActive),
+    ('sideMuted/side', c.sideMuted, c.side),
+    ('noteText/noteBg', c.noteText, s(c.noteBg)),
+  ];
+}
+
+void main() {
+  for (final p in palettes.entries) {
+    test('لوحة ${p.key}: كل نصٍّ ≥ ٤٫٥:١ على خلفيته', () {
+      final bad = [
+        for (final (name, fg, bg) in pairs(p.value))
+          if (ratio(fg, bg) < 4.5) '$name = ${ratio(fg, bg).toStringAsFixed(2)}',
+      ];
+      expect(bad, isEmpty, reason: 'تباينٌ دون ٤٫٥:١ في ${p.key}:\n${bad.join('\n')}');
+    });
+  }
+}
+// ==================== END FILE: test/contrast_tokens_test.dart ====================

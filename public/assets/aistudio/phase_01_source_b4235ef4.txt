@@ -1,0 +1,2113 @@
+// المرحلة 1 — الأساس: الألوان والخطوط والتنسيق والتواريخ — الشيفرة المصدرية (Dart)
+// عدد الملفات: 19
+// فهرس الملفات:
+//   - pubspec.yaml (118 سطر)
+//   - lib/core/app_names.dart (21 سطر)
+//   - lib/core/ids.dart (32 سطر)
+//   - lib/core/error_log.dart (148 سطر)
+//   - lib/core/theme/app_theme.dart (161 سطر)
+//   - lib/core/ui/imd_tokens.dart (593 سطر)
+//   - lib/core/ui/imd_style.dart (49 سطر)
+//   - lib/core/ui/imd_format.dart (60 سطر)
+//   - lib/core/ui/imd_numbers.dart (198 سطر)
+//   - lib/core/ui/imd_density.dart (90 سطر)
+//   - lib/core/ui/imd_section_theme.dart (57 سطر)
+//   - lib/core/ui/imd_fonts.dart (4 سطر)
+//   - lib/domain/imd_fonts.dart (127 سطر)
+//   - lib/domain/iso_date.dart (25 سطر)
+//   - lib/domain/date_span.dart (112 سطر)
+//   - lib/domain/arabic_words.dart (85 سطر)
+//   - lib/domain/app_space.dart (109 سطر)
+//   - lib/domain/menu_doors.dart (49 سطر)
+//   - lib/domain/diagnostics.dart (14 سطر)
+
+
+// ==================== FILE: pubspec.yaml ====================
+name: imdad
+description: Emdad System — نظام الإمداد والتموين — تطبيق أصلي (Android / Windows)
+publish_to: "none"
+version: 8.0.2+802
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # قاعدة البيانات المحلية (بديل IndexedDB/localStorage)
+  drift: ^2.35.0
+  sqlite3: ^3.7.0
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # التشفير: PBKDF2-HMAC-SHA256 بـ 310,000 دورة + Salt (45,000 للحسابات القديمة حتى أول دخول)
+  crypto: ^3.0.5
+
+  # الطباعة: PDF للورق والرول الحراري عبر تعريف الطابعة
+  printing: ^5.13.1
+  pdf: ^3.11.1
+
+  # واجهة وحالة
+  provider: ^6.1.2
+  intl: ^0.20.3
+  shared_preferences: ^2.3.2
+  file_picker: ^8.1.2
+  excel: ^4.0.3
+  # قراءة ملفات xlsx الواقعية: حزمة excel ترفض ملفات Excel العربية التي تعرّف تنسيقات أرقام
+  # مخصصة بمعرّفات أقل من ١٦٤ (وهو شائع)، فللاستيراد قارئ بسيط فوق هاتين الحزمتين.
+  archive: ^3.6.1
+  xml: ^6.5.0
+  fl_chart: ^0.69.0
+  flutter_svg: ^2.0.10 # أيقونات الويب نفسها (مسارات SVG)
+  window_manager: ^0.4.2 # ضبط نافذة سطح المكتب (ويندوز)
+  mobile_scanner: ^7.4.2
+  # رسم باركود الأصول على الشاشة وفي الطباعة. كانت تصل تبعًا لحزمة pdf،
+  # والاعتماد على تبعية غير معلنة ينكسر بأول ترقية تُسقطها.
+  barcode: ^2.2.9
+  pointycastle: ^4.0.0
+  # ربط مفتاح القاعدة بشريحة TPM / Windows Hello عبر ncrypt.dll (lib/data/db/ncrypt_sealer.dart).
+  # كانت تصل تبعًا؛ والاستعمال المباشر يلزمه إعلان.
+  ffi: ^2.1.3
+  flutter_secure_storage: ^10.3.4
+  shimmer: ^3.0.0
+  flutter_acrylic: ^1.1.4
+  desktop_drop: ^0.8.4
+  local_auth: ^3.0.2
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  drift_dev: ^2.35.0
+  build_runner: ^2.4.12
+  flutter_lints: ^4.0.0
+
+# SQLCipher من بناء `package:sqlite3` نفسه (M-19): ملفاتٌ مُصرَّفة من المصدر في
+# إصدارات المكتبة على GitHub ومثبَّتة ببصمة sha256 في الحزمة المنشورة. كانت
+# `sqlcipher_flutter_libs` 0.6.0 (SQLCipher 4.5.5، أغسطس 2023) وأُعلنت منتهية الدعم.
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlcipher
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo.png
+  fonts:
+    # خط الواجهة نفسه في نسخة الويب (IBM Plex Sans Arabic — رخصة OFL)، مضمَّن ليعمل بلا إنترنت.
+    - family: IBMPlexSansArabic
+      fonts:
+        - asset: assets/fonts/IBMPlexSansArabic-Regular.ttf
+        - asset: assets/fonts/IBMPlexSansArabic-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/IBMPlexSansArabic-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/IBMPlexSansArabic-Bold.ttf
+          weight: 700
+    # خطوط الواجهة المتاحة للاختيار من «بيانات الجهة والمظهر».
+    # كلها بأوزان ثابتة (لا متغيّرة) حتى تتمايز العناوين عن الحقول والمجاميع،
+    # وأرقامها متساوية العرض فتتراصف خانات الجداول عموديًا.
+    - family: Tajawal
+      fonts:
+        - asset: assets/fonts/Tajawal-Regular.ttf
+        - asset: assets/fonts/Tajawal-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Tajawal-Bold.ttf
+          weight: 700
+    - family: Cairo
+      fonts:
+        - asset: assets/fonts/Cairo-Regular.ttf
+        - asset: assets/fonts/Cairo-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Cairo-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Cairo-Bold.ttf
+          weight: 700
+    - family: NotoSansArabic
+      fonts:
+        - asset: assets/fonts/NotoSansArabic-Regular.ttf
+        - asset: assets/fonts/NotoSansArabic-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/NotoSansArabic-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/NotoSansArabic-Bold.ttf
+          weight: 700
+    - family: Amiri
+      fonts:
+        - asset: assets/fonts/Amiri-Regular.ttf
+        - asset: assets/fonts/Amiri-Bold.ttf
+          weight: 700
+  # خط Amiri (رخصة OFL) يُستخدم في مستندات PDF ليظهر النص العربي متصلًا في الطباعة.
+// ==================== END FILE: pubspec.yaml ====================
+
+// ==================== FILE: lib/core/app_names.dart ====================
+import 'dart:io' show Platform;
+
+/// أسماء التطبيق — قرار المالك (2026-10-11): **مصدرٌ واحد** لا نصوصٌ متفرّقة.
+///
+/// • الواجهة (عنوان النافذة، شاشات الاسترداد والقفل): «نظام الإمداد والتموين».
+/// • اسم التطبيق تحت أيقونته في أندرويد/iOS: «Emdad System» (`android:label`).
+/// • الملف التنفيذي على ويندوز: `imdad.exe` (`BINARY_NAME` في CMake).
+/// • المثبّت: `EmdadSystem_<الإصدار>.exe` (`tool/installer/imdad.iss`).
+class AppNames {
+  const AppNames._();
+
+  static const String ui = 'نظام الإمداد والتموين';
+  static const String mobileLabel = 'Emdad System';
+  static const String windowsExe = 'imdad.exe';
+  static const String installerStem = 'EmdadSystem';
+
+  /// عنوان التطبيق كما يراه نظام التشغيل (النافذة على ويندوز، وقائمة التطبيقات
+  /// الأخيرة على الهاتف — فيطابق اسمَه تحت الأيقونة هناك).
+  static String get title => (Platform.isAndroid || Platform.isIOS) ? mobileLabel : ui;
+}
+// ==================== END FILE: lib/core/app_names.dart ====================
+
+// ==================== FILE: lib/core/ids.dart ====================
+import 'dart:math';
+
+/// مولّد معرّفات فريد.
+///
+/// الاعتماد على الوقت وحده لا يكفي: ساعة ويندوز دقّتها نحو ملّي ثانية، فسجلّان
+/// يُكتبان في اللحظة نفسها — كسطور السند في حلقة واحدة — يأخذان المعرّف نفسه
+/// فيطمس أحدهما الآخر. لذلك يُضاف عدّاد تصاعدي وقيمة عشوائية.
+class Ids {
+  Ids._();
+
+  static int _counter = 0;
+  static final Random _random = Random();
+
+  /// معرّف فريد بصيغة: البادئة-الوقت-العداد-عشوائي
+  static String next(String prefix) {
+    final now = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    final seq = (_counter = (_counter + 1) & 0xFFFFFF).toRadixString(36);
+    final rand = _random.nextInt(1 << 24).toRadixString(36);
+    return '$prefix-$now-$seq$rand';
+  }
+
+  /// معرّفٌ **حتميّ** من مفتاحٍ طبيعي — لسجلٍّ هو «الشيء نفسه» أينما أُنشئ:
+  /// سجل معسكرٍ لشهر، تصفية شهر، حدّ مخزون صنفٍ في مستودع، رصيدٌ افتتاحي.
+  ///
+  /// جهازان يُنشئان السجلَّ نفسه قبل أن يتزامنا يصلان إلى المعرّف نفسه، فيلتقي
+  /// الصفّان بالدمج العادي (الأحدث يفوز) بدل أن يتصادم الفهرس الفريد ويُجهض
+  /// المزامنة (H-1)، أو يبقى صفّان يُجمعان (H-7). الأجزاء تُرمَّز فلا يلتبس
+  /// فاصلٌ داخل اسمٍ بحدٍّ بين جزأين.
+  static String natural(String prefix, List<Object> parts) =>
+      '$prefix:${parts.map((p) => Uri.encodeComponent('$p')).join(':')}';
+}
+// ==================== END FILE: lib/core/ids.dart ====================
+
+// ==================== FILE: lib/core/error_log.dart ====================
+import 'package:flutter/foundation.dart';
+
+/// خطأٌ مسجَّل.
+class LoggedError {
+  LoggedError({
+    required this.source,
+    required this.message,
+    required this.type,
+    required this.critical,
+    required this.at,
+    this.stack,
+  });
+
+  /// موضع الحدوث بصيغة `مجال.عملية` (مثل `archive.cable`).
+  final String source;
+  final String message;
+  final String type;
+  final bool critical;
+  final DateTime at;
+  final StackTrace? stack;
+
+  /// كم مرةً تكرر الخطأ نفسه داخل نافذة التكرار فلم يُسجَّل ثانيةً.
+  int suppressed = 0;
+
+  @override
+  String toString() => '[$source] $type: $message';
+}
+
+/// سجلّ الأخطاء المبتلعة.
+///
+/// **لماذا ليس [AuditRepo] وحده:** كثيرٌ من المواضع أدنى من قاعدة البيانات
+/// (فتح الملف المشفّر قبل وجود القاعدة، وكتابة سجل التدقيق نفسه)، أو بلا
+/// قاعدة في متناولها (نماذج الطباعة، مجال النطاق). فالمسجِّل بلا تبعية:
+/// يكتب في سجل المنصة ويحفظ آخر [capacity] خطأً في الذاكرة للتشخيص، وتُحقن
+/// له عند الإقلاع قناتان: [sink] لحفظ الحرجة في سجل التدقيق، و[userNotifier]
+/// لإبلاغ المستخدم.
+///
+/// **تصنيف الأخطاء:**
+/// - [critical]: ما يُفقد به عملٌ أو أثر مساءلة (فشل الأرشفة بعد الطباعة، تعذّر
+///   كتابة سجل التدقيق، نطاق مستودعات تالف). تُحفظ في سجل التدقيق، ويُبلَّغ
+///   المستخدم إن مُرِّرت [userMessage].
+/// - [log]: الثانوية (ملف مؤقت لم يُحذف، شعار لم يُحمَّل). سجل المنصة والذاكرة فقط.
+/// - **المتوقعة** (مقبس أغلقه الطرف الآخر، حزمة اكتشاف مشوّهة من الشبكة) لا
+///   تُسجَّل: يكفي تعليقٌ عند موضعها يشرح لماذا هي متوقعة.
+class ErrorLogger {
+  const ErrorLogger._();
+
+  /// أقصى ما يحتفظ به المسجِّل في الذاكرة.
+  static const int capacity = 200;
+
+  /// الخطأ نفسه (الموضع + النوع) لا يُسجَّل إلا مرةً في هذه المدة — تحصينًا من
+  /// طوفانٍ حين يتكرر عطلٌ في مسارٍ يُستدعى مع كل رسم للشاشة.
+  static const Duration dedupeWindow = Duration(seconds: 60);
+
+  static final List<LoggedError> _recent = [];
+  static final Map<String, LoggedError> _lastByKey = {};
+
+  /// آخر الأخطاء، الأحدث أولًا.
+  static List<LoggedError> get recent => List.unmodifiable(_recent.reversed);
+
+  /// يحفظ الخطأ الحرج في سجل التدقيق. يُحقن من `main` (وهو يتجاوز مصدر `audit.*`
+  /// فلا يُستدعى المسجِّل من داخل كتابة سجل التدقيق نفسها).
+  static Future<void> Function(LoggedError error)? sink;
+
+  /// يُبلغ المستخدم برسالة عربية (SnackBar). يُحقن من `main`.
+  static void Function(String message)? userNotifier;
+
+  /// يربط مصائد الأخطاء العامة: أخطاء الإطار (`FlutterError.onError`) والاستثناءات
+  /// غير المعالَجة في المهام غير المتزامنة (`PlatformDispatcher.onError`). بدونهما
+  /// يمرّ أي استثناء لم يلتقطه كود بلا أثر في سجل التدقيق. تُعاد [FlutterError.presentError]
+  /// ليبقى العرض في وحدة التحكم كما كان.
+  static void installGlobalHandlers() {
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      critical('flutter.framework', details.exception, stack: details.stack);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      critical('platform.uncaught', error, stack: stack);
+      return true; // مُعالَج: لا يُنهي العملية.
+    };
+  }
+
+  /// خطأ ثانوي: سجل المنصة والذاكرة.
+  static void log(String source, Object error, [StackTrace? stack]) =>
+      _record(source, error, stack, critical: false, userMessage: null);
+
+  /// خطأ حرج: يُحفظ في سجل التدقيق، ويُبلَّغ المستخدم إن وُجدت [userMessage].
+  static void critical(String source, Object error, {StackTrace? stack, String? userMessage}) =>
+      _record(source, error, stack, critical: true, userMessage: userMessage);
+
+  static void _record(
+    String source,
+    Object error,
+    StackTrace? stack, {
+    required bool critical,
+    required String? userMessage,
+  }) {
+    final now = DateTime.now();
+    final key = '$source|${error.runtimeType}|$critical';
+    final prev = _lastByKey[key];
+    if (prev != null && now.difference(prev.at) < dedupeWindow) {
+      prev.suppressed++;
+      return;
+    }
+
+    final entry = LoggedError(
+      source: source,
+      message: '$error',
+      type: '${error.runtimeType}',
+      critical: critical,
+      at: now,
+      stack: stack,
+    );
+    _lastByKey[key] = entry;
+    _recent.add(entry);
+    if (_recent.length > capacity) _recent.removeRange(0, _recent.length - capacity);
+
+    debugPrint('${critical ? '✖ خطأ حرج' : '⚠ خطأ'} $entry');
+    if (!critical) return;
+
+    // الحفظ والإبلاغ لا يُسقطان المسار الأصلي أبدًا: المسجِّل نفسه لا يرمي.
+    final persist = sink;
+    if (persist != null && !source.startsWith('audit.')) {
+      try {
+        persist(entry).catchError((Object e) => debugPrint('ErrorLogger.sink: $e'));
+      } catch (e) {
+        debugPrint('ErrorLogger.sink: $e');
+      }
+    }
+    if (userMessage != null) {
+      try {
+        userNotifier?.call(userMessage);
+      } catch (e) {
+        debugPrint('ErrorLogger.userNotifier: $e');
+      }
+    }
+  }
+
+  /// للاختبارات: يصفّر الذاكرة والتكرار والقنوات.
+  @visibleForTesting
+  static void reset() {
+    _recent.clear();
+    _lastByKey.clear();
+    sink = null;
+    userNotifier = null;
+  }
+}
+// ==================== END FILE: lib/core/error_log.dart ====================
+
+// ==================== FILE: lib/core/theme/app_theme.dart ====================
+import 'package:flutter/material.dart';
+
+import '../ui/imd_fonts.dart';
+import '../ui/imd_tokens.dart';
+
+/// انتقالٌ بتلاشٍ فقط بلا انزلاقٍ جانبي — أقرب لِما تعتاده تطبيقات سطح
+/// المكتب الأصيلة من انزلاق الصفحات في متصفح الويب. يُستعمل لمنصّات سطح
+/// المكتب وحدها؛ الجوّال يبقى على انتقاله الافتراضي المعتاد.
+class _ImdFadePageTransitionsBuilder extends PageTransitionsBuilder {
+  const _ImdFadePageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return FadeTransition(opacity: animation, child: child);
+  }
+}
+
+/// سمة التطبيق — أخضر مؤسسي على خلفية محايدة فاتحة،
+/// ونسخةٌ داكنة مقابلة لها.
+class AppTheme {
+  // لا ألوان هنا: كل سمةٍ تُبنى من لوحتها في [ImdColors] — المصدر الوحيد.
+  static ThemeData light({String font = ImdFonts.defaultFamily}) =>
+      _base(font: font, brightness: Brightness.light, tokens: ImdColors.light);
+
+  static ThemeData dark({String font = ImdFonts.defaultFamily}) =>
+      _base(font: font, brightness: Brightness.dark, tokens: ImdColors.dark);
+
+  /// سمة قسم المحروقات — داكنة بلمسة زيتونية، بلوحة [ImdColors.fuel].
+  ///
+  /// القسم منفصل فعلًا لا اسمًا: هويّته البصرية تُعرّف من يعمل فيه أنه ليس
+  /// في شاشات الإعاشة قبل أن يقرأ عنوان الشاشة.
+  static ThemeData fuel({String font = ImdFonts.defaultFamily}) =>
+      _base(font: font, brightness: Brightness.dark, tokens: ImdColors.fuel);
+
+  /// النمط الكلاسيكي الفاتح: لوحة [ImdColors.classicLight] وخط الواجهة المختار [font].
+  static ThemeData classic({String font = ImdFonts.defaultFamily}) =>
+      _base(font: font, brightness: Brightness.light, tokens: ImdColors.classicLight);
+
+  /// قسم المحروقات بهويّته: برتقالي محروق، فاتحًا أو داكنًا بحسب [dark]. الحقول
+  /// والجداول والقشرة هي نفسها — اللوحة وحدها تتبدّل.
+  static ThemeData fuelSection({required bool dark, String font = ImdFonts.defaultFamily}) => _base(
+        font: font,
+        brightness: dark ? Brightness.dark : Brightness.light,
+        tokens: dark ? ImdColors.fuelDark : ImdColors.fuelLight,
+      );
+
+  static ThemeData _base({
+    required String font,
+    required Brightness brightness,
+    required ImdColors tokens,
+  }) {
+    final primary = tokens.accent;
+    final background = tokens.bg;
+    final surface = tokens.surface;
+    final outline = tokens.line;
+    final onSurface = tokens.text;
+    final muted = tokens.muted;
+    final scheme = ColorScheme.fromSeed(
+      seedColor: primary,
+      brightness: brightness,
+    ).copyWith(
+      primary: primary,
+      surface: surface,
+      outline: outline,
+      onSurface: onSurface,
+    );
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      colorScheme: scheme,
+      scaffoldBackgroundColor: background,
+      fontFamily: ImdFonts.normalize(font),
+      extensions: [
+        tokens,
+      ],
+      // كثافةٌ أعلى على سطح المكتب (مبنيّة على المنصّة كـ[ImdBp.touch] لا عرض
+      // الشاشة): مكثّفة على وندوز/لينكس/ماك، وتبقى معتادة على الجوال بلا أي
+      // أثر — تمامًا كيف تتكثّف تطبيقات سطح المكتب الأصيلة مقارنةً بالجوال.
+      visualDensity: VisualDensity.adaptivePlatformDensity,
+      // لا تموّج Material على سطح المكتب: التطبيقات الأصيلة تكتفي بتلوين الحالة
+      // (hover/pressed). التموّج يبقى على اللمس حيث هو المعتاد.
+      splashFactory: ImdBp.touch ? null : NoSplash.splashFactory,
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: surface,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: outline),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: outline),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: primary, width: 1.6),
+        ),
+        labelStyle: TextStyle(color: muted, fontWeight: FontWeight.w600),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: primary,
+          foregroundColor: tokens.onAccent,
+          minimumSize: const Size.fromHeight(48),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+        ),
+      ),
+      cardTheme: CardThemeData(
+        color: surface,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(color: outline),
+        ),
+      ),
+      dividerTheme: DividerThemeData(color: outline, thickness: 1),
+      // تلاشٍ بلا انزلاقٍ على سطح المكتب وحده — الجوّال يبقى على انتقاله
+      // الافتراضي المعتاد فلا يتغيّر سلوكه.
+      pageTransitionsTheme: const PageTransitionsTheme(builders: {
+        TargetPlatform.windows: _ImdFadePageTransitionsBuilder(),
+        TargetPlatform.linux: _ImdFadePageTransitionsBuilder(),
+        TargetPlatform.macOS: _ImdFadePageTransitionsBuilder(),
+      }),
+      // شريطٌ رفيع يتمدّد عند المرور أو السحب ويختفي حين لا تمرير — كأشرطة
+      // ويندوز الأصيلة، لا شريطًا سميكًا ثابت الظهور كصفحات الويب. الجداول
+      // العريضة تُظهر شريطها الأفقي صراحةً حيث يلزم التنبيه إلى أعمدة مخفية.
+      scrollbarTheme: ScrollbarThemeData(
+        thumbVisibility: const WidgetStatePropertyAll(false),
+        interactive: true,
+        thickness: WidgetStateProperty.resolveWith((states) =>
+            states.contains(WidgetState.hovered) || states.contains(WidgetState.dragged) ? 10.0 : 6.0),
+        radius: const Radius.circular(5),
+        // من onSurface لا لونين ثابتين: داكنٌ واضح على الفاتح وفاتحٌ واضح على
+        // الداكن — بلا فرعين يدويين قد ينسيهما أحدٌ عند إضافة سمةٍ ثالثة.
+        thumbColor: WidgetStateProperty.resolveWith((states) => onSurface.withValues(
+            alpha: states.contains(WidgetState.hovered) || states.contains(WidgetState.dragged) ? .55 : .35)),
+        trackColor: const WidgetStatePropertyAll(Colors.transparent),
+        trackBorderColor: const WidgetStatePropertyAll(Colors.transparent),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: onSurface,
+        contentTextStyle: TextStyle(
+          color: tokens.onText,
+          fontWeight: FontWeight.w600,
+        ),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/theme/app_theme.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_tokens.dart ====================
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+
+import 'imd_density.dart';
+import 'imd_style.dart';
+
+/// رموز ألوان النظام — المصدر الوحيد لكل لونٍ في الواجهة. تُقرأ من
+/// `context.imd`، ولا يُكتب لونٌ صريح في شاشةٍ ولا في مكوّن.
+@immutable
+class ImdColors extends ThemeExtension<ImdColors> {
+  const ImdColors({
+    required this.bg,
+    required this.surface,
+    required this.subtle,
+    required this.hover,
+    required this.line,
+    required this.lineStrong,
+    required this.text,
+    required this.text2,
+    required this.muted,
+    required this.faint,
+    required this.accent,
+    required this.accentHover,
+    required this.accentSoft,
+    required this.ring,
+    required this.onAccent,
+    required this.success,
+    required this.successSoft,
+    required this.danger,
+    required this.dangerSoft,
+    required this.warn,
+    required this.warnSoft,
+    required this.info,
+    required this.infoSoft,
+    required this.side,
+    required this.side2,
+    required this.sideHover,
+    required this.sideActive,
+    required this.sideText,
+    required this.sideMuted,
+    required this.sideBorder,
+    required this.sideLine,
+    required this.tableHead,
+    required this.tableRowLine,
+    required this.noteBg,
+    required this.noteBorder,
+    required this.noteText,
+    required this.isDark,
+  });
+
+  final Color bg, surface, subtle, hover, line, lineStrong;
+  final Color text, text2, muted, faint;
+  final Color accent, accentHover, accentSoft, ring, onAccent;
+  final Color success, successSoft, danger, dangerSoft, warn, warnSoft, info, infoSoft;
+  final Color side, side2, sideHover, sideActive, sideText, sideMuted, sideBorder, sideLine;
+  final Color tableHead, tableRowLine;
+  final Color noteBg, noteBorder, noteText;
+  final bool isDark;
+
+  static const light = ImdColors(
+    bg: Color(0xFFF7F7F8),
+    surface: Color(0xFFFFFFFF),
+    subtle: Color(0xFFECECF1),
+    hover: Color(0xFFF2F2F5),
+    line: Color(0xFFE3E3E8),
+    lineStrong: Color(0xFFD1D1DB),
+    text: Color(0xFF202123),
+    text2: Color(0xFF343541),
+    muted: Color(0xFF5B5E6B),
+    faint: Color(0xFF68687B), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFF047857),
+    accentHover: Color(0xFF065F46),
+    accentSoft: Color(0xFFECFDF5),
+    ring: Color(0x38047857),
+    onAccent: Color(0xFFFFFFFF),
+    success: Color(0xFF067647),
+    successSoft: Color(0xFFDCFAE6),
+    danger: Color(0xFFB42318),
+    dangerSoft: Color(0xFFFEE4E2),
+    warn: Color(0xFFB54708),
+    warnSoft: Color(0xFFFEF0C7),
+    info: Color(0xFF175CD3),
+    infoSoft: Color(0xFFEFF4FF),
+    // الشريط الجانبي في السمة الفاتحة: أخضر مزرق داكن من عائلة لون التمييز
+    // (047857) بدل الأسود — يبقى النص الأبيض مقروءًا ويتّسق مع أزرار النظام.
+    side: Color(0xFF0B3D3A),
+    side2: Color(0xFF104A46),
+    sideHover: Color(0xFF155A55),
+    sideActive: Color(0xFF1A6A63),
+    sideText: Color(0xFFF0FDFA),
+    sideMuted: Color(0xFF9CCFC7),
+    sideBorder: Color(0xFF1F665F),
+    sideLine: Color(0xFF17524D),
+    tableHead: Color(0xFFFAFAFB),
+    tableRowLine: Color(0xFFEFEFF3),
+    noteBg: Color(0xFFFFFAEB),
+    noteBorder: Color(0xFFFEDF89),
+    noteText: Color(0xFF7A2E0E),
+    isDark: false,
+  );
+
+  static const dark = ImdColors(
+    bg: Color(0xFF171717),
+    surface: Color(0xFF212121),
+    subtle: Color(0xFF2F2F33),
+    hover: Color(0xFF2A2A2E),
+    line: Color(0xFF303036),
+    lineStrong: Color(0xFF3F3F46),
+    text: Color(0xFFECECF1),
+    text2: Color(0xFFD4D4D8),
+    muted: Color(0xFFA1A1AA),
+    faint: Color(0xFF9797A1), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFF10B981),
+    accentHover: Color(0xFF34D399),
+    accentSoft: Color(0x2410B981),
+    ring: Color(0x5210B981),
+    onAccent: Color(0xFF0B1F1C),
+    success: Color(0xFF4ADE80),
+    successSoft: Color(0x244ADE80),
+    danger: Color(0xFFF97066),
+    dangerSoft: Color(0x26F97066),
+    warn: Color(0xFFFDB022),
+    warnSoft: Color(0x26FDB022),
+    info: Color(0xFF84ADFF),
+    infoSoft: Color(0x2684ADFF),
+    side: Color(0xFF0F0F10),
+    side2: Color(0xFF1A1A1C),
+    sideHover: Color(0xFF26262A),
+    sideActive: Color(0xFF303036),
+    sideText: Color(0xFFECECF1),
+    sideMuted: Color(0xFFA1A1AA),
+    sideBorder: Color(0xFF2F3036),
+    sideLine: Color(0xFF2A2B32),
+    tableHead: Color(0xFF1C1C1F),
+    tableRowLine: Color(0xFF2A2A2E),
+    noteBg: Color(0x1AFDB022),
+    noteBorder: Color(0x59FDB022),
+    noteText: Color(0xFFFEC84B),
+    isDark: true,
+  );
+
+  /// لوحة قسم المحروقات — داكنة بلمسة زيتونية.
+  ///
+  /// القسم له هويّته البصرية: من يعمل فيه يعرف من أول نظرة أنه ليس في شاشات
+  /// الإعاشة، فلا يكتب سند وقود في مكان سند إعاشة. والخضرة الباهتة (لا
+  /// الفيروزي المؤسسي) تميّزه بلا أن تخرج عن لغة النظام.
+  static const fuel = ImdColors(
+    bg: Color(0xFF0E100D),
+    surface: Color(0xFF151814),
+    subtle: Color(0xFF1C201A),
+    hover: Color(0xFF212519),
+    line: Color(0xFF262B24),
+    lineStrong: Color(0xFF343A31),
+    text: Color(0xFFE9ECE5),
+    text2: Color(0xFFD2D7CB),
+    muted: Color(0xFF8C9386),
+    faint: Color(0xFF828A7B), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFFBFD8A4),
+    accentHover: Color(0xFFD3E6BD),
+    accentSoft: Color(0x22BFD8A4),
+    ring: Color(0x55BFD8A4),
+    onAccent: Color(0xFF13210C),
+    success: Color(0xFF8FD694),
+    successSoft: Color(0x248FD694),
+    danger: Color(0xFFE5806A),
+    dangerSoft: Color(0x26E5806A),
+    warn: Color(0xFFE3B872),
+    warnSoft: Color(0x26E3B872),
+    info: Color(0xFF9DC7D8),
+    infoSoft: Color(0x269DC7D8),
+    side: Color(0xFF111410),
+    side2: Color(0xFF0E110D),
+    sideHover: Color(0xFF1D2119),
+    sideActive: Color(0xFF242A20),
+    sideText: Color(0xFFE9ECE5),
+    sideMuted: Color(0xFF8C9386),
+    sideBorder: Color(0xFF272C24),
+    sideLine: Color(0xFF232821),
+    tableHead: Color(0xFF191D17),
+    tableRowLine: Color(0xFF232821),
+    noteBg: Color(0x1AE3B872),
+    noteBorder: Color(0x59E3B872),
+    noteText: Color(0xFFE8C88A),
+    isDark: true,
+  );
+
+  /// النمط الكلاسيكي (فاتح): خلفية رمادية `#F3F4F6` وحدود رمادية رفيعة، وألوانٌ
+  /// دلالية بدرجات باهتة، وأخضر الإمداد `#047857` للتمييز. شريطه الجانبي كالفاتح.
+  static const classicLight = ImdColors(
+    bg: Color(0xFFF3F4F6),
+    surface: Color(0xFFFFFFFF),
+    subtle: Color(0xFFE5E7EB),
+    hover: Color(0xFFF3F4F6),
+    line: Color(0xFFD1D5DB),
+    lineStrong: Color(0xFF9CA3AF),
+    text: Color(0xFF1F2937),
+    text2: Color(0xFF374151),
+    muted: Color(0xFF4B5563),
+    faint: Color(0xFF606773), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFF047857),
+    accentHover: Color(0xFF065F46),
+    accentSoft: Color(0xFFECFDF5),
+    ring: Color(0x38047857),
+    onAccent: Color(0xFFFFFFFF),
+    success: Color(0xFF0B7A55), // ≥ ٤٫٦:١ على السطح وعلى خلفيته الفاتحة
+    successSoft: Color(0xFFD1FAE5),
+    danger: Color(0xFFCD1212), // ≥ ٤٫٦:١ على السطح وعلى خلفيته الفاتحة
+    dangerSoft: Color(0xFFFEE2E2),
+    warn: Color(0xFF966106), // ≥ ٤٫٦:١ على السطح وعلى خلفيته الفاتحة
+    warnSoft: Color(0xFFFEF3C7),
+    info: Color(0xFF0A5DE4), // ≥ ٤٫٦:١ على السطح وعلى خلفيته الفاتحة
+    infoSoft: Color(0xFFDBEAFE),
+    side: Color(0xFF0B3D3A),
+    side2: Color(0xFF104A46),
+    sideHover: Color(0xFF155A55),
+    sideActive: Color(0xFF1A6A63),
+    sideText: Color(0xFFF0FDFA),
+    sideMuted: Color(0xFF9CCFC7),
+    sideBorder: Color(0xFF1F665F),
+    sideLine: Color(0xFF17524D),
+    tableHead: Color(0xFFE5E7EB),
+    tableRowLine: Color(0xFFE5E7EB),
+    noteBg: Color(0xFFFFFAEB),
+    noteBorder: Color(0xFFFEDF89),
+    noteText: Color(0xFF7A2E0E),
+    isDark: false,
+  );
+
+  /// هوية قسم المحروقات (فاتح): برتقالي محروق مع شريط جانبي بنّي داكن — لوحةٌ
+  /// مستقلةٌ عن أخضر الإمداد بنفس البنية، فمن يعمل فيه يعرف قسمه من أول نظرة.
+  /// الألوان الدلالية (نجاح/خطر/تحذير) تبقى كما هي: معناها لا يتغيّر بالقسم.
+  static const fuelLight = ImdColors(
+    bg: Color(0xFFF7F6F4),
+    surface: Color(0xFFFFFFFF),
+    subtle: Color(0xFFEFEDEA),
+    hover: Color(0xFFF4F2EF),
+    line: Color(0xFFE6E2DC),
+    lineStrong: Color(0xFFD4CEC5),
+    text: Color(0xFF211D19),
+    text2: Color(0xFF3A342E),
+    muted: Color(0xFF625A51),
+    faint: Color(0xFF70695F), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFFC2410C),
+    accentHover: Color(0xFF9A3412),
+    accentSoft: Color(0xFFFFF1E8),
+    ring: Color(0x38C2410C),
+    onAccent: Color(0xFFFFFFFF),
+    success: Color(0xFF067647),
+    successSoft: Color(0xFFDCFAE6),
+    danger: Color(0xFFB42318),
+    dangerSoft: Color(0xFFFEE4E2),
+    warn: Color(0xFFB54708),
+    warnSoft: Color(0xFFFEF0C7),
+    info: Color(0xFF175CD3),
+    infoSoft: Color(0xFFEFF4FF),
+    side: Color(0xFF3B1D0E),
+    side2: Color(0xFF4A2512),
+    sideHover: Color(0xFF5C2F18),
+    sideActive: Color(0xFF6E3A1E),
+    sideText: Color(0xFFFFF4EC),
+    sideMuted: Color(0xFFD9AE91),
+    sideBorder: Color(0xFF6A3A20),
+    sideLine: Color(0xFF522B16),
+    tableHead: Color(0xFFFAF9F7),
+    tableRowLine: Color(0xFFF0EDE8),
+    noteBg: Color(0xFFFFFAEB),
+    noteBorder: Color(0xFFFEDF89),
+    noteText: Color(0xFF7A2E0E),
+    isDark: false,
+  );
+
+  /// هوية قسم المحروقات (داكن): برتقالي دافئ على رمادي فحمي بحرارةٍ خفيفة.
+  static const fuelDark = ImdColors(
+    bg: Color(0xFF171513),
+    surface: Color(0xFF211E1B),
+    subtle: Color(0xFF2F2B27),
+    hover: Color(0xFF2A2623),
+    line: Color(0xFF34302B),
+    lineStrong: Color(0xFF433E38),
+    text: Color(0xFFEFEBE6),
+    text2: Color(0xFFD8D2CB),
+    muted: Color(0xFFA8A097),
+    faint: Color(0xFF9A938A), // ≥ ٤٫٦:١ على السطح والخلفية والمظلَّل (WCAG AA)
+    accent: Color(0xFFFB923C),
+    accentHover: Color(0xFFFDBA74),
+    accentSoft: Color(0x24FB923C),
+    ring: Color(0x52FB923C),
+    onAccent: Color(0xFF2B1204),
+    success: Color(0xFF4ADE80),
+    successSoft: Color(0x244ADE80),
+    danger: Color(0xFFF97066),
+    dangerSoft: Color(0x26F97066),
+    warn: Color(0xFFFDB022),
+    warnSoft: Color(0x26FDB022),
+    info: Color(0xFF84ADFF),
+    infoSoft: Color(0x2684ADFF),
+    side: Color(0xFF120F0C),
+    side2: Color(0xFF1C1814),
+    sideHover: Color(0xFF29231D),
+    sideActive: Color(0xFF3A2F25),
+    sideText: Color(0xFFEFEBE6),
+    sideMuted: Color(0xFFA8A097),
+    sideBorder: Color(0xFF332C25),
+    sideLine: Color(0xFF2B251F),
+    tableHead: Color(0xFF1C1A17),
+    tableRowLine: Color(0xFF2B2824),
+    noteBg: Color(0x1AFDB022),
+    noteBorder: Color(0x59FDB022),
+    noteText: Color(0xFFFEC84B),
+    isDark: true,
+  );
+
+  /// شبكة الرسوم ونصوص محاورها في الوضع الفاتح (الداكن يشتقّها من `line`/`muted`).
+  static const chartGridLight = Color(0xFFE7EEE9);
+  static const chartTickLight = Color(0xFF66756C);
+
+  @override
+  ImdColors copyWith() => this;
+
+  @override
+  ImdColors lerp(ThemeExtension<ImdColors>? other, double t) =>
+      (other is ImdColors && t >= .5) ? other : this;
+}
+
+/// ألوانٌ مشتقة تتبّع الوضع (فاتح/داكن) — تحفظ ما كان يُكتب صريحًا في الشاشات
+/// (`c.isDark ? Color(0x…) : Color(0x…)`) فتبقى القيم الصريحة هنا وحدها.
+///
+/// تُقرأ كبقية الرموز من `context.imd`. إضافة لونٍ جديد تكون هنا لا في شاشة.
+extension ImdColorsDerived on ImdColors {
+  // ───── حالات المرور والتحديد
+  /// خلفية رأس عمودٍ قابلٍ للفرز عند المرور.
+  Color get headerHover => isDark ? const Color(0xFF26262A) : hover;
+
+  /// خلفية صفّ/بطاقة عند المرور.
+  Color get rowHover => isDark ? const Color(0xFF26262A) : tableHead;
+
+  /// حدّ زرٍّ ثانويٍّ عند المرور.
+  Color get lineHover => isDark ? const Color(0xFF52525B) : const Color(0xFFB9B9C6);
+
+  /// خلفية زرٍّ هدّامٍ ناعمٍ عند المرور.
+  Color get dangerHover => isDark ? const Color(0x40F97066) : const Color(0xFFFDD5D1);
+
+  // ───── أسطحٌ معكوسة (داكنةٌ في الفاتح، رماديةٌ داكنةٌ في الداكن)
+  Color get inverse => isDark ? const Color(0xFF303036) : text;
+  Color get inverseLine => isDark ? const Color(0xFF3F3F46) : text;
+  Color get onInverse => const Color(0xFFFFFFFF);
+  Color get onInverseSoft => const Color(0x1AFFFFFF);
+  Color get onInverseSoft2 => const Color(0x1FFFFFFF);
+  Color get onInverseText => const Color(0xFFE4E4E7);
+  Color get onInverseMuted => const Color(0xFF9DB3A6);
+
+  /// نصٌّ فوق زرٍّ خلفيّته [text] نفسه (أبيض في الفاتح، داكنٌ في الداكن).
+  Color get onText => isDark ? const Color(0xFF171717) : const Color(0xFFFFFFFF);
+
+  /// أبيض ثابت للنص فوق شارةٍ ملوّنة (عدّاد التنبيهات).
+  Color get onBadge => const Color(0xFFFFFFFF);
+
+  // ───── حقولٌ ولوحات
+  Color get fieldFill => isDark ? bg : const Color(0xFFEEF1EE);
+  Color get panelFill => isDark ? bg : const Color(0xFFF7FAF8);
+  Color get toolbarFill => isDark ? surface : const Color(0xFFF2F7F5);
+  Color get toolbarLine => isDark ? line : const Color(0xFFDFE9E4);
+  Color get popupLine => isDark ? const Color(0xFF2C3B35) : const Color(0xFFCFDCD6);
+
+  /// بطاقة معلوماتٍ زرقاء (حدٌّ ونصّ).
+  Color get infoLine => isDark ? const Color(0x5984ADFF) : const Color(0xFFB2CCFF);
+  Color get infoStrong => isDark ? const Color(0xFFB2CCFF) : const Color(0xFF1849A9);
+
+  // ───── ظلال وحجب
+  Color get shadowXs => isDark ? const Color(0x66000000) : const Color(0x0A101828);
+  Color get shadowSm => isDark ? const Color(0x80000000) : const Color(0x14101828);
+  Color get shadowMd => isDark ? const Color(0x99000000) : const Color(0x26101828);
+  Color get shadowHairline => const Color(0x1A101828);
+  Color get shadowPopup => const Color(0x2E0F281E);
+  Color get shadowBase => isDark ? const Color(0xFF000000) : const Color(0xFF101828);
+  Color get scrim => const Color(0x73111111);
+
+  // ───── الشريط العلوي والجانبي
+  /// خلفية الشريط العلوي: شفّافةٌ أكثر مع Mica.
+  Color topbar({required bool mica}) {
+    if (isDark) return mica ? const Color(0x99171717) : const Color(0xEB171717);
+    return mica ? const Color(0x99FFFFFF) : const Color(0xEBFFFFFF);
+  }
+
+  /// نصٌّ ناصعٌ على الشريط الجانبي (الشريط داكنٌ في كل السمات).
+  Color get sideBright => const Color(0xFFFFFFFF);
+
+  /// أسفل تدرّج الشريط الجانبي: أغمق من [side].
+  Color get sideDeep => Color.lerp(side, const Color(0xFF000000), .22)!;
+
+  /// نسخةٌ من السمة بلون تمييزٍ آخر (يُستعمل لتلوين زر حفظٍ بلونٍ مختلف).
+  ImdColors withAccent({required Color accent, required Color accentHover, required Color onAccent}) =>
+      ImdColors(
+        bg: bg,
+        surface: surface,
+        subtle: subtle,
+        hover: hover,
+        line: line,
+        lineStrong: lineStrong,
+        text: text,
+        text2: text2,
+        muted: muted,
+        faint: faint,
+        accent: accent,
+        accentHover: accentHover,
+        accentSoft: accentSoft,
+        ring: ring,
+        onAccent: onAccent,
+        success: success,
+        successSoft: successSoft,
+        danger: danger,
+        dangerSoft: dangerSoft,
+        warn: warn,
+        warnSoft: warnSoft,
+        info: info,
+        infoSoft: infoSoft,
+        side: side,
+        side2: side2,
+        sideHover: sideHover,
+        sideActive: sideActive,
+        sideText: sideText,
+        sideMuted: sideMuted,
+        sideBorder: sideBorder,
+        sideLine: sideLine,
+        tableHead: tableHead,
+        tableRowLine: tableRowLine,
+        noteBg: noteBg,
+        noteBorder: noteBorder,
+        noteText: noteText,
+        isDark: isDark,
+      );
+
+  /// لون التمييز البرتقالي لأزرار الاستلام.
+  ImdColors get orangeAccent => withAccent(
+        accent: const Color(0xFFF39C12),
+        accentHover: const Color(0xFFE08E0B),
+        // نصٌّ داكن على البرتقالي: الأبيض عليه ٢٫٢:١ فقط (WCAG AA يطلب ٤٫٥).
+        onAccent: const Color(0xFF2B1A00),
+      );
+}
+
+extension ImdThemeX on BuildContext {
+  ImdColors get imd => Theme.of(this).extension<ImdColors>() ?? ImdColors.light;
+}
+
+/// مقاسات النظام الثابتة: نصف القطر، وعرض الشريط الجانبي، وارتفاع الشريط
+/// العلوي، وحشوات المحتوى حسب العرض، وأهداف اللمس.
+class ImdSizes {
+  static double get radius => ImdStyle.classic ? 2 : 12; // --ui-radius
+  static const double sideWidth = 290; // .side
+
+  /// عرض درج الجوال: [sideWidth] ثابتُ **سطح المكتب**، وهو على هاتفٍ عرضه ٣٦٠
+  /// يبتلع ٨٠٪ من الشاشة وعلى ٣٢٠ يبتلع ٩٠٪ — فلا يبقى من الصفحة تحته ما
+  /// يُذكّر بمكانك ولا ما تنقر عليه لتغلقه. ثلاثةُ أرباع الشاشة تكفي أطولَ
+  /// بنودِ القائمة («الرقابات والأرشيف») وتُبقي ربعًا ظاهرًا من الصفحة.
+  static double drawerWidth(BuildContext context) {
+    final w = MediaQuery.sizeOf(context).width * .76;
+    return w < sideWidth ? w : sideWidth;
+  }
+  static const double topbarHeight = 59; // .topbar (الجوال)
+
+  /// الشريط الواحد على سطح المكتب: عنوان النافذة والتبويبات والأدوات في صفٍّ واحد.
+  static const double desktopBarHeight = 40;
+  static const EdgeInsets mainPadding = EdgeInsets.symmetric(horizontal: 36, vertical: 28); // ≥1200px
+  static const EdgeInsets mainPaddingMid = EdgeInsets.symmetric(horizontal: 28, vertical: 24); // 901–1199px
+  // `ImdBp.tablet` اسمٌ بديل لـ`mobile` (≤900)، والمنطق يفحص `mobile` أولًا
+  // (`imd_page_chrome.dart`)، فلا يبلغ فرع `tablet` أبدًا: هذه القيمة محفوظةٌ للتوافق.
+  static const EdgeInsets mainPaddingTablet = EdgeInsets.symmetric(horizontal: 14, vertical: 16); // لا تُستعمل فعليًّا
+  static const EdgeInsets mainPaddingMobile = EdgeInsets.symmetric(horizontal: 10, vertical: 12); // ≤900px
+  static double get touchMin => ImdBp.touch ? 46 : 44; // --touch-min
+
+  /// سقفٌ مريح لجدولٍ طويل يُمرَّر تحت رأسٍ ثابت ([ImdTable.maxHeight]).
+  ///
+  /// نسبةٌ من ارتفاع النافذة لا رقمٌ صلب: على شاشةٍ قصيرة لا يبتلع الجدول
+  /// الصفحة كلّها، وعلى شاشةٍ طويلة لا يبقى قزمًا وحولَه فراغ. والحدّان
+  /// يمنعان الطرفين: أقلُّ من ٣٢٠ لا يُظهر صفوفًا كافيةً ليستحقّ التمرير.
+  static double tableMaxHeight(BuildContext context) =>
+      (MediaQuery.sizeOf(context).height * .55).clamp(320, 640);
+
+  // ─────────── النمط المدمج (High-Density)
+  //
+  // **جدول الأصناف ليس نموذج تسجيل.** النموذج يُملأ مرةً فتُفسحه، والجدول
+  // يُملأ عشرين سطرًا فتضيق به الشاشة ويُدفع التمرير بين كل صنفين. فحقوله
+  // أقصر وفواصله أضيق — بلا مساسٍ ببقية الشاشات.
+
+  /// ارتفاع كل عناصر أشرطة الأعلى (تبويبات الصفحة وأزرار الإجراءات بجوارها) —
+  /// واحدٌ للجميع فتقع على خطٍّ أفقيٍّ واحد في كل الشاشات.
+  static double get barControl => ImdDensity.compactTargets ? 36 : touchMin;
+
+  /// ارتفاع الحقل المدمج (بدل [touchMin]). الكثافة العالية تُنزله إلى 28 على
+  /// سطح المكتب وحده — أهداف اللمس لا تُضيَّق.
+  static double get compactField => ImdBp.touch ? 40 : (ImdDensity.isHigh ? 28 : 34);
+
+  /// الفاصل الأفقي بين حقلين مترابطين في السطر (بين أعمدة جدول الإدخال) —
+  /// أضيق من [ImdSizes.mainPadding] وأمثاله عمدًا: يمنع التحام حقلين
+  /// متجاورين بصريًّا بلا إهدار عرضٍ على خمسة أعمدةٍ في سطرٍ واحد.
+  static const double compactGap = 4;
+
+  /// الفاصل الرأسي بين سطرَي صنف (عرض البطاقات على الجوال وحده — جدول
+  /// سطح المكتب يفصل صفوفه بخطوط الشبكة لا بهذه الفجوة).
+  static const double compactRowGap = 2;
+
+  /// حشو الحقل المدمج رأسيًّا — موحَّدٌ على كل حقول الجدول ونموذج السند
+  /// (الصنف والوحدة والكمية والملاحظة...)، فلا يبدو حقلٌ أقصر من أخيه.
+  static const double compactPadV = 6;
+
+  /// حشو الحقل المدمج أفقيًّا.
+  static const double compactPadH = 8;
+
+  /// نصف قطر زوايا الحقل المدمج (بدل [radius] العام).
+  static double get compactRadius => ImdStyle.classic ? 2 : 6;
+  static const String font = 'IBMPlexSansArabic';
+}
+
+/// نقاط التكيّف: ≥1200 واسع، 901–1199 متوسط (لا جوال ولا واسع)، ≤900 جوال، ≤420 جوال صغير.
+///
+/// 900 نقطة التحوّل الوحيدة بين نمط الجوال (Drawer/بطاقات) ونمط سطح المكتب.
+class ImdBp {
+  ImdBp(this.width);
+  factory ImdBp.of(BuildContext context) => ImdBp(MediaQuery.sizeOf(context).width);
+
+  static const double mobileMax = 900;
+
+  final double width;
+  bool get wide => width >= 1200;
+  bool get mobile => width <= mobileMax;
+
+  /// اسمٌ بديل لـ[mobile] للتوافق الرجعي: اللوحي والجوال نمطٌ واحد.
+  bool get tablet => mobile;
+  bool get tiny => width <= 420;
+
+  /// `@media (hover:none) and (pointer:coarse)` ⇒ أهداف لمس 46.
+  static bool get touch =>
+      defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS;
+}
+
+/// مؤشر الفأرة على العناصر القابلة للنقر.
+///
+/// تطبيقات سطح المكتب الأصيلة (ويندوز) تُبقي السهم على الأزرار والصفوف وتحتفظ
+/// بيد الإصبع للروابط وحدها؛ يد الإصبع على كل عنصر علامةُ صفحات الويب. فيبقى
+/// السهم على سطح المكتب، ولا أثر للمؤشر على الجوال أصلًا.
+class ImdCursor {
+  const ImdCursor._();
+
+  /// لعنصر قابل للنقر (زر، صف، بطاقة).
+  static MouseCursor get click => SystemMouseCursors.basic;
+
+  /// لرابط نصّي حقيقي وحده.
+  static MouseCursor get link => SystemMouseCursors.click;
+}
+
+/// ظل البطاقات `--ui-shadow`.
+List<BoxShadow> imdShadow(ImdColors c) => ImdStyle.classic
+    ? const []
+    : [
+      BoxShadow(
+        color: c.isDark ? const Color(0x66000000) : const Color(0x0D101828),
+        blurRadius: 2,
+        offset: const Offset(0, 1),
+      ),
+    ];
+
+/// ظل القوائم المنسدلة والنوافذ الطافية فوق الصفحة — أعمق من [imdShadow]
+/// لأن ما يحمله يطفو فوق المحتوى لا يستقر عليه، فيحتاج فصلًا بصريًّا أوضح.
+List<BoxShadow> imdShadowOverlay(ImdColors c) => ImdStyle.classic
+    ? const []
+    : [
+      BoxShadow(
+        color: c.isDark ? const Color(0x8A000000) : const Color(0x24101828),
+        blurRadius: 28,
+        offset: const Offset(0, 12),
+      ),
+    ];
+
+/// ألوانٌ **لا تتبع السمة عمدًا**: وظيفتها التباين الثابت، لا المظهر.
+///
+/// ورقُ الباركود وQR أبيضٌ ووحداتُهما سوداء في الفاتح والداكن معًا، وإلا فشلت
+/// قراءتها بالماسح؛ وشاشة الكاميرا سوداء خلف الصورة الحيّة دائمًا. تُقرأ من هنا
+/// لا من `Colors.*` حتى يبقى كل لونٍ في التطبيق معرَّفًا في ملف الرموز.
+abstract final class ImdFixedColors {
+  /// خلفية الباركود/QR وورق الطباعة.
+  static const Color paper = Color(0xFFFFFFFF);
+
+  /// وحدات الباركود/QR ونصها.
+  static const Color ink = Color(0xFF000000);
+
+  /// خلفية شاشة الماسح فوق الكاميرا.
+  static const Color cameraBackdrop = ink;
+
+  /// نصوص وأيقونات الماسح فوق الكاميرا.
+  static const Color cameraForeground = paper;
+}
+// ==================== END FILE: lib/core/ui/imd_tokens.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_style.dart ====================
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'imd_density.dart';
+
+/// النمط «الكلاسيكي» الاختياري: مسطّحٌ بلا ظلال وزواياه 2 وخطه أصغر وحدوده
+/// رمادية رفيعة — على طريقة أنظمة سطح المكتب التقليدية (DevExpress).
+///
+/// **اختياريٌّ وفوق السمة لا بديلٌ عنها**: الفاتح والداكن والمحروقات تبقى كما هي
+/// وهذا النمط يعدّل الشكل (زوايا/ظلال/خط/خلفية) فوقها. والقيمة ساكنة كـ[ImdDensity]
+/// لأن [ImdSizes] دوالُّ قراءةٍ ساكنة؛ وبعد التبديل تُعاد إدارة الشجرة كلها
+/// فتلتقطها وتبقى حالة الشاشات.
+class ImdStyle {
+  const ImdStyle._();
+
+  static const String _key = 'imdad.style.classic';
+
+  static final ValueNotifier<bool> notifier = ValueNotifier<bool>(false);
+
+  static bool get classic => notifier.value;
+
+  static Future<void> load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getBool(_key) ?? false;
+      if (v != notifier.value) {
+        notifier.value = v;
+        ImdDensity.rebuildAll();
+      }
+    } catch (_) {
+      // التفضيل كماليّ: تعذّر قراءته يُبقي النمط الحديث.
+    }
+  }
+
+  static Future<void> set(bool on) async {
+    if (notifier.value == on) return;
+    notifier.value = on;
+    ImdDensity.rebuildAll();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_key, on);
+    } catch (_) {
+      // يسري في الجلسة الحالية على أي حال.
+    }
+  }
+
+  static Future<void> toggle() => set(!classic);
+}
+// ==================== END FILE: lib/core/ui/imd_style.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_format.dart ====================
+/// تنسيق الأرقام والتواريخ في النظام.
+///
+/// **الصورة تُقرأ من [ImdNumbers] لا تُثبَّت هنا**: صورةُ الرقم (هندية/لاتينية)
+/// وفاصلا الآلاف والعشريّ وخاناتُ الكميات والمبالغ كلُّها إعداداتٌ في «الأرقام
+/// والعملات»، تُزامَن مع بقية الإعدادات فلا يصدر سندان بصيغتين.
+///
+/// الافتراض كما كان: أرقامٌ هندية، فاصلةٌ للآلاف «,» ونقطةٌ للعشريّ «.» لا
+/// علامتا `ar-EG` المرتفعتان «٬ ٫» — الأخيرتان تُطبعان شرطةً معلّقة فوق السطر
+/// يظنها القارئ غبارًا على الورقة، وفي بعض الخطوط لا تظهران أصلًا. وهما
+/// متاحتان لمن أرادهما من الإعدادات.
+library;
+
+import '../../domain/iso_date.dart';
+import 'imd_numbers.dart';
+
+/// يحوّل أرقام نصٍّ إلى صورة **أرقام الشاشات** المختارة.
+///
+/// اسمُها من يوم كانت الصورة هنديةً دائمًا؛ وهي الآن تتبع الإعداد، فإن اختير
+/// اللاتيني أعادت النصّ كما هو. تُستعمل للتواريخ والمراجع المُركَّبة نصيًّا.
+String arDigits(String s) => ImdNumbers.toDigits(s, ImdNumbers.current.uiDigits);
+
+/// رقمٌ للعرض: مجموعٌ بفاصل الآلاف، بلا أصفارٍ عشرية زائدة، بصورة الشاشات.
+String nf(num? n) => ImdNumbers.format(n);
+
+/// مبلغٌ للعرض: كـ[nf] لكن بخاناتٍ عشرية **ثابتة** لا تُقصّ — المبلغ يُدقَّق
+/// بخاناته، و«١٢٠» ليست «١٢٠٫٠٠» في كشفٍ مالي.
+String nfMoney(num? n) => ImdNumbers.format(n, money: true);
+
+/// تاريخٌ للعرض بالصيغة الموحَّدة للنظام: `2026-10-01` (سنة-شهر-يوم، بلا «م»).
+String arDate(DateTime d) => fmtDate(d);
+
+/// الصيغة الموحَّدة للتاريخ في كل النظام: `سنة-شهر-يوم` — `2026-10-22` بلا «م».
+///
+/// قرار المالك 2026-10-22: كانت `يوم-شهر-سنة` (`22-10-2026`، قرار 2026-10-14)،
+/// والمطلوب السنة أولًا في النظام كله شاشةً وطباعة.
+String fmtDate(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+/// تاريخٌ مخزَّن (`YYYY-MM-DD`، وربما بوقتٍ بعده) للعرض بصيغة النظام
+/// `2026-10-22` وبأرقام الشاشات. ما لا يُفهم يُعاد كما هو، والفارغ يبقى فارغًا،
+/// والمستحيل (`2026-02-30`) لا يُدوَّر إلى يومٍ آخر ([parseIsoDay]).
+String arDay(String iso) {
+  final d = parseIsoDay(iso);
+  return d == null ? arDigits(iso) : arDateText(fmtDate(d));
+}
+
+/// تاريخٌ بأرقام الشاشات **معزولٌ باتجاه يسار-يمين** متى كانت الأرقام هندية.
+///
+/// الأرقام الهندية مع «-» بينها لا تتماسك اتجاهًا واحدًا في سطرٍ عربي (قاعدة
+/// الاتجاه الثنائي تضمّ الفاصل إلى الأرقام اللاتينية وحدها)، فيُرى
+/// `٢٠٢٦-١٠-٢٢` مقلوبًا `٢٢-١٠-٢٠٢٦`. العزل (LRI…PDI) يُبقيه كما كُتب.
+String arDateText(String latinDate) {
+  final s = arDigits(latinDate);
+  return s == latinDate ? s : '\u2066$s\u2069';
+}
+
+/// صيغة التاريخ المخزَّنة في قاعدة البيانات (YYYY-MM-DD) — تُرتَّب نصيًّا.
+String isoDay(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+// ==================== END FILE: lib/core/ui/imd_format.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_numbers.dart ====================
+import 'package:flutter/foundation.dart';
+
+/// صورةُ الأرقام: هنديةٌ (٠١٢٣) أو لاتينية (0123).
+enum ImdDigits {
+  arabic('arabic', 'عربية (٠١٢٣٤٥٦٧٨٩)'),
+  latin('latin', 'لاتينية (0123456789)');
+
+  const ImdDigits(this.id, this.label);
+  final String id;
+  final String label;
+
+  static ImdDigits of(Object? v) =>
+      values.firstWhere((d) => d.id == v, orElse: () => arabic);
+}
+
+/// تفضيلات تنسيق الأرقام — تُحفظ في القاعدة فتُزامَن: صورةُ الرقم في المطبوعات
+/// معيارٌ للجهة كلها لا تفضيلُ جهاز، فلا يصدر سندان بصيغتين.
+@immutable
+class ImdNumberPrefs {
+  const ImdNumberPrefs({
+    this.uiDigits = ImdDigits.arabic,
+    this.printDigits = ImdDigits.latin,
+    this.thousands = ',',
+    this.decimal = '.',
+    this.qtyDecimals = 3,
+    this.moneyDecimals = 2,
+  });
+
+  /// أرقام الشاشات.
+  final ImdDigits uiDigits;
+
+  /// أرقام المطبوعات — لاتينيةٌ افتراضًا لتطابق ملفات Excel/Word المعتمدة.
+  final ImdDigits printDigits;
+
+  /// فاصل الآلاف: `,` أو `٬` أو مسافةٌ رفيعة أو لا شيء.
+  final String thousands;
+
+  /// الفاصل العشري: `.` أو `٫`.
+  final String decimal;
+
+  /// أقصى خاناتٍ عشرية للكميات — تُحذف أصفارُها الزائدة (٢٫٥٠٠ ⇒ ٢٫٥).
+  final int qtyDecimals;
+
+  /// خانات المبالغ — **ثابتةٌ لا تُقصّ**: ٣٠٠٠٠٫٠٠ لا ٣٠٠٠٠.
+  final int moneyDecimals;
+
+  /// خياراتُ الفواصل المعروضة في الإعدادات.
+  static const thousandsOptions = <(String, String)>[
+    (',', 'فاصلة  ١٢٣,٤٥٦'),
+    ('٬', 'فاصلة عربية  ١٢٣٬٤٥٦'),
+    (' ', 'مسافة  ١٢٣ ٤٥٦'),
+    ('', 'بلا فاصل  ١٢٣٤٥٦'),
+  ];
+
+  static const decimalOptions = <(String, String)>[
+    ('.', 'نقطة  ١٢٫٥ ⇠ 12.5'),
+    ('٫', 'فاصلة عربية  ١٢٫٥'),
+  ];
+
+  ImdNumberPrefs copyWith({
+    ImdDigits? uiDigits,
+    ImdDigits? printDigits,
+    String? thousands,
+    String? decimal,
+    int? qtyDecimals,
+    int? moneyDecimals,
+  }) =>
+      ImdNumberPrefs(
+        uiDigits: uiDigits ?? this.uiDigits,
+        printDigits: printDigits ?? this.printDigits,
+        thousands: thousands ?? this.thousands,
+        decimal: decimal ?? this.decimal,
+        qtyDecimals: qtyDecimals ?? this.qtyDecimals,
+        moneyDecimals: moneyDecimals ?? this.moneyDecimals,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'uiDigits': uiDigits.id,
+        'printDigits': printDigits.id,
+        'thousands': thousands,
+        'decimal': decimal,
+        'qtyDecimals': qtyDecimals,
+        'moneyDecimals': moneyDecimals,
+      };
+
+  /// يقرأ ما حُفظ، ويتجاهل أي قيمةٍ خارج المدى — صفٌّ تالفٌ لا يكسر كل رقمٍ
+  /// في النظام، بل يعود بالافتراضات.
+  factory ImdNumberPrefs.fromMap(Map<String, dynamic> m) {
+    int clampInt(Object? v, int fallback) {
+      final n = v is num ? v.toInt() : int.tryParse('${v ?? ''}');
+      if (n == null || n < 0 || n > 3) return fallback;
+      return n;
+    }
+
+    String pick(Object? v, List<(String, String)> options, String fallback) {
+      final s = v is String ? v : null;
+      if (s == null) return fallback;
+      return options.any((o) => o.$1 == s) ? s : fallback;
+    }
+
+    const d = ImdNumberPrefs();
+    return ImdNumberPrefs(
+      uiDigits: ImdDigits.of(m['uiDigits']),
+      printDigits: m['printDigits'] == null
+          ? d.printDigits
+          : ImdDigits.of(m['printDigits']),
+      thousands: pick(m['thousands'], thousandsOptions, d.thousands),
+      decimal: pick(m['decimal'], decimalOptions, d.decimal),
+      qtyDecimals: clampInt(m['qtyDecimals'], d.qtyDecimals),
+      moneyDecimals: clampInt(m['moneyDecimals'], d.moneyDecimals),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ImdNumberPrefs &&
+      other.uiDigits == uiDigits &&
+      other.printDigits == printDigits &&
+      other.thousands == thousands &&
+      other.decimal == decimal &&
+      other.qtyDecimals == qtyDecimals &&
+      other.moneyDecimals == moneyDecimals;
+
+  @override
+  int get hashCode => Object.hash(
+      uiDigits, printDigits, thousands, decimal, qtyDecimals, moneyDecimals);
+}
+
+/// مصدرُ تنسيق الأرقام الوحيد في النظام — الشاشات والمطبوعات والتصدير.
+///
+/// صورةُ الرقم كانت مُثبَّتةً في الشِّفرة في موضعين لا يعرف أحدهما الآخر:
+/// `nf()` تكتب هنديًّا بفاصلةٍ ونقطة، و`printNum()/printMoney()` تكتبان
+/// لاتينيًّا بـ`intl`. فمن أراد تغيير خانات المبالغ أو فاصل الآلاف لم يجد
+/// مكانًا يغيّره منه. وهذه الحالة ساكنةٌ كـ`ImdDensity`: `nf()` دالّةٌ
+/// عامّةٌ تُستدعى من ثمانمئة موضع، فلا سبيل إلى تمرير `context` إليها.
+class ImdNumbers {
+  const ImdNumbers._();
+
+  /// مفتاح الصفّ في `app_settings` — يُزامَن مع بقية الإعدادات.
+  static const String key = 'numbers';
+
+  static final ValueNotifier<ImdNumberPrefs> notifier =
+      ValueNotifier<ImdNumberPrefs>(const ImdNumberPrefs());
+
+  static ImdNumberPrefs get current => notifier.value;
+
+  /// يُستبدل التفضيل ويُعلَن للمستمعين. الحفظ في القاعدة مسؤولية المُنادي
+  /// (`core/ui` لا يعرف طبقة البيانات).
+  static void apply(ImdNumberPrefs p) {
+    if (notifier.value != p) notifier.value = p;
+  }
+
+  static const _arabic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+
+  /// يحوّل أرقام [s] إلى الصورة [d] — ويعيدها كما هي إن كانت لاتينية.
+  static String toDigits(String s, ImdDigits d) {
+    if (d == ImdDigits.latin) return s;
+    final b = StringBuffer();
+    for (final r in s.runes) {
+      if (r >= 0x30 && r <= 0x39) {
+        b.write(_arabic[r - 0x30]);
+      } else {
+        b.writeCharCode(r);
+      }
+    }
+    return b.toString();
+  }
+
+  /// صياغةُ رقمٍ بالفواصل والخانات المختارة.
+  ///
+  /// [money] يُثبّت الخانات العشرية ولا يقصّ أصفارها؛ وغيره يقصّها.
+  /// [forPrint] يختار صورةَ أرقام المطبوعات بدل أرقام الشاشات.
+  static String format(num? n, {bool money = false, bool forPrint = false}) {
+    final p = current;
+    final v = (n == null || (n is double && (n.isNaN || n.isInfinite))) ? 0 : n;
+    final neg = v < 0;
+    final abs = v.abs();
+    final places = money ? p.moneyDecimals : p.qtyDecimals;
+    final fixed = abs.toStringAsFixed(places);
+    final dot = fixed.indexOf('.');
+    final intPart = dot < 0 ? fixed : fixed.substring(0, dot);
+    var frac = dot < 0 ? '' : fixed.substring(dot + 1);
+    // الكميات تُقصّ أصفارها الزائدة؛ والمبالغ تبقى بخاناتها كما تُدقَّق.
+    if (!money) frac = frac.replaceFirst(RegExp(r'0+$'), '');
+
+    final grouped = StringBuffer();
+    for (var i = 0; i < intPart.length; i++) {
+      if (i > 0 && (intPart.length - i) % 3 == 0) grouped.write(p.thousands);
+      grouped.write(intPart[i]);
+    }
+    var out = grouped.toString();
+    if (frac.isNotEmpty) out = '$out${p.decimal}$frac';
+    // علامةُ الاتجاه قبل السالب: وإلا قفزت الشرطة إلى آخر الرقم في سطرٍ عربي.
+    if (neg && abs != 0) out = '؜-$out';
+    return toDigits(out, forPrint ? p.printDigits : p.uiDigits);
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_numbers.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_density.dart ====================
+import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'imd_style.dart';
+import 'imd_tokens.dart';
+
+/// وضع «الكثافة العالية»: صفوفٌ ومسافاتٌ أضيق ليتّسع الجدول لبياناتٍ أكثر.
+///
+/// **القيمة ساكنة لا سياقية** كـ[ImdBp.touch]: مقاسات [ImdSizes] دوالُّ قراءةٍ
+/// ساكنة تُستدعى من مئات المواضع، فتحويلها كلها إلى `context` يكسر توقيعاتها.
+/// وبعد التبديل تُعاد إدارة الشجرة كلها بـ[rebuildAll] فتلتقط القيمة الجديدة
+/// وتبقى حالة الشاشات كما هي.
+///
+/// **لا يمسّ أهداف اللمس**: على الجوال (أندرويد) تبقى الحقول والأزرار بمقاسها
+/// المريح للإصبع، والتضييق يقع على حشوات الجداول والصفحات وحدها.
+class ImdDensity {
+  const ImdDensity._();
+
+  static const String _key = 'imdad.density.high';
+
+  /// يُستمع إليه لإظهار حالة المفتاح (شريط الحالة).
+  static final ValueNotifier<bool> notifier = ValueNotifier<bool>(false);
+
+  static bool get isHigh => notifier.value;
+
+  /// الكثافة العالية فعّالةٌ فعلًا: على اللمس لا تُضيَّق الأهداف.
+  static bool get compactTargets => isHigh && !ImdBp.touch;
+
+  /// حشوة خلية جسم الجدول رأسيًّا.
+  static double get cellPadV => isHigh ? 4 : 9;
+
+  /// حشوة خلية رأس الجدول رأسيًّا.
+  static double get headPadV => isHigh ? 6 : 10;
+
+  /// حجم خطّ خلايا الجسم.
+  static double get cellFont => ImdStyle.classic ? 12 : (isHigh ? 12.5 : 13.5);
+
+  /// الفاصل بين بطاقات الصفوف على الجوال.
+  static double get cardGap => isHigh ? 6 : 10;
+
+  /// عامل تصغير المسافات بين لوحات الصفحة (≤ 1).
+  static double get spaceFactor => isHigh ? .6 : 1;
+
+  /// يقرأ التفضيل المحفوظ — يُنادى مرةً عند إقلاع القشرة.
+  static Future<void> load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getBool(_key) ?? false;
+      if (v != notifier.value) {
+        notifier.value = v;
+        rebuildAll();
+      }
+    } catch (_) {
+      // التفضيل كماليّ: تعذّر قراءته يُبقي الوضع المريح.
+    }
+  }
+
+  /// يبدّل الوضع ويحفظه ويُعيد رسم الواجهة.
+  static Future<void> set(bool high) async {
+    if (notifier.value == high) return;
+    notifier.value = high;
+    rebuildAll();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_key, high);
+    } catch (_) {
+      // الحفظ كماليّ؛ الوضع يسري في الجلسة الحالية على أي حال.
+    }
+  }
+
+  static Future<void> toggle() => set(!isHigh);
+
+  /// يُعلِّم كل عناصر الشجرة للإعادة دون هدمها (الحالة محفوظة).
+  ///
+  /// هو ما يفعله الإطار نفسه عند تغيّر السمة أو اللغة. يُؤجَّل لما بعد الإطار
+  /// الحالي لأنه قد يُنادى من داخل `build`/معالج نقر.
+  static void rebuildAll() {
+    void mark(Element e) {
+      e.markNeedsBuild();
+      e.visitChildren(mark);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final root = WidgetsBinding.instance.rootElement;
+      if (root != null) mark(root);
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_density.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_section_theme.dart ====================
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'imd_density.dart';
+
+/// هل يأخذ قسم المحروقات لوحةَ ألوانٍ مستقلّة عن الإمداد؟
+///
+/// كان القسم يُطبّق لوحةً برتقاليةً خاصّةً به ([ImdColors.fuelLight] /
+/// [ImdColors.fuelDark]) بلا خيار، فيبدو التطبيق الواحد تطبيقَين: ألوانُ
+/// الأزرار والروابط والشارات تتبدّل كلّها بتبديل القسم، ومن يعمل في القسمين
+/// معًا يرى هويّتَين لا هويّة.
+///
+/// فالافتراض الآن **موحَّد**: المحروقات بأخضر الإمداد نفسه على وندوز وأندرويد،
+/// ومن أراد تمييز القسم باللون أعاده من الإعدادات. واللوحة البرتقالية باقيةٌ
+/// كما هي، لا تُحذف — التبديل خيارٌ لا هدم.
+///
+/// القيمة ساكنة كـ[ImdDensity] و[ImdStyle]: السمة تُبنى في `_themeFor` من
+/// قراءةٍ ساكنة، وبعد التبديل تُعاد إدارة الشجرة كلها فتلتقطها.
+class ImdSectionTheme {
+  const ImdSectionTheme._();
+
+  static const String _key = 'imdad.theme.fuelIdentity';
+
+  /// يُستمع إليه لإظهار حالة المفتاح في الإعدادات.
+  static final ValueNotifier<bool> notifier = ValueNotifier<bool>(false);
+
+  /// `true` ⇒ المحروقات بلوحته البرتقالية؛ `false` (الافتراض) ⇒ لوحة الإمداد.
+  static bool get distinctFuel => notifier.value;
+
+  static Future<void> load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getBool(_key) ?? false;
+      if (v != notifier.value) {
+        notifier.value = v;
+        ImdDensity.rebuildAll();
+      }
+    } catch (_) {
+      // التفضيل كماليّ: تعذّر قراءته يُبقي اللوحة الموحَّدة.
+    }
+  }
+
+  static Future<void> set(bool on) async {
+    if (notifier.value == on) return;
+    notifier.value = on;
+    ImdDensity.rebuildAll();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_key, on);
+    } catch (_) {
+      // يسري في الجلسة الحالية على أي حال.
+    }
+  }
+
+  static Future<void> toggle() => set(!distinctFuel);
+}
+// ==================== END FILE: lib/core/ui/imd_section_theme.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_fonts.dart ====================
+// الكتالوج انتقل إلى `domain/imd_fonts.dart` (بيانات خالصة تقرؤها قواعد الطباعة
+// في domain). يبقى هذا الملف تصديرًا له فلا يتغيّر مستوردوه.
+export '../../domain/imd_fonts.dart';
+// ==================== END FILE: lib/core/ui/imd_fonts.dart ====================
+
+// ==================== FILE: lib/domain/imd_fonts.dart ====================
+/// خطوط الواجهة المتاحة للاختيار من «بيانات الجهة والمظهر».
+///
+/// **معايير الاختيار** (نظام محاسبي لا موقع دعائي):
+/// • أوزان ثابتة متعددة — لتتمايز العناوين عن الحقول عن المجاميع.
+/// • أرقام متساوية العرض — فتتراصف خانات الجداول عموديًا.
+/// • بلا زخرفة — الخط المزخرف يُتعب عين المحاسب ويتداخل مع خانات الإدخال.
+///
+/// خط `Amiri` غير مطروح هنا عمدًا لهذا السبب، ويبقى مستعمَلًا في **الطباعة**
+/// وحدها حيث يُطلب الطابع الرسمي الكلاسيكي.
+library;
+
+/// خط واجهة واحد بوصفه المعروض للمستخدم.
+class ImdFont {
+  const ImdFont(this.family, this.label, this.note);
+
+  /// اسم العائلة كما هو مسجَّل في `pubspec.yaml`.
+  final String family;
+
+  /// الاسم المعروض في الإعدادات.
+  final String label;
+
+  /// وصف مختصر يعين المستخدم على الاختيار.
+  final String note;
+}
+
+class ImdFonts {
+  const ImdFonts._();
+
+  static const String defaultFamily = 'IBMPlexSansArabic';
+
+  static const List<ImdFont> all = [
+    ImdFont('IBMPlexSansArabic', 'IBM Plex Sans Arabic',
+        'هندسي رسمي — مريح في الجداول الطويلة والتقارير المالية'),
+    ImdFont('Tajawal', 'تجوال (Tajawal)',
+        'مصمَّم للواجهات — أوضحها في الأحجام الصغيرة'),
+    ImdFont('Cairo', 'القاهرة (Cairo)',
+        'هندسي حديث بزوايا صريحة — شائع في أنظمة ERP العربية'),
+    ImdFont('NotoSansArabic', 'Noto Sans Arabic',
+        'دعم شامل للشاشات والدقات — يطبع جيدًا مباشرة'),
+  ];
+
+  /// يعيد اسم عائلة صالحًا: ما لم يكن معروفًا يسقط إلى الافتراضي، فلا تنكسر
+  /// الواجهة بقيمة قديمة أو ملف بيانات من إصدار آخر.
+  static String normalize(String? family) {
+    if (family == null || family.isEmpty) return defaultFamily;
+    for (final f in all) {
+      if (f.family == family) return family;
+    }
+    return defaultFamily;
+  }
+
+  static ImdFont of(String family) =>
+      all.firstWhere((f) => f.family == normalize(family));
+}
+
+/// خط طباعة واحد: عائلته وملفّاه (عادي وعريض) ووصفه.
+class ImdPrintFont {
+  const ImdPrintFont(this.family, this.label, this.note, this.regular, this.bold);
+
+  final String family;
+  final String label;
+  final String note;
+
+  /// مسارا الملفين داخل الأصول — الطباعة تحمّل الملف لا اسم العائلة.
+  final String regular;
+  final String bold;
+}
+
+/// خطوط **الطباعة** — منفصلة عن خطوط الواجهة لأن الورق غير الشاشة.
+///
+/// المطروح هنا ما نملك حقّ توزيعه فعلًا (رخصة OFL). خطوط مثل
+/// Traditional Arabic و Simplified Arabic و Arial ملكية لمايكروسوفت وأدوبي،
+/// وتضمينها في تطبيق يُوزَّع مخالفة ترخيص — فلا تُطرح مهما كانت مألوفة.
+class ImdPrintFonts {
+  const ImdPrintFonts._();
+
+  static const String defaultFamily = 'Amiri';
+
+  static const List<ImdPrintFont> all = [
+    ImdPrintFont(
+      'Amiri',
+      'أميري (Amiri)',
+      'طابع رسمي كلاسيكي — الأقرب إلى السندات الحكومية المطبوعة',
+      'assets/fonts/Amiri-Regular.ttf',
+      'assets/fonts/Amiri-Bold.ttf',
+    ),
+    ImdPrintFont(
+      'IBMPlexSansArabic',
+      'IBM Plex Sans Arabic',
+      'واضح في الجداول الكثيفة — مناسب للتقارير والكشوف',
+      'assets/fonts/IBMPlexSansArabic-Regular.ttf',
+      'assets/fonts/IBMPlexSansArabic-Bold.ttf',
+    ),
+    ImdPrintFont(
+      'Tajawal',
+      'تجوال (Tajawal)',
+      'حروف بسيطة بلا حواف معقّدة — الأنسب للطابعة الحرارية',
+      'assets/fonts/Tajawal-Regular.ttf',
+      'assets/fonts/Tajawal-Bold.ttf',
+    ),
+    ImdPrintFont(
+      'Cairo',
+      'القاهرة (Cairo)',
+      'هندسي صريح — أرقام منتظمة في جداول الجرد',
+      'assets/fonts/Cairo-Regular.ttf',
+      'assets/fonts/Cairo-Bold.ttf',
+    ),
+    ImdPrintFont(
+      'NotoSansArabic',
+      'Noto Sans Arabic',
+      'يطبع جيدًا على مختلف الطابعات والدقات',
+      'assets/fonts/NotoSansArabic-Regular.ttf',
+      'assets/fonts/NotoSansArabic-Bold.ttf',
+    ),
+  ];
+
+  /// يعيد خطًا صالحًا دائمًا: المجهول يسقط إلى الافتراضي فلا تفشل الطباعة.
+  static ImdPrintFont of(String? family) {
+    for (final f in all) {
+      if (f.family == family) return f;
+    }
+    return all.first;
+  }
+
+  static String normalize(String? family) => of(family).family;
+}
+// ==================== END FILE: lib/domain/imd_fonts.dart ====================
+
+// ==================== FILE: lib/domain/iso_date.dart ====================
+/// تحليلٌ صارم لتواريخ `YYYY-MM-DD` (الصيغة المخزَّنة في القاعدة).
+///
+/// `DateTime.tryParse` متسامح: يُدوِّر «2026-02-30» إلى 2026-03-02 و«2026-13-45»
+/// إلى تاريخٍ في السنة التالية بدل رفضهما. فالتاريخ الذي يصل من المزامنة أو
+/// الاستيراد بقيمةٍ غير صالحة كان يُطبع على السند **تاريخًا آخر صحيح الشكل**
+/// — خطأٌ محاسبي لا يراه أحد. هنا يُقارَن الناتج بالمدخل: ما لم يعد كما كُتب
+/// فليس تاريخًا.
+library;
+
+final RegExp _isoDay = RegExp(r'^(\d{4})-(\d{2})-(\d{2})');
+
+/// اليوم في أول [s] (`2026-05-15`، أو ختمٌ يبدأ به مثل `2026-05-15T10:00` و
+/// `2026-05-15 10:00:00`)، أو `null` إن لم يكن تاريخًا حقيقيًّا.
+DateTime? parseIsoDay(String s) {
+  final m = _isoDay.firstMatch(s.trim());
+  if (m == null) return null;
+  final y = int.parse(m.group(1)!), mo = int.parse(m.group(2)!), d = int.parse(m.group(3)!);
+  if (mo < 1 || mo > 12 || d < 1) return null;
+  final date = DateTime(y, mo, d);
+  return date.year == y && date.month == mo && date.day == d ? date : null;
+}
+
+/// هل [s] تاريخ `YYYY-MM-DD` حقيقي **بالضبط** (لا ختمٌ ولا لاحقة)؟
+bool isIsoDay(String s) => s.length == 10 && parseIsoDay(s) != null;
+// ==================== END FILE: lib/domain/iso_date.dart ====================
+
+// ==================== FILE: lib/domain/date_span.dart ====================
+/// مدى تواريخ مغلق الطرفين، بصيغة `yyyy-MM-dd`.
+///
+/// مستقلٌّ عن أي وحدة عمل: تستعمله خطط الوجبات والتقارير معًا. وكان في
+/// `meal_plan.dart` فاستُخرج هنا لئلا تستورد التقاريرُ الخططَ لتحصل على مدى.
+///
+/// والتواريخ نصوص لا `DateTime`: هكذا تُخزَّن في القاعدة، والمقارنة النصية على
+/// `yyyy-MM-dd` ترتيبها ترتيب الزمن — فلا تحويل ولا منطقة زمنية تُزيح يومًا.
+class DateSpan {
+  const DateSpan(this.start, this.end);
+
+  final String start;
+  final String end;
+
+  static String ymd(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+
+  static DateSpan dayOf(DateTime d) {
+    final s = ymd(d);
+    return DateSpan(s, s);
+  }
+
+  /// عدد الأيام شاملًا الطرفين. مدى غير صالح ⇒ صفر.
+  int get days {
+    final a = DateTime.tryParse(start);
+    final b = DateTime.tryParse(end);
+    if (a == null || b == null || b.isBefore(a)) return 0;
+    return b.difference(a).inDays + 1;
+  }
+
+  bool get isValid => days > 0;
+
+  List<String> get dates {
+    final a = DateTime.tryParse(start);
+    final b = DateTime.tryParse(end);
+    if (a == null || b == null || b.isBefore(a)) return const [];
+    return [
+      for (var d = a; !d.isAfter(b); d = d.add(const Duration(days: 1))) ymd(d),
+    ];
+  }
+
+  bool contains(String date) =>
+      date.compareTo(start) >= 0 && date.compareTo(end) <= 0;
+
+  /// هل يتقاطع المداان؟
+  bool overlaps(DateSpan other) =>
+      start.compareTo(other.end) <= 0 && other.start.compareTo(end) <= 0;
+
+  @override
+  String toString() => '$start → $end';
+
+  @override
+  bool operator ==(Object other) =>
+      other is DateSpan && other.start == start && other.end == end;
+
+  @override
+  int get hashCode => Object.hash(start, end);
+}
+
+/// نوع الفترة في شاشات التقارير.
+class PeriodKind {
+  static const String daily = 'DAILY';
+  static const String weekly = 'WEEKLY';
+  static const String monthly = 'MONTHLY';
+  static const String custom = 'CUSTOM';
+
+  static const List<String> all = [daily, weekly, monthly, custom];
+
+  static const Map<String, String> labels = {
+    daily: 'يومي',
+    weekly: 'أسبوعي',
+    monthly: 'شهري',
+    custom: 'فترة مخصصة',
+  };
+
+  static String label(String v) => labels[v] ?? v;
+
+  /// يحلّ الفترة حول تاريخ مرجعي.
+  ///
+  /// الأسبوع يبدأ **السبت** لا الاثنين: أسبوع العمل هنا سبت–جمعة، وبدؤه
+  /// بالاثنين يقسم الأسبوع الميداني نصفين على تقريرين.
+  static DateSpan resolve(
+    String kind,
+    String anchor, {
+    String customStart = '',
+    String customEnd = '',
+  }) {
+    final at = DateTime.tryParse(anchor);
+    if (at == null) return DateSpan(anchor, anchor);
+    switch (kind) {
+      case daily:
+        return DateSpan.dayOf(at);
+      case weekly:
+        // DateTime.saturday = 6؛ الإزاحة إلى السبت السابق أو اليوم نفسه.
+        final back = (at.weekday - DateTime.saturday + 7) % 7;
+        final start = at.subtract(Duration(days: back));
+        return DateSpan(DateSpan.ymd(start), DateSpan.ymd(start.add(const Duration(days: 6))));
+      case monthly:
+        return DateSpan(
+          DateSpan.ymd(DateTime(at.year, at.month, 1)),
+          DateSpan.ymd(DateTime(at.year, at.month + 1, 0)),
+        );
+      default:
+        return DateSpan(
+          customStart.isEmpty ? anchor : customStart,
+          customEnd.isEmpty ? anchor : customEnd,
+        );
+    }
+  }
+}
+// ==================== END FILE: lib/domain/date_span.dart ====================
+
+// ==================== FILE: lib/domain/arabic_words.dart ====================
+/// تفقيط المبالغ: «ألفان ومئتان ريال يمني فقط لا غير».
+///
+/// المعدود (ريال) مذكّر فتُستعمل الأعداد بصيغة المذكر. تدعم حتى المليارات،
+/// والكسر يُكتب بوحدته الصغرى (هللة / فلس) إن وُجد.
+library;
+
+const _units = [
+  '', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة', 'سبعة', 'ثمانية', 'تسعة', //
+  'عشرة', 'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر', 'خمسة عشر', 'ستة عشر',
+  'سبعة عشر', 'ثمانية عشر', 'تسعة عشر',
+];
+const _tens = ['', '', 'عشرون', 'ثلاثون', 'أربعون', 'خمسون', 'ستون', 'سبعون', 'ثمانون', 'تسعون'];
+const _hundreds = [
+  '', 'مئة', 'مئتان', 'ثلاثمئة', 'أربعمئة', 'خمسمئة', 'ستمئة', 'سبعمئة', 'ثمانمئة', 'تسعمئة',
+];
+
+/// عددٌ من 1 إلى 999 بالحروف.
+String _below1000(int n) {
+  final parts = <String>[];
+  final h = n ~/ 100;
+  final r = n % 100;
+  if (h > 0) parts.add(_hundreds[h]);
+  if (r > 0) {
+    if (r < 20) {
+      parts.add(_units[r]);
+    } else {
+      final u = r % 10;
+      parts.add(u == 0 ? _tens[r ~/ 10] : '${_units[u]} و${_tens[r ~/ 10]}');
+    }
+  }
+  return parts.join(' و');
+}
+
+/// (المفرد، المثنى، الجمع للـ3-10، التمييز لـ11 فما فوق)
+const _scales = <(String, String, String, String)>[
+  ('ألف', 'ألفان', 'آلاف', 'ألف'),
+  ('مليون', 'مليونان', 'ملايين', 'مليون'),
+  ('مليار', 'ملياران', 'مليارات', 'مليار'),
+];
+
+/// عددٌ صحيحٌ غير سالب بالحروف. الصفر ⇒ «صفر».
+String arabicNumberWords(int n) {
+  if (n == 0) return 'صفر';
+  final groups = <int>[];
+  var rest = n;
+  while (rest > 0) {
+    groups.add(rest % 1000);
+    rest ~/= 1000;
+  }
+  final parts = <String>[];
+  for (var i = groups.length - 1; i >= 0; i--) {
+    final g = groups[i];
+    if (g == 0) continue;
+    if (i == 0) {
+      parts.add(_below1000(g));
+      continue;
+    }
+    final s = _scales[(i - 1).clamp(0, _scales.length - 1)];
+    if (g == 1) {
+      parts.add(s.$1);
+    } else if (g == 2) {
+      parts.add(s.$2);
+    } else if (g <= 10) {
+      parts.add('${_below1000(g)} ${s.$3}');
+    } else {
+      parts.add('${_below1000(g)} ${s.$4}');
+    }
+  }
+  return parts.join(' و');
+}
+
+/// مبلغٌ مالي بالحروف: `amountInWords(2200, major: 'ريال يمني')` ⇒
+/// «ألفان ومئتان ريال يمني فقط لا غير».
+String amountInWords(double amount, {required String major, String minor = 'هللة'}) {
+  final v = amount.abs();
+  // التقريب إلى أقرب جزء من مئة قبل الفصل، فلا يظهر «تسعة وتسعون هللة وتسعمئة…».
+  final total = (v * 100).round();
+  final whole = total ~/ 100;
+  final frac = total % 100;
+  final b = StringBuffer(arabicNumberWords(whole))..write(' $major');
+  if (frac > 0) b.write(' و${arabicNumberWords(frac)} $minor');
+  b.write(' فقط لا غير');
+  return b.toString();
+}
+// ==================== END FILE: lib/domain/arabic_words.dart ====================
+
+// ==================== FILE: lib/domain/app_space.dart ====================
+/// مساحات العمل: الإمداد والتموين، والمحروقات.
+///
+/// **لماذا مساحتان لا قائمةٌ واحدة؟** القسمان يُشغّلهما شخصان مختلفان: أمين
+/// المحروقات لا شأن له بخطط الوجبات ونسب الاستهلاك، وأمين المستودع لا يفتح
+/// تفريدة الوقود. وقائمةٌ واحدة تضع أمام كلٍّ منهما ضعفَ ما يحتاج.
+///
+/// **ولماذا مبدِّل لا بوابة؟** من يملك مساحةً واحدة يدخلها مباشرة بلا شاشة
+/// اختيار يضغط فيها على خياره الوحيد كل يوم. والاختيار لا يُسأل عنه إلا من
+/// يملك المساحتين، ثم يُحفظ فلا يُسأل مرة أخرى.
+library;
+
+class AppSpace {
+  static const String supply = 'supply';
+  static const String fuel = 'fuel';
+
+  /// بندٌ يظهر في المساحتين — الأدلة والإعدادات والتدقيق.
+  static const String both = 'both';
+
+  static const List<String> all = [supply, fuel];
+
+  static const Map<String, String> labels = {
+    supply: 'الإمداد والتموين',
+    fuel: 'المحروقات',
+  };
+
+  static const Map<String, String> descriptions = {
+    supply: 'الأصناف والمستودعات والصرف والاستلام والتغذية اليومية والتقارير',
+    fuel: 'تفريدة الوقود وصرفه وتوريده وتحويله وجرده وسجل المركبات',
+  };
+
+  static const Map<String, String> icons = {
+    supply: 'package',
+    fuel: 'zap',
+  };
+
+  static String label(String v) => labels[v] ?? v;
+
+  /// هل يظهر بندٌ مساحتُه [itemSpace] داخل المساحة [current]؟
+  static bool shows(String itemSpace, String current) =>
+      itemSpace == both || itemSpace == current;
+
+  /// صفحات كل مساحة — ما يُسأل عنه لمعرفة ما يملكه المستخدم.
+  ///
+  /// المشتركة ليست دليلًا على امتلاك مساحة: من يملك الإعدادات وحدها لا يُقال
+  /// إنه صاحب قسم محروقات، وإلا رأى مساحةً فارغة إلا من إعداداتٍ عامة.
+  static const Map<String, List<String>> pages = {
+    fuel: [
+      'fuelDashboard',
+      'fuelAllocations',
+      'fuelMoves',
+      'fuelStocktake',
+      'fuelData',
+      'fuelWarehouses',
+      'fuelUnits',
+      'fuelVehicles',
+      'fuelReports',
+      'fuelConsumption',
+    ],
+    supply: [
+      'items',
+      'stores',
+      'units',
+      'suppliers',
+      'kitchens',
+      'assets',
+      'receive',
+      'issue',
+      'transfer',
+      'returns',
+      'opening',
+      'destruction',
+      'rationOrders',
+      'pendingOrders',
+      'feeding',
+      'mealPlans',
+      'kitchenLog',
+      'ratios',
+      'balances',
+      'stocktake',
+      'reports',
+      'personnel',
+      'linkages',
+    ],
+  };
+
+  /// المساحات التي يملك المستخدم شيئًا فيها فعلًا.
+  ///
+  /// [can] تُجيب: هل له صلاحية عرض هذه الصفحة؟
+  static List<String> availableFor(bool Function(String page) can) => [
+        for (final space in all)
+          if (pages[space]!.any(can)) space,
+      ];
+
+  /// المساحة التي يُفتح عليها التطبيق.
+  ///
+  /// يعود `null` حين يملك المستخدم مساحتين ولم يختر بعد — وحدها الحالة التي
+  /// تستدعي سؤاله. وإن كان المحفوظ لم يعد متاحًا (تغيّرت صلاحياته) لم يُحبس
+  /// في مساحةٍ لا يرى فيها شيئًا.
+  static String? resolve({
+    required List<String> available,
+    String? saved,
+  }) {
+    if (available.isEmpty) return null;
+    if (available.length == 1) return available.first;
+    if (saved != null && available.contains(saved)) return saved;
+    return null;
+  }
+}
+// ==================== END FILE: lib/domain/app_space.dart ====================
+
+// ==================== FILE: lib/domain/menu_doors.dart ====================
+/// أبواب القائمة: بندٌ واحد يفتح شاشةً بتبويبات.
+///
+/// **الباب يُفتح لمن ملك إحدى تبويباته**، والتبويبة تُخفى عمّن لا يملكها —
+/// فالجمع تنظيمٌ للقائمة لا توسيعٌ للأذونات.
+library;
+
+/// تبويبات كل باب، بمعرّفات صلاحياتها.
+const Map<String, List<String>> kMenuDoors = {
+  // الإمداد والتموين
+  'supplyMoves': ['receive', 'issue', 'transfer', 'returns', 'opening', 'destruction'],
+  'supplyOrders': ['rationOrders', 'pendingOrders'],
+  'supplyData': ['items', 'stores', 'units', 'suppliers', 'kitchens', 'assets'],
+  'supplyDaily': ['feeding', 'dailyOperations', 'ratios'],
+  // التشغيل اليومي شاشةٌ بلا صلاحيةٍ خاصة: يراها من يملك الخطط أو سجل
+  // المطبخ. وهو بابٌ داخل باب، ولا دور فيه فلا يتكرر الفحص.
+  'dailyOperations': ['mealPlans', 'kitchenLog'],
+  'supplyReports': ['reports', 'balances'],
+  // حساب المعسكر والاستحقاق: ثلاثة تقارير على الحساب نفسه (المستحق مقابل الواصل)
+  // — الاستحقاق الفعلي لأي نطاق، وسجل المعسكر الشهري، وتصفيته.
+  'campAccounts': ['actualEntitlement', 'campLedger', 'campSettlement'],
+  'supplyAudit': [
+    'auditTrail',
+    'activityIntel',
+    'sensitiveOps',
+    'executiveCmd',
+    'healthOps',
+  ],
+  // المحروقات
+  'fuelData': ['fuelWarehouses', 'fuelUnits', 'fuelVehicles'],
+};
+
+/// هل يُفتح [door] لمن تقول [can] بما يملك؟
+///
+/// **التبويبة التي تحمل اسم بابها تُتخطّى.** بابٌ يشير إلى نفسه يجعل الفحص
+/// يستدعي نفسه بلا نهاية، فيفيض المكدّس وتسقط القائمة كلها — وفي نسخة
+/// الإصدار تظهر مستطيلًا رماديًّا بلا رسالة. والحارس هنا أرخص من تتبّعٍ آخر.
+bool menuDoorAllows(String door, bool Function(String page) can) {
+  final tabs = kMenuDoors[door];
+  if (tabs == null) return false;
+  return tabs.any((p) => p != door && can(p));
+}
+
+/// أبوابٌ تشير إلى أنفسها — يجب أن تبقى فارغة.
+///
+/// تُقرأ في الاختبار لا في التشغيل: `assert` يُنزع من نسخة الإصدار، وهذا
+/// العطل لا يظهر إلا فيها.
+Iterable<String> selfReferencingDoors() =>
+    kMenuDoors.entries.where((e) => e.value.contains(e.key)).map((e) => e.key);
+// ==================== END FILE: lib/domain/menu_doors.dart ====================
+
+// ==================== FILE: lib/domain/diagnostics.dart ====================
+/// منفذ تبليغ الأعطال من `domain/` — بلا استيرادٍ إلى أعلى (CLAUDE.md §8 البند 38).
+///
+/// قواعد domain خالصة لا تعرف `ErrorLogger` (في core). فتبلّغ هنا، و`main` يصل هذا
+/// المنفذ بسجل الأخطاء عند الإقلاع. بلا وصلٍ (الاختبارات) يُهمل البلاغ.
+typedef DomainErrorSink = void Function(String source, Object error, StackTrace? stack);
+
+class DomainDiagnostics {
+  const DomainDiagnostics._();
+
+  static DomainErrorSink? sink;
+
+  static void report(String source, Object error, [StackTrace? stack]) => sink?.call(source, error, stack);
+}
+// ==================== END FILE: lib/domain/diagnostics.dart ====================
