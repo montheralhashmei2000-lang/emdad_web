@@ -216,9 +216,26 @@ describe('home_shell_test', () => {
     });
   });
 
-  // MISSING: lib/features/catalog/items_screen.dart
-  it.skip('الدرج على الجوال يفتح شاشة البند المختار ويُغلق بلا سؤال خروج', () => {
-    // يعتمد على عرض عنوان «إدارة الأصناف» من شاشة ItemsScreen الفعلية (المرحلة 7).
+  it('الدرج على الجوال يفتح شاشة البند المختار ويُغلق بلا سؤال خروج', async () => {
+    const { container } = await renderShell(700);
+
+    fireEvent.click(screen.getAllByText('المزيد')[0]);
+    let drawer!: HTMLElement;
+    await waitFor(() => {
+      const el = container.querySelector(
+        '[data-imd-drawer="true"]',
+      ) as HTMLElement | null;
+      expect(el).not.toBeNull();
+      drawer = el!;
+    });
+
+    fireEvent.click(within(drawer).getByText('الأصناف'));
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-imd-drawer="true"]')).toBeNull();
+      expect(screen.getAllByText('إدارة الأصناف').length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText('إغلاق النظام؟')).toBeNull();
   });
 
   it('زرّ الرجوع والدرج مفتوح يغلق الدرج ولا يغادر الشاشة', async () => {

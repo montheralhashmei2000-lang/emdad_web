@@ -1,4 +1,4 @@
-// ملف تجميع البدائل الصورية الدنيا لشاشات المراحل 7–27 (موسوم بـ // MISSING دون اختراع شاشات وهمية).
+// ملف تجميع البدائل الصورية الدنيا لشاشات المراحل 8–27 (موسوم بـ // MISSING دون اختراع شاشات وهمية).
 // يُستبدل كل مُصدَّر هنا بملفه الفعلي عند الوصول إلى مرحلته دون كسر القشرة.
 
 import { useImdColors } from '../../core/theme/imd_theme';
@@ -39,58 +39,6 @@ export function showSearchModal(_options: {
   readonly onOpenPage: (page: string) => void;
 }): void {
   showImdToast('// MISSING: lib/features/search/search_modal.dart');
-}
-
-// ═════════ المرحلة 7: البيانات الأساسية (١) ═════════
-
-// MISSING: lib/features/catalog/items_screen.dart
-export function ItemsScreen() {
-  return (
-    <MissingScreenStub
-      sourcePath="lib/features/catalog/items_screen.dart"
-      screenName="ItemsScreen"
-    />
-  );
-}
-
-// MISSING: lib/features/catalog/warehouses_screen.dart
-export function WarehousesScreen() {
-  return (
-    <MissingScreenStub
-      sourcePath="lib/features/catalog/warehouses_screen.dart"
-      screenName="WarehousesScreen"
-    />
-  );
-}
-
-// MISSING: lib/features/catalog/suppliers_screen.dart
-export function SuppliersScreen() {
-  return (
-    <MissingScreenStub
-      sourcePath="lib/features/catalog/suppliers_screen.dart"
-      screenName="SuppliersScreen"
-    />
-  );
-}
-
-// MISSING: lib/features/catalog/units_screen.dart
-export function UnitsScreen() {
-  return (
-    <MissingScreenStub
-      sourcePath="lib/features/catalog/units_screen.dart"
-      screenName="UnitsScreen"
-    />
-  );
-}
-
-// MISSING: lib/features/catalog/kitchens_screen.dart
-export function KitchensScreen() {
-  return (
-    <MissingScreenStub
-      sourcePath="lib/features/catalog/kitchens_screen.dart"
-      screenName="KitchensScreen"
-    />
-  );
 }
 
 // ═════════ المرحلة 8: البيانات الأساسية (٢) ═════════

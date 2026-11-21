@@ -6,6 +6,7 @@ import {
   intColumn,
   realColumn,
   textColumn,
+  type CompanionInput,
   type GeneratedColumn,
 } from '../sqlite_driver';
 
@@ -68,6 +69,44 @@ export class AssetsTable extends DriftTable<Asset> {
     return [this.id];
   }
 }
+
+export interface AssetsCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  quantity?: CompanionInput<number>;
+  assetType?: CompanionInput<string>;
+  serialNumber?: CompanionInput<string>;
+  facilityId?: CompanionInput<string>;
+  facilityName?: CompanionInput<string>;
+  beneficiaryUnitId?: CompanionInput<string>;
+  beneficiaryUnitName?: CompanionInput<string>;
+  warehouse?: CompanionInput<string>;
+  status?: CompanionInput<string>;
+  acquisitionDate?: CompanionInput<string>;
+  value?: CompanionInput<number>;
+  lifespanMonths?: CompanionInput<number>;
+  supplierId?: CompanionInput<string>;
+  supplierName?: CompanionInput<string>;
+  invoiceNumber?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+  createdBy?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  updatedAt?: CompanionInput<Date | null>;
+  itemId?: CompanionInput<string>;
+}
+
+export interface AssetsCompanionInsert extends AssetsCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function AssetsCompanion(data: AssetsCompanionFields): AssetsCompanionFields {
+  return data;
+}
+
+AssetsCompanion.insert = function insert(data: AssetsCompanionInsert): AssetsCompanionInsert {
+  return data;
+};
 
 /// عهدة أصل لدى وحدة مستفيدة. [returnedDate] فارغة ⇒ العهدة قائمة.
 export interface AssetAssignment extends Record<string, unknown> {

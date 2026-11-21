@@ -164,6 +164,59 @@ export class IssuesTable extends MovementColumnsTable<Issue> {
   }
 }
 
+export interface MovementCompanionBase extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  refNo?: CompanionInput<string>;
+  date?: CompanionInput<string>;
+  warehouse?: CompanionInput<string>;
+  itemId?: CompanionInput<string>;
+  itemCode?: CompanionInput<string>;
+  itemName?: CompanionInput<string>;
+  unitName?: CompanionInput<string>;
+  factor?: CompanionInput<number>;
+  qty?: CompanionInput<number>;
+  baseQty?: CompanionInput<number>;
+  status?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+  createdBy?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  editCount?: CompanionInput<number>;
+  editLog?: CompanionInput<string>;
+  editedBy?: CompanionInput<string>;
+  cancelReason?: CompanionInput<string>;
+  cancelledBy?: CompanionInput<string>;
+  prevStatus?: CompanionInput<string>;
+}
+
+export interface IssuesCompanionFields extends MovementCompanionBase {
+  targetType?: CompanionInput<number>;
+  recipientDisplay?: CompanionInput<string>;
+  unitId?: CompanionInput<string>;
+  facilityId?: CompanionInput<string>;
+  beneficiaryUnitId?: CompanionInput<string>;
+  beneficiaryUnitName?: CompanionInput<string>;
+  soldierCount?: CompanionInput<number>;
+  durationDays?: CompanionInput<number>;
+  approvedBy?: CompanionInput<string>;
+  rejectReason?: CompanionInput<string>;
+  rejectedBy?: CompanionInput<string>;
+  cylinderAction?: CompanionInput<string>;
+  officerCount?: CompanionInput<number>;
+  receiverName?: CompanionInput<string>;
+}
+
+export interface IssuesCompanionInsert extends IssuesCompanionFields {
+  id: CompanionInput<string>;
+}
+
+export function IssuesCompanion(data: IssuesCompanionFields): IssuesCompanionFields {
+  return data;
+}
+
+IssuesCompanion.insert = function insert(data: IssuesCompanionInsert): IssuesCompanionInsert {
+  return data;
+};
+
 export interface Transfer extends MovementRowFields {
   readonly destWarehouse: string;
   readonly campId: string;
@@ -190,6 +243,30 @@ export class TransfersTable extends MovementColumnsTable<Transfer> {
   }
 }
 
+export interface TransfersCompanionFields extends MovementCompanionBase {
+  destWarehouse?: CompanionInput<string>;
+  campId?: CompanionInput<string>;
+  campName?: CompanionInput<string>;
+  strength?: CompanionInput<number>;
+  durationDays?: CompanionInput<number>;
+  rejectReason?: CompanionInput<string>;
+  cylinderAction?: CompanionInput<string>;
+}
+
+export interface TransfersCompanionInsert extends TransfersCompanionFields {
+  id: CompanionInput<string>;
+}
+
+export function TransfersCompanion(data: TransfersCompanionFields): TransfersCompanionFields {
+  return data;
+}
+
+TransfersCompanion.insert = function insert(
+  data: TransfersCompanionInsert,
+): TransfersCompanionInsert {
+  return data;
+};
+
 export interface ReturnRow extends MovementRowFields {
   readonly party: string;
   readonly beneficiaryUnitId: string;
@@ -215,6 +292,28 @@ export class ReturnsTable extends MovementColumnsTable<ReturnRow> {
     return [this.id];
   }
 }
+
+export interface ReturnsCompanionFields extends MovementCompanionBase {
+  party?: CompanionInput<string>;
+  beneficiaryUnitId?: CompanionInput<string>;
+  beneficiaryUnitName?: CompanionInput<string>;
+  type?: CompanionInput<string>;
+  condition?: CompanionInput<string>;
+  origRef?: CompanionInput<string>;
+  cylinderAction?: CompanionInput<string>;
+}
+
+export interface ReturnsCompanionInsert extends ReturnsCompanionFields {
+  id: CompanionInput<string>;
+}
+
+export function ReturnsCompanion(data: ReturnsCompanionFields): ReturnsCompanionFields {
+  return data;
+}
+
+ReturnsCompanion.insert = function insert(data: ReturnsCompanionInsert): ReturnsCompanionInsert {
+  return data;
+};
 
 export interface OpeningBalance extends Record<string, unknown> {
   readonly id: string;
@@ -247,6 +346,36 @@ export class OpeningBalancesTable extends DriftTable<OpeningBalance> {
     return [this.id];
   }
 }
+
+export interface OpeningBalancesCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  itemId?: CompanionInput<string>;
+  itemCode?: CompanionInput<string>;
+  itemName?: CompanionInput<string>;
+  warehouse?: CompanionInput<string>;
+  qty?: CompanionInput<number>;
+  date?: CompanionInput<string>;
+  setBy?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  breakdown?: CompanionInput<string>;
+}
+
+export interface OpeningBalancesCompanionInsert extends OpeningBalancesCompanionFields {
+  id: CompanionInput<string>;
+  itemId: CompanionInput<string>;
+}
+
+export function OpeningBalancesCompanion(
+  data: OpeningBalancesCompanionFields,
+): OpeningBalancesCompanionFields {
+  return data;
+}
+
+OpeningBalancesCompanion.insert = function insert(
+  data: OpeningBalancesCompanionInsert,
+): OpeningBalancesCompanionInsert {
+  return data;
+};
 
 /// v27: محضر إتلاف
 export interface Destruction extends Record<string, unknown> {
@@ -309,3 +438,25 @@ export class AdjustmentsTable extends MovementColumnsTable<Adjustment> {
     return [this.id];
   }
 }
+
+export interface AdjustmentsCompanionFields extends MovementCompanionBase {
+  sessionId?: CompanionInput<string>;
+  reason?: CompanionInput<string>;
+  approvedBy?: CompanionInput<string>;
+}
+
+export interface AdjustmentsCompanionInsert extends AdjustmentsCompanionFields {
+  id: CompanionInput<string>;
+}
+
+export function AdjustmentsCompanion(
+  data: AdjustmentsCompanionFields,
+): AdjustmentsCompanionFields {
+  return data;
+}
+
+AdjustmentsCompanion.insert = function insert(
+  data: AdjustmentsCompanionInsert,
+): AdjustmentsCompanionInsert {
+  return data;
+};

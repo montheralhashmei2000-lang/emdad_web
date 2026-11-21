@@ -44,27 +44,24 @@ describe('maker_checker_test', () => {
   });
 
   describe('في المستودعات', () => {
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
     // MISSING: lib/data/repos/destructions_repo.dart
     // MISSING: lib/domain/destruction.dart
     it.skip('محضر الإتلاف: لا يُحرَّر ويُعتمد بيدٍ واحدة، ويعتمده آخر', () => {
-      // يعتمد على CatalogRepo وMovementsRepo وDestructionsRepo وDestructionStatus/DestructionBlocked (المراحل 7 و9 و10).
+      // يعتمد على MovementsRepo وDestructionsRepo وDestructionStatus/DestructionBlocked (المرحلتان 9 و10).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
     // MISSING: lib/data/repos/destructions_repo.dart
     // MISSING: lib/domain/destruction.dart
     it.skip('محضر الإتلاف: المدير يحرّر ويعتمد بنفسه', () => {
-      // يعتمد على CatalogRepo وMovementsRepo وDestructionsRepo (المراحل 7 و9 و10).
+      // يعتمد على MovementsRepo وDestructionsRepo (المرحلتان 9 و10).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
     // MISSING: lib/data/repos/stocktake_repo.dart
     it.skip('تسوية الجرد: من فتح الأمر لا يعتمدها', () => {
-      // يعتمد على StocktakeRepo (المرحلة 11).
+      // يعتمد على MovementsRepo وStocktakeRepo (المرحلتان 9 و11).
     });
   });
 });

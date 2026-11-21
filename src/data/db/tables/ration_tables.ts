@@ -264,6 +264,38 @@ export class WarehouseStockLimitsTable extends DriftTable<WarehouseStockLimit> {
   }
 }
 
+export interface WarehouseStockLimitsCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  warehouseId?: CompanionInput<string>;
+  warehouseName?: CompanionInput<string>;
+  itemId?: CompanionInput<string>;
+  itemName?: CompanionInput<string>;
+  unitName?: CompanionInput<string>;
+  factor?: CompanionInput<number>;
+  minStock?: CompanionInput<number>;
+  maxStock?: CompanionInput<number>;
+  notes?: CompanionInput<string>;
+  updatedAt?: CompanionInput<Date>;
+}
+
+export interface WarehouseStockLimitsCompanionInsert extends WarehouseStockLimitsCompanionFields {
+  id: CompanionInput<string>;
+  warehouseId: CompanionInput<string>;
+  itemId: CompanionInput<string>;
+}
+
+export function WarehouseStockLimitsCompanion(
+  data: WarehouseStockLimitsCompanionFields,
+): WarehouseStockLimitsCompanionFields {
+  return data;
+}
+
+WarehouseStockLimitsCompanion.insert = function insert(
+  data: WarehouseStockLimitsCompanionInsert,
+): WarehouseStockLimitsCompanionInsert {
+  return data;
+};
+
 export interface CampStockLimit extends Record<string, unknown> {
   readonly id: string;
   readonly campId: string;

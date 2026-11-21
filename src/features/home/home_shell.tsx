@@ -70,9 +70,7 @@ import {
   FuelVehiclesScreen,
   FuelWarehousesScreen,
   IssueScreen,
-  ItemsScreen,
   KitchenLogScreen,
-  KitchensScreen,
   LinkArmamentScreen,
   LinkFinancesScreen,
   MealDispatchScreen,
@@ -90,11 +88,13 @@ import {
   StockAlertsScreen,
   StocktakeScreen,
   StrengthScreen,
-  SuppliersScreen,
   TransferScreen,
-  UnitsScreen,
-  WarehousesScreen,
 } from './pending_screens_stubs';
+import { ItemsScreen } from '../catalog/items_screen';
+import { KitchensScreen } from '../catalog/kitchens_screen';
+import { SuppliersScreen } from '../catalog/suppliers_screen';
+import { UnitsScreen } from '../catalog/units_screen';
+import { WarehousesScreen } from '../catalog/warehouses_screen';
 import { HomeShellBottomNav } from './shell/home_shell_bottom_nav';
 import {
   homeShellMenu,

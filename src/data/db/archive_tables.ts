@@ -6,6 +6,7 @@ import {
   DriftTable,
   intColumn,
   textColumn,
+  type CompanionInput,
   type GeneratedColumn,
 } from './sqlite_driver';
 
@@ -100,3 +101,46 @@ export class ArchiveFilesTable extends DriftTable<ArchiveFile> {
     return [this.id];
   }
 }
+
+export interface ArchiveFilesCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  space?: CompanionInput<string>;
+  title?: CompanionInput<string>;
+  category?: CompanionInput<string>;
+  tags?: CompanionInput<string>;
+  docRef?: CompanionInput<string>;
+  warehouse?: CompanionInput<string>;
+  docDate?: CompanionInput<string>;
+  fileName?: CompanionInput<string>;
+  storedPath?: CompanionInput<string>;
+  mime?: CompanionInput<string>;
+  sizeBytes?: CompanionInput<number>;
+  sha256?: CompanionInput<string>;
+  source?: CompanionInput<string>;
+  opType?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+  pinned?: CompanionInput<boolean>;
+  createdBy?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  updatedAt?: CompanionInput<Date | null>;
+}
+
+export interface ArchiveFilesCompanionInsert extends ArchiveFilesCompanionFields {
+  id: CompanionInput<string>;
+  title: CompanionInput<string>;
+  fileName: CompanionInput<string>;
+  storedPath: CompanionInput<string>;
+  sizeBytes: CompanionInput<number>;
+}
+
+export function ArchiveFilesCompanion(
+  data: ArchiveFilesCompanionFields,
+): ArchiveFilesCompanionFields {
+  return data;
+}
+
+ArchiveFilesCompanion.insert = function insert(
+  data: ArchiveFilesCompanionInsert,
+): ArchiveFilesCompanionInsert {
+  return data;
+};

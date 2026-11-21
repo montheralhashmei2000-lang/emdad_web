@@ -6,6 +6,7 @@ import {
   DriftTable,
   realColumn,
   textColumn,
+  type CompanionInput,
   type GeneratedColumn,
 } from '../sqlite_driver';
 
@@ -169,6 +170,37 @@ export class MealPlansTable extends DriftTable<MealPlan> {
     return [this.id];
   }
 }
+
+export interface MealPlansCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  planType?: CompanionInput<string>;
+  startDate?: CompanionInput<string>;
+  endDate?: CompanionInput<string>;
+  status?: CompanionInput<string>;
+  facilityId?: CompanionInput<string>;
+  facilityName?: CompanionInput<string>;
+  warehouse?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+  createdBy?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  updatedAt?: CompanionInput<Date | null>;
+}
+
+export interface MealPlansCompanionInsert extends MealPlansCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function MealPlansCompanion(data: MealPlansCompanionFields): MealPlansCompanionFields {
+  return data;
+}
+
+MealPlansCompanion.insert = function insert(
+  data: MealPlansCompanionInsert,
+): MealPlansCompanionInsert {
+  return data;
+};
 
 /// صنف واحد في وجبة واحدة من يوم واحد.
 export interface MealPlanEntry extends Record<string, unknown> {

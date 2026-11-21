@@ -158,7 +158,7 @@ describe('section_switch_test', () => {
     expect(screen.queryByText('fuelDashboard')).toBeNull();
 
     const tabs = Array.from(
-      container.querySelectorAll('[role="tablist"] [role="tab"]'),
+      container.querySelectorAll('[data-imd-topbar] [role="tablist"] [role="tab"]'),
     ).map((el) => el.textContent ?? '');
     expect(tabs.some((t) => t.includes('fuelDashboard'))).toBe(false);
     expect(tabs.some((t) => t.includes('الرئيسية'))).toBe(false);
@@ -189,13 +189,13 @@ describe('section_switch_test', () => {
     fireEvent.click(screen.getAllByText('الأصناف')[0]);
     await waitFor(() => {
       expect(
-        container.querySelectorAll('[role="tablist"] [role="tab"]'),
+        container.querySelectorAll('[data-imd-topbar] [role="tablist"] [role="tab"]'),
       ).toHaveLength(1);
     });
 
     const tabTitles = () =>
       Array.from(
-        container.querySelectorAll('[role="tablist"] [role="tab"]'),
+        container.querySelectorAll('[data-imd-topbar] [role="tablist"] [role="tab"]'),
       ).map((el) => (el.textContent ?? '').trim());
 
     expect(tabTitles()).toEqual(['الأصناف']);

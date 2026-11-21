@@ -1,0 +1,4826 @@
+// المرحلة 7 — البيانات الأساسية (١): الأصناف والمستودعات والموردون والوحدات — الشيفرة المصدرية (Dart)
+// عدد الملفات: 14
+// فهرس الملفات:
+//   - lib/data/repos/catalog_repo.dart (639 سطر)
+//   - lib/data/repos/warehouse_limits_repo.dart (240 سطر)
+//   - lib/domain/item_barcode.dart (66 سطر)
+//   - lib/domain/main_warehouse.dart (78 سطر)
+//   - lib/domain/unit_split.dart (70 سطر)
+//   - lib/domain/group_classifier.dart (113 سطر)
+//   - lib/domain/warehouse_limits.dart (208 سطر)
+//   - lib/features/catalog/items_screen.dart (1118 سطر)
+//   - lib/features/catalog/warehouses_screen.dart (423 سطر)
+//   - lib/features/catalog/suppliers_screen.dart (337 سطر)
+//   - lib/features/catalog/units_screen.dart (527 سطر)
+//   - lib/features/catalog/kitchens_screen.dart (393 سطر)
+//   - lib/features/catalog/authorities_screen.dart (311 سطر)
+//   - lib/features/catalog/camp_link_field.dart (257 سطر)
+
+
+// ==================== FILE: lib/data/repos/catalog_repo.dart ====================
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import '../../core/ids.dart';
+import '../db/app_database.dart';
+import 'repo_guard.dart';
+import '../../core/error_log.dart';
+import '../../core/security/warehouse_scope.dart';
+import '../../core/ui/imd_format.dart';
+import '../../domain/access_control.dart' show AccessControl;
+import '../../domain/item_barcode.dart';
+import 'movements_repo.dart' show MovementsRepo;
+
+/// منعٌ مقصود لتعديلٍ على مستودع. رسالته عربية تُعرض للمستخدم كما هي.
+class WarehouseBlocked implements Exception {
+  const WarehouseBlocked(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// وحدة قياس الصنف (تُحفظ JSON داخل عمود units).
+class ItemUnit {
+  const ItemUnit({required this.name, required this.factor, this.isBase = false});
+
+  final String name;
+  final double factor;
+  final bool isBase;
+
+  factory ItemUnit.fromMap(Map<String, dynamic> m) => ItemUnit(
+        name: (m['name'] ?? '').toString(),
+        factor: (m['factor'] is num) ? (m['factor'] as num).toDouble() : 1,
+        isBase: m['isBase'] == true,
+      );
+
+  Map<String, dynamic> toMap() => {'name': name, 'factor': factor, 'isBase': isBase};
+}
+
+/// البيانات الأساسية: الأصناف والتصنيفات والمستودعات والموردون والوحدات المستفيدة والمطابخ.
+/// منشآت الوحدة المشترَك فيها: القائمة الجديدة، وإن كانت فارغة فالارتباط
+/// المفرد القديم — حتى تعمل البيانات المُرحَّلة وملفات التصدير السابقة.
+List<String> facilityIdsOf(BeneficiaryUnit u) {
+  try {
+    final raw = jsonDecode(u.facilityIds);
+    if (raw is List) {
+      final out = [for (final v in raw) '$v'].where((v) => v.isNotEmpty).toList();
+      if (out.isNotEmpty) return out;
+    }
+  } catch (err, stack) {
+    ErrorLogger.log('catalog.facilityIds', err, stack);
+  }
+  return u.facilityId.isEmpty ? const [] : [u.facilityId];
+}
+
+/// تثبيت رصيدٍ افتتاحي في مستودعٍ مجمّد بأمر جرد.
+class OpeningBlocked implements Exception {
+  const OpeningBlocked(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// عرض رصيد مخزَّن بالوحدة الأساسية بوحدة العرض المختارة للصنف.
+///
+/// الرصيد يُحفظ دائمًا بالوحدة الأساسية (كجم مثلًا)، لكن أمين المستودع يعدّ
+/// بالأكياس. هذه الدالة تحوّل للعرض فقط ولا تمسّ المخزَّن إطلاقًا.
+///
+/// تعيد النص كاملًا: «٢٧٫٥ كيس» أو «١١٠٠ كجم» إن لم تُحدَّد وحدة عرض.
+({double qty, String unit}) displayBalance(Item item, double baseQty) {
+  final r = reportUnitOf(item);
+  if (r.factor == 1) return (qty: baseQty, unit: r.unit);
+  return (qty: (baseQty / r.factor * 1000).round() / 1000, unit: r.unit);
+}
+
+/// وحدة تقارير الصنف ومعاملها: الكمية الأساسية ÷ [factor] = الكمية بها.
+///
+/// الوحدة الافتراضية المختارة للصنف ([Item.reportUnit]) إن كانت من وحداته، وإلا
+/// وحدته الأساسية بمعامل ١. مصدرٌ واحد لكل تقرير يعرض كمياتٍ مجمّعة بالأساس.
+({double factor, String unit}) reportUnitOf(Item item) {
+  final unit = item.reportUnit;
+  if (unit.isEmpty || unit == item.baseUnit) return (factor: 1.0, unit: item.baseUnit);
+  for (final u in unitsOfItem(item)) {
+    if (u.name == unit) return (factor: u.factor <= 0 ? 1.0 : u.factor, unit: unit);
+  }
+  return (factor: 1.0, unit: item.baseUnit);
+}
+
+/// وحدات الصنف من عمود JSON — نسخة مستقلة عن الصنف `CatalogRepo` ليستعملها
+/// العرض في أي طبقة بلا حاجة إلى مستودع.
+List<ItemUnit> unitsOfItem(Item item) {
+  try {
+    final raw = jsonDecode(item.units);
+    if (raw is List) {
+      return [
+        for (final u in raw.whereType<Map>())
+          ItemUnit(
+            name: '${u['name'] ?? ''}',
+            factor: (u['factor'] as num?)?.toDouble() ?? 1,
+            isBase: u['isBase'] == true,
+          ),
+      ].where((u) => u.name.isNotEmpty).toList();
+    }
+  } catch (err, stack) {
+    ErrorLogger.log('catalog.itemUnits', err, stack);
+  }
+  return item.baseUnit.isEmpty
+      ? const []
+      : [ItemUnit(name: item.baseUnit, factor: 1, isBase: true)];
+}
+
+class CatalogRepo {
+  CatalogRepo(this.db);
+
+  final AppDatabase db;
+
+  // ───────── الأصناف ─────────
+  Future<List<Item>> items({String query = ''}) async {
+    final rows = await db.select(db.items).get();
+    final q = query.trim().toLowerCase();
+    final list = q.isEmpty
+        ? rows
+        : rows
+            .where((i) =>
+                i.name.toLowerCase().contains(q) ||
+                i.code.toLowerCase().contains(q) ||
+                i.barcode.toLowerCase().contains(q))
+            .toList();
+    list.sort(_byCodeThenName);
+    return list;
+  }
+
+  Future<Item?> itemById(String id) =>
+      (db.select(db.items)..where((t) => t.id.equals(id))).getSingleOrNull();
+
+  /// معرّفات الأصناف «أصل ثابت» من بين [ids] — بها يُعرف أمر صرفٍ أو تحويلٍ
+  /// محفوظ أهو صرف أصولٍ فيُطبع بلا قوةٍ ولا مدة إعاشة.
+  Future<Set<String>> assetIdsAmong(Iterable<String> ids) async {
+    final wanted = {for (final id in ids) if (id.isNotEmpty) id};
+    if (wanted.isEmpty) return const {};
+    final rows = await (db.select(db.items)..where((t) => t.id.isIn(wanted) & t.isAsset.equals(true))).get();
+    return {for (final r in rows) r.id};
+  }
+
+  List<ItemUnit> unitsOf(Item item) {
+    try {
+      final raw = jsonDecode(item.units);
+      if (raw is List && raw.isNotEmpty) {
+        return raw
+            .whereType<Map>()
+            .map((e) => ItemUnit.fromMap(e.cast<String, dynamic>()))
+            .toList();
+      }
+    } catch (err, stack) {
+      ErrorLogger.log('catalog.itemUnits', err, stack);
+    }
+    return [ItemUnit(name: item.baseUnit.isEmpty ? 'وحدة' : item.baseUnit, factor: 1, isBase: true)];
+  }
+
+  /// وحدات الصنف من الأكبر إلى الأصغر (تُستخدم في العد والترحيل والطباعة).
+  List<ItemUnit> unitsDescending(Item item) =>
+      unitsOf(item)..sort((a, b) => b.factor.compareTo(a.factor));
+
+  double factorOf(Item item, String unitName) {
+    for (final u in unitsOf(item)) {
+      if (u.name == unitName) return u.factor <= 0 ? 1 : u.factor;
+    }
+    return 1;
+  }
+
+  Future<String> saveItem({
+    String? id,
+    required String code,
+    required String name,
+    String categoryId = '',
+    String categoryName = '',
+    String baseUnit = '',
+    List<ItemUnit> units = const [],
+    double minQty = 0,
+    String barcode = '',
+    bool isRefillable = false,
+    String reportUnit = '',
+    // v27: بيانات الأصل الثابت — `null` يُبقي المحفوظ كما هو، فمن يحفظ صنفًا ولا
+    // يعرف الأصول (الاستيراد، الإضافة السريعة) لا يُسقط عنه صفة الأصل.
+    bool? isAsset,
+    String? assetType,
+    int? lifespanMonths,
+    double? unitValue,
+  }) async {
+    final newId = id ?? _newId('itm');
+    final list = units.isEmpty ? [ItemUnit(name: baseUnit, factor: 1, isBase: true)] : units;
+    final unitsJson = jsonEncode(list.map((u) => u.toMap()).toList());
+    // وحدة الأساس تُشتق من الوحدات حين لا تُمرَّر صراحةً (الوحدة ذات isBase).
+    final base = baseUnit.isNotEmpty
+        ? baseUnit
+        : list.firstWhere((u) => u.isBase, orElse: () => list.first).name;
+    await db.into(db.items).insertOnConflictUpdate(ItemsCompanion.insert(
+          id: newId,
+          name: name,
+          code: Value(code),
+          categoryId: Value(categoryId),
+          categoryName: Value(categoryName),
+          baseUnit: Value(base),
+          units: Value(unitsJson),
+          minQty: Value(minQty),
+          barcode: Value(barcode),
+          isRefillable: Value(isRefillable),
+          reportUnit: Value(reportUnit),
+          isAsset: isAsset == null ? const Value.absent() : Value(isAsset),
+          assetType: assetType == null ? const Value.absent() : Value(assetType),
+          lifespanMonths: lifespanMonths == null ? const Value.absent() : Value(lifespanMonths),
+          unitValue: unitValue == null ? const Value.absent() : Value(unitValue),
+        ));
+    return newId;
+  }
+
+  /// يحذف الصنف. من له حركات لا يُحذف: السجلات تبقى بلا صنف فتختل الأرصدة.
+  /// (المشغّل `tg_items_delete_guard` يحرس القاعدة نفسها؛ هذا للرسالة الواضحة.)
+  Future<void> deleteItem(String id) async {
+    if (await hasMovements(id)) {
+      throw StateError('لا يمكن حذف صنف له حركات (وارد أو صرف أو تحويل أو مرتجع أو رصيد افتتاحي أو تسوية)');
+    }
+    await (db.delete(db.items)..where((t) => t.id.equals(id))).go();
+  }
+
+  /// هل للصنف أي حركة مسجَّلة؟
+  Future<bool> hasMovements(String id) async {
+    final rows = await db.customSelect(
+      'SELECT 1 AS x WHERE ${AppDatabase.itemHasMovementsSql('?1')}',
+      variables: [Variable.withString(id)],
+    ).get();
+    return rows.isNotEmpty;
+  }
+
+  // ───────── التصنيفات ─────────
+  Future<List<Category>> categories() async {
+    final rows = await db.select(db.categories).get();
+    rows.sort((a, b) => a.name.compareTo(b.name));
+    return rows;
+  }
+
+  Future<String> saveCategory({String? id, required String name, String description = ''}) async {
+    final newId = id ?? _newId('cat');
+    await db.into(db.categories).insertOnConflictUpdate(
+        CategoriesCompanion.insert(id: newId, name: name, description: Value(description)));
+    return newId;
+  }
+
+  // ───────── المستودعات ─────────
+  /// إضافة سريعة من شاشة الاستلام (➕ بجانب المستودع/المورد).
+  Future<void> quickAddWarehouse(String name) =>
+      db.into(db.warehouses).insert(WarehousesCompanion.insert(id: Ids.next('wh'), name: name.trim()));
+  Future<void> quickAddSupplier(String name) =>
+      db.into(db.suppliers).insert(SuppliersCompanion.insert(id: Ids.next('sup'), name: name.trim()));
+
+  Future<List<Warehouse>> warehouses({List<String>? scope}) async {
+    final rows = await db.select(db.warehouses).get();
+    final list = scope == null ? rows : rows.where((w) => scope.contains(w.name)).toList();
+    list.sort((a, b) => a.name.compareTo(b.name));
+    return list;
+  }
+
+  /// الجداول التي تشير إلى المستودع **بالاسم** لا بالمعرّف، وعمودُ الاسم في كل
+  /// منها. سجلُّ التدقيق مستثنى: هو تاريخٌ لما جرى، لا مرجعًا يُتابَع.
+  static const Map<String, List<String>> warehouseNameRefs = {
+    'receipts': ['warehouse'],
+    'issues': ['warehouse'],
+    'transfers': ['warehouse', 'dest_warehouse'],
+    'returns': ['warehouse'],
+    'adjustments': ['warehouse'],
+    'opening_balances': ['warehouse'],
+    'stocktakes': ['warehouse'],
+    'facilities': ['warehouse'],
+    'meal_plans': ['warehouse'],
+    'assets': ['warehouse'],
+    'ration_orders': ['requesting_warehouse', 'supplying_warehouse'],
+    'archive_files': ['warehouse'],
+    'warehouse_stock_limits': ['warehouse_name'],
+  };
+
+  /// هل يشير إلى مستودعٍ بهذا الاسم سجلٌّ واحد على الأقل؟
+  ///
+  /// نظير `FuelRepo._warehouseInUse` لقسم الإمداد، وأوسعُ منه لأن المستودع هنا
+  /// تشير إليه الحركاتُ والمنشآتُ وخطط الوجبات والأصول والطلبيات والأرشيف.
+  Future<bool> warehouseInUse(String name) async {
+    final key = name.trim();
+    if (key.isEmpty) return false;
+    final parts = [
+      for (final e in warehouseNameRefs.entries)
+        for (final col in e.value) 'SELECT 1 FROM "${e.key}" WHERE TRIM("$col") = ?1',
+    ];
+    final row = await db
+        .customSelect('${parts.join(' UNION ALL ')} LIMIT 1', variables: [Variable<String>(key)])
+        .getSingleOrNull();
+    if (row != null) return true;
+    // نطاقُ مستخدمٍ مقيَّد بأسماء مستودعاته (`users.warehouse_scope`، JSON).
+    for (final u in await db.select(db.users).get()) {
+      if (parseWarehouseScope(u.warehouseScope, source: 'catalog.warehouseInUse')?.contains(key) ?? false) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// يحفظ مستودعًا. **تغيير اسم مستودعٍ مُستعمَل مرفوض** ([WarehouseBlocked]).
+  ///
+  /// كل حركةٍ وكل منشأةٍ ونطاقِ مستخدمٍ تشير إلى المستودع **بنصّ اسمه** (ثلاثة
+  /// عشر جدولًا، [warehouseNameRefs])، فتغييرُ الاسم يُيتّم ما أشار إليه: يظهر
+  /// رصيدُه صفرًا وتبقى حركاته باسمٍ لا مستودعَ له، ويفقد المستخدم المقيَّد
+  /// نطاقه. ولا تُرحَّل المراجع لأن الترحيل محليٌّ والنظام موزَّع: جهازٌ لم
+  /// يُرحِّل يُرسل صفوفه بالاسم القديم فيعيد بعضها «الأحدثُ يفوز»، و`warehouse_scope`
+  /// لا ينتقل أصلًا بلا توقيع المالك. والمحروقات حُسمت على الرفض نفسه
+  /// (`FuelRepo.saveWarehouse`).
+  Future<String> saveWarehouse({
+    String? id,
+    required String code,
+    required String name,
+    String manager = '',
+    String location = '',
+    bool feedsAllCamps = true,
+    List<String> campIds = const [],
+    String notes = '',
+  }) async {
+    final newId = id ?? _newId('wh');
+    if (id != null) {
+      final old = await (db.select(db.warehouses)..where((t) => t.id.equals(id))).getSingleOrNull();
+      if (old != null && old.name.trim() != name.trim() && await warehouseInUse(old.name)) {
+        throw WarehouseBlocked('لا يُغيَّر اسم «${old.name}» وعليه حركة أو ارتباط — '
+            'أنشئ مستودعًا بالاسم الجديد وحوّل إليه الرصيد');
+      }
+    }
+    await db.into(db.warehouses).insertOnConflictUpdate(WarehousesCompanion.insert(
+          id: newId,
+          name: name,
+          code: Value(code),
+          manager: Value(manager),
+          location: Value(location),
+          feedsAllCamps: Value(feedsAllCamps),
+          campIds: Value(jsonEncode(campIds)),
+          notes: Value(notes),
+        ));
+    return newId;
+  }
+
+  /// معسكرات المستودع (لربط التحويل بالاستحقاق).
+  List<String> campsOf(Warehouse w) {
+    try {
+      final raw = jsonDecode(w.campIds);
+      if (raw is List) return raw.map((e) => e.toString()).toList();
+    } catch (err, stack) {
+      ErrorLogger.log('catalog.campIds', err, stack);
+    }
+    return const [];
+  }
+
+  // ───────── الموردون ─────────
+  Future<List<Supplier>> suppliers() async {
+    final rows = await db.select(db.suppliers).get();
+    rows.sort((a, b) => a.name.compareTo(b.name));
+    return rows;
+  }
+
+  Future<String> saveSupplier({
+    String? id,
+    required String name,
+    String phone = '',
+    String notes = '',
+    String contact = '',
+    String city = '',
+  }) async {
+    final newId = id ?? _newId('sup');
+    await db.into(db.suppliers).insertOnConflictUpdate(SuppliersCompanion.insert(
+      id: newId,
+      name: name,
+      phone: Value(phone),
+      notes: Value(notes),
+      contact: Value(contact),
+      city: Value(city),
+    ));
+    return newId;
+  }
+
+  // ───────── الوحدات المستفيدة والمعسكرات ─────────
+  Future<List<BeneficiaryUnit>> units() async {
+    final rows = await db.select(db.beneficiaryUnits).get();
+    rows.sort((a, b) => a.code.compareTo(b.code));
+    return rows;
+  }
+
+  /// بترتيب الإنشاء (بلا فرز) — لشاشةٍ تعرض الوحدات بترتيب إدخالها.
+  Future<List<BeneficiaryUnit>> unitsUnsorted() => db.select(db.beneficiaryUnits).get();
+
+  Future<List<BeneficiaryUnit>> camps() async =>
+      (await units()).where((u) => u.isCamp || u.parentId.isEmpty).toList();
+
+  /// معسكرات نطاق مستودعات المستخدم ([AccessControl.campScope]) معرّفاتٍ وأسماءً،
+  /// أو `null` = كلها. التفريدة تحصر بالمعرّف، والقوة البشرية (عمودها نصّ الاسم)
+  /// بالاسم.
+  Future<({Set<String> ids, Set<String> names})?> campsInScope({
+    required bool isAdmin,
+    required List<String>? scope,
+  }) async {
+    final ids = AccessControl.campScope(
+      isAdmin: isAdmin,
+      scope: scope,
+      warehouses: [
+        for (final w in await warehouses()) (name: w.name, feedsAllCamps: w.feedsAllCamps, campIds: campsOf(w)),
+      ],
+    );
+    if (ids == null) return null;
+    return (
+      ids: ids,
+      names: {for (final u in await units()) if (ids.contains(u.id) && u.name.trim().isNotEmpty) u.name.trim()},
+    );
+  }
+
+  Future<List<BeneficiaryUnit>> childrenOf(String campId) async =>
+      (await units()).where((u) => u.parentId == campId).toList();
+
+  Future<String> saveUnit({
+    String? id,
+    required String code,
+    required String name,
+    String type = 'unit',
+    String parentId = '',
+    String parentName = '',
+    String? facilityId,
+    String category = '',
+  }) async {
+    final newId = id ?? _newId('unit');
+    // facilityId لا يُمس عند التعديل (اشتراك المطبخ يُدار من شاشة المطابخ).
+    await db.into(db.beneficiaryUnits).insertOnConflictUpdate(BeneficiaryUnitsCompanion.insert(
+          id: newId,
+          name: name,
+          code: Value(code),
+          type: Value(type),
+          parentId: Value(parentId),
+          parentName: Value(parentName),
+          isCamp: Value(type == 'camp'),
+          facilityId: facilityId == null ? const Value.absent() : Value(facilityId),
+          category: Value(category),
+        ));
+    return newId;
+  }
+
+  // ───────── المطابخ والأفران ─────────
+  Future<List<Facility>> facilities() async {
+    final rows = await db.select(db.facilities).get();
+    rows.sort((a, b) => a.name.compareTo(b.name));
+    return rows;
+  }
+
+  Future<String> saveFacility({
+    String? id,
+    required String name,
+    String fType = 'KITCHEN',
+    int capacity = 0,
+    String warehouse = '',
+    String notes = '',
+  }) async {
+    final newId = id ?? _newId('fac');
+    await db.into(db.facilities).insertOnConflictUpdate(FacilitiesCompanion.insert(
+          id: newId,
+          name: name,
+          fType: Value(fType),
+          capacity: Value(capacity),
+          warehouse: Value(warehouse),
+          notes: Value(notes),
+        ));
+    return newId;
+  }
+
+  static int _byCodeThenName(Item a, Item b) {
+    final ca = int.tryParse(a.code), cb = int.tryParse(b.code);
+    if (ca != null && cb != null) return ca.compareTo(cb);
+    if (a.code.isNotEmpty && b.code.isNotEmpty) return a.code.compareTo(b.code);
+    if (a.code.isNotEmpty) return -1;
+    if (b.code.isNotEmpty) return 1;
+    return a.name.compareTo(b.name);
+  }
+
+  // ───────── عمليات تستعملها شاشات الكتالوج (كانت استعلاماتٍ مباشرة في الشاشات) ─────────
+
+  Future<Item?> itemByCode(String code) async =>
+      (await (db.select(db.items)..where((t) => t.code.equals(code))).get()).firstOrNull;
+
+  Future<void> setItemBarcode(String id, String barcode) =>
+      (db.update(db.items)..where((t) => t.id.equals(id))).write(ItemsCompanion(barcode: Value(barcode)));
+
+  Future<bool> barcodeTaken(String barcode) async =>
+      (await (db.select(db.items)..where((t) => t.barcode.equals(barcode))..limit(1)).get()).isNotEmpty;
+
+  /// مولّد باركود نظامي يبدأ بعد أكبر تسلسل محفوظ في دقيقة [now].
+  Future<ItemBarcode> barcodeGenerator([DateTime? now]) async {
+    final t = now ?? DateTime.now();
+    final prefix = ItemBarcode.prefixOf(t);
+    final rows = await (db.selectOnly(db.items)
+          ..addColumns([db.items.barcode])
+          ..where(db.items.barcode.like('$prefix%')))
+        .map((r) => r.read(db.items.barcode) ?? '')
+        .get();
+    return ItemBarcode.startingAt(t, rows.map((b) => ItemBarcode.seqOf(b, prefix)).whereType<int>());
+  }
+
+  /// باركود نظامي جديد غير مكرر (فحص القاعدة + [reserved] الممنوحة في الدفعة نفسها).
+  Future<String> newItemBarcode({ItemBarcode? generator, Set<String> reserved = const {}}) async {
+    final g = generator ?? await barcodeGenerator();
+    return g.nextFree((bc) async => reserved.contains(bc) || await barcodeTaken(bc));
+  }
+
+  /// يفرّغ وحدات الصنف (استيراد صنفٍ بلا وحدة): `saveItem` يضيف وحدةً افتراضية.
+  Future<void> clearItemUnits(String id) =>
+      (db.update(db.items)..where((t) => t.id.equals(id))).write(const ItemsCompanion(units: Value('[]')));
+
+  /// تحديث صنفٍ قائم من صفّ استيراد: الاسم والتصنيف والحد الأدنى دائمًا، والوحدة
+  /// الأساسية إن وُجدت، ووحدةٌ أولى ([firstUnitJson]) إن لم يكن للصنف وحدات.
+  Future<void> updateItemFromImport(
+    String id, {
+    required String name,
+    required String categoryName,
+    required String categoryId,
+    required double minQty,
+    String baseUnit = '',
+    String? firstUnitJson,
+  }) =>
+      (db.update(db.items)..where((t) => t.id.equals(id))).write(ItemsCompanion(
+        name: Value(name),
+        categoryName: Value(categoryName),
+        categoryId: Value(categoryId),
+        baseUnit: baseUnit.isEmpty ? const Value.absent() : Value(baseUnit),
+        units: firstUnitJson == null ? const Value.absent() : Value(firstUnitJson),
+        minQty: Value(minQty),
+      ));
+
+  /// آخر تاريخ رصيدٍ افتتاحي لكل صنف في مستودع.
+  Future<Map<String, String>> openingDates(String warehouse) async {
+    final rows = await (db.select(db.openingBalances)..where((t) => t.warehouse.equals(warehouse))).get();
+    final dates = <String, String>{};
+    for (final r in rows) {
+      final prev = dates[r.itemId] ?? '';
+      if (r.date.compareTo(prev) > 0) dates[r.itemId] = r.date;
+    }
+    return dates;
+  }
+
+  /// الأرصدة الافتتاحية المثبَّتة في [warehouse] بصنفها (الأحدث تاريخًا إن تكرر).
+  Future<Map<String, OpeningBalance>> openings(String warehouse) async {
+    final rows = await (db.select(db.openingBalances)..where((t) => t.warehouse.equals(warehouse))).get();
+    final out = <String, OpeningBalance>{};
+    for (final r in rows) {
+      final prev = out[r.itemId];
+      if (prev == null || r.date.compareTo(prev.date) > 0) out[r.itemId] = r;
+    }
+    return out;
+  }
+
+  /// معرّف الرصيد الافتتاحي لصنفٍ في مستودع — **واحدٌ** على كل الأجهزة.
+  ///
+  /// كان التثبيت حذفًا ثم إدراجًا بمعرّفٍ عشوائي، فجهازان يثبّتان رصيد الصنف
+  /// نفسه قبل أن يتزامنا يتركان صفّين، فيُجمعان: يُحتسب الرصيد مرتين بصمت (H-7).
+  static String openingIdOf(String itemId, String warehouse) => Ids.natural('opb', [itemId, warehouse]);
+
+  /// يثبّت رصيد [item] في [warehouse]: صفٌّ واحد بالمعرّف الحتمي، وتُحذف أي
+  /// صفوفٍ أخرى للمفتاح نفسه (من إصدارٍ أقدم أو من دمجٍ سابق) فيسافر شاهد حذفها.
+  Future<void> _putOpening(Item item, String warehouse, double qty, String actor, String date,
+      [String breakdown = '']) async {
+    final id = openingIdOf(item.id, warehouse);
+    await (db.delete(db.openingBalances)
+          ..where((t) => t.itemId.equals(item.id) & t.warehouse.equals(warehouse) & t.id.equals(id).not()))
+        .go();
+    await db.into(db.openingBalances).insertOnConflictUpdate(OpeningBalancesCompanion.insert(
+          id: id,
+          itemId: item.id,
+          itemCode: Value(item.code),
+          itemName: Value(item.name),
+          warehouse: Value(warehouse),
+          qty: Value(qty),
+          date: Value(date),
+          setBy: Value(actor),
+          createdAt: Value(DateTime.now()),
+          breakdown: Value(breakdown),
+        ));
+  }
+
+  /// تثبيت عدة أرصدة افتتاحية بمعاملةٍ واحدة وتاريخٍ واحد (كل صنفٍ يستبدل سابقه في المستودع).
+  ///
+  /// يرفض ([OpeningBlocked]) مستودعًا مجمّدًا بأمر جرد: تثبيتُ رصيدٍ افتتاحي يغيّر
+  /// الدفتري أثناء العدّ كأي حركة — وكان يمرّ وحده من بين الحركات.
+  ///
+  /// [breakdowns] تفصيل كل صنفٍ كما أُدخل (`OpeningBreakdown.encode`) بمعرّفه — صنفٌ
+  /// بلا تفصيل يُحفظ بوحدة الأساس وحدها.
+  Future<void> setOpeningBalances(String warehouse, String actor, List<({Item item, double qty})> entries,
+          {required String date, Map<String, String> breakdowns = const {}}) =>
+      db.transaction(() async {
+        final denied = RepoGuard.check('opening', warehouses: [warehouse]);
+        if (denied != null) throw OpeningBlocked(denied);
+        final frozen = await MovementsRepo(db).frozenMessage(warehouse);
+        if (frozen != null) throw OpeningBlocked(frozen);
+        for (final e in entries) {
+          await _putOpening(e.item, warehouse, e.qty, actor, date, breakdowns[e.item.id] ?? '');
+        }
+      });
+
+  /// رصيدٌ افتتاحي للصنف في مستودع — تثبيتٌ يستبدل السابق (كشاشة الأرصدة الافتتاحية).
+  Future<void> setOpeningBalance(Item item, String warehouse, double qty, String actor) =>
+      setOpeningBalances(warehouse, actor, [(item: item, qty: qty)], date: isoDay(DateTime.now()));
+
+  Future<void> deleteCategory(String id) =>
+      (db.delete(db.categories)..where((t) => t.id.equals(id))).go();
+
+  Future<void> deleteWarehouse(String id) =>
+      (db.delete(db.warehouses)..where((t) => t.id.equals(id))).go();
+
+  Future<void> deleteUnit(String id) =>
+      (db.delete(db.beneficiaryUnits)..where((t) => t.id.equals(id))).go();
+
+  Future<void> deleteFacility(String id) =>
+      (db.delete(db.facilities)..where((t) => t.id.equals(id))).go();
+
+  Future<void> deleteSupplier(String id) =>
+      (db.delete(db.suppliers)..where((t) => t.id.equals(id))).go();
+
+  /// اشتراكات وحداتٍ في مطبخ/فرن دفعةً واحدة: كل عنصرٍ (معرّف الوحدة ← قائمة معرّفات
+  /// المرافق الجديدة). العمود المفرد `facilityId` يبقى أول اشتراك للتوافق مع التصدير القديم.
+  Future<void> setUnitFacilities(Map<String, List<String>> idsByUnit) => db.transaction(() async {
+        for (final e in idsByUnit.entries) {
+          await (db.update(db.beneficiaryUnits)..where((t) => t.id.equals(e.key))).write(
+            BeneficiaryUnitsCompanion(
+              facilityIds: Value(jsonEncode(e.value)),
+              facilityId: Value(e.value.isEmpty ? '' : e.value.first),
+            ),
+          );
+        }
+      });
+
+  static String _newId(String prefix) =>
+      Ids.next(prefix);
+}
+// ==================== END FILE: lib/data/repos/catalog_repo.dart ====================
+
+// ==================== FILE: lib/data/repos/warehouse_limits_repo.dart ====================
+import 'package:drift/drift.dart';
+
+import '../../core/ids.dart';
+import '../../domain/warehouse_limits.dart';
+import '../db/app_database.dart';
+import 'audit_repo.dart';
+import 'catalog_repo.dart';
+import 'movements_repo.dart';
+
+/// سطر حدود كما تُدخله الشاشة — **بوحدة الإدخال** لا بوحدة الأساس.
+class LimitInput {
+  const LimitInput({
+    required this.itemId,
+    required this.itemName,
+    required this.unitName,
+    required this.factor,
+    required this.min,
+    required this.max,
+    this.notes = '',
+  });
+
+  final String itemId;
+  final String itemName;
+  final String unitName;
+  final double factor;
+
+  /// بوحدة [unitName].
+  final double min;
+  final double max;
+  final String notes;
+
+  ({String itemId, double min, double max}) get check =>
+      (itemId: itemId, min: min, max: max);
+}
+
+/// صفٌّ في لوحة المستودع: الحدّ والرصيد والحكم بينهما.
+class WarehouseLimitRow {
+  const WarehouseLimitRow({
+    required this.limit,
+    required this.item,
+    required this.balanceBase,
+  });
+
+  final WarehouseStockLimit limit;
+  final Item? item;
+
+  /// الرصيد بوحدة الأساس.
+  final double balanceBase;
+
+  double get factor => WarehouseLimits.safeFactor(limit.factor);
+
+  String get unitName =>
+      limit.unitName.isNotEmpty ? limit.unitName : (item?.baseUnit ?? '');
+
+  double get balance => WarehouseLimits.fromBase(balanceBase, factor);
+  double get min => WarehouseLimits.fromBase(limit.minStock, factor);
+  double get max => WarehouseLimits.fromBase(limit.maxStock, factor);
+
+  LimitStatus get status => WarehouseLimits.statusOf(
+        balance: balanceBase,
+        minStock: limit.minStock,
+        maxStock: limit.maxStock,
+      );
+
+  /// النقص بوحدة العرض — ما يجب تحويله ليبلغ الحد الأدنى.
+  double get shortfall => WarehouseLimits.fromBase(
+        WarehouseLimits.shortfall(
+            balance: balanceBase, minStock: limit.minStock),
+        factor,
+      );
+
+  double get surplus => WarehouseLimits.fromBase(
+        WarehouseLimits.surplus(balance: balanceBase, maxStock: limit.maxStock),
+        factor,
+      );
+
+  double? get fillRatio => WarehouseLimits.fillRatio(
+        balance: balanceBase,
+        maxStock: limit.maxStock,
+      );
+}
+
+class LimitResult {
+  const LimitResult({required this.ok, this.error = '', this.saved = 0});
+
+  final bool ok;
+  final String error;
+  final int saved;
+}
+
+/// حدود مخزون المستودعات: ضبطها، وقراءة لوحة المستودع منها.
+///
+/// **الحدود تُخزَّن بوحدة الأساس وتُعرض بوحدة صاحبها.** الرصيد في النظام كلّه
+/// بوحدة الأساس، فالمقارنة به لا تصحّ إلا بها؛ والمستخدم يضبط حدّه بالكرتون
+/// أو الشوال، فإعادته إليه بالحبة تجعله يعيد الحساب في رأسه كل مرة.
+class WarehouseLimitsRepo {
+  WarehouseLimitsRepo(this.db);
+
+  final AppDatabase db;
+
+  Future<List<WarehouseStockLimit>> limits({String warehouseId = ''}) async {
+    final q = db.select(db.warehouseStockLimits);
+    if (warehouseId.isNotEmpty) {
+      q.where((t) => t.warehouseId.equals(warehouseId));
+    }
+    final rows = await q.get();
+    rows.sort((a, b) => a.itemName.compareTo(b.itemName));
+    return rows;
+  }
+
+  /// لوحة مستودع: كل صنف له حدّ، ورصيده الآن، والحكم بينهما.
+  ///
+  /// الرصيد يُقرأ من دفتر الحركات لا من حقلٍ مخزَّن — هو المصدر الوحيد الذي
+  /// يوافق التقارير، فلا تختلف اللوحة عن تقرير الأرصدة أمام نفس المستخدم.
+  Future<List<WarehouseLimitRow>> dashboard(String warehouseName) async {
+    final all = await limits();
+    if (all.isEmpty) return const [];
+    final byName = await _warehouseIdsByName();
+    final id = byName[warehouseName.trim()] ?? '';
+    final mine = id.isEmpty
+        ? const <WarehouseStockLimit>[]
+        : all.where((l) => l.warehouseId == id).toList();
+    if (mine.isEmpty) return const [];
+
+    final balances =
+        await MovementsRepo(db).balances(warehouse: warehouseName.trim());
+    final items = await CatalogRepo(db).items();
+    final byId = {for (final i in items) i.id: i};
+
+    final rows = [
+      for (final l in mine)
+        WarehouseLimitRow(
+          limit: l,
+          item: byId[l.itemId],
+          balanceBase: balances[l.itemId] ?? 0,
+        ),
+    ];
+    // الأحرج أولًا: ما هو تحت الأدنى يُقرأ قبل ما هو سليم.
+    const order = {
+      LimitStatus.low: 0,
+      LimitStatus.over: 1,
+      LimitStatus.ok: 2,
+      LimitStatus.none: 3,
+    };
+    rows.sort((a, b) {
+      final byStatus = order[a.status]!.compareTo(order[b.status]!);
+      return byStatus != 0
+          ? byStatus
+          : a.limit.itemName.compareTo(b.limit.itemName);
+    });
+    return rows;
+  }
+
+  Future<Map<String, String>> _warehouseIdsByName() async {
+    final rows = await db.select(db.warehouses).get();
+    return {for (final w in rows) w.name.trim(): w.id};
+  }
+
+  /// حفظ دفعة حدود لمستودع واحد.
+  ///
+  /// الدفعة تُحفظ كلّها أو لا شيء: نصفُ دفعةٍ محفوظ يترك المستخدم لا يدري
+  /// أيّ سطر وصل وأيّ سطر ضاع.
+  Future<LimitResult> saveBatch({
+    required String warehouseId,
+    required String warehouseName,
+    required List<LimitInput> rows,
+    String actor = '',
+  }) async {
+    if (warehouseId.trim().isEmpty) {
+      return const LimitResult(ok: false, error: '✖ اختر المستودع');
+    }
+    final error =
+        WarehouseLimits.validateBatch([for (final r in rows) r.check]);
+    if (error != null) return LimitResult(ok: false, error: '✖ $error');
+
+    final existing = await limits(warehouseId: warehouseId);
+    final byItem = {for (final l in existing) l.itemId: l};
+
+    await db.transaction(() async {
+      for (final r in rows) {
+        final factor = WarehouseLimits.safeFactor(r.factor);
+        await db
+            .into(db.warehouseStockLimits)
+            .insertOnConflictUpdate(WarehouseStockLimitsCompanion.insert(
+              id: byItem[r.itemId]?.id ?? Ids.natural('whl', [warehouseId, r.itemId]),
+              warehouseId: warehouseId,
+              warehouseName: Value(warehouseName),
+              itemId: r.itemId,
+              itemName: Value(r.itemName),
+              unitName: Value(r.unitName),
+              factor: Value(factor),
+              minStock: Value(WarehouseLimits.toBase(r.min, factor)),
+              maxStock: Value(WarehouseLimits.toBase(r.max, factor)),
+              notes: Value(r.notes),
+              updatedAt: Value(DateTime.now()),
+            ));
+      }
+    });
+
+    await AuditRepo(db).log(
+      action: 'warehouseLimit.saveBatch',
+      entityType: 'حد مخزون',
+      summary: 'ضبط ${rows.length} حدًّا في «$warehouseName»',
+      details: {'warehouseId': warehouseId, 'rows': rows.length},
+      actorEmail: actor,
+    );
+    return LimitResult(ok: true, saved: rows.length);
+  }
+
+  Future<LimitResult> delete(String id, {String actor = ''}) async {
+    final row = await (db.select(db.warehouseStockLimits)
+          ..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    if (row == null) {
+      return const LimitResult(ok: false, error: '✖ الحد غير موجود');
+    }
+    await (db.delete(db.warehouseStockLimits)..where((t) => t.id.equals(id)))
+        .go();
+    await AuditRepo(db).log(
+      action: 'warehouseLimit.delete',
+      entityType: 'حد مخزون',
+      summary: 'حذف حد «${row.itemName}» من «${row.warehouseName}»',
+      details: {'limitId': id},
+      actorEmail: actor,
+    );
+    return const LimitResult(ok: true);
+  }
+
+  /// أصناف تحت الحد الأدنى في كل المستودعات — تُغذّي جرس التنبيهات.
+  Future<List<WarehouseLimitRow>> lowEverywhere() async {
+    final warehouses = await db.select(db.warehouses).get();
+    final out = <WarehouseLimitRow>[];
+    for (final w in warehouses) {
+      final rows = await dashboard(w.name);
+      out.addAll(rows.where((r) => r.status == LimitStatus.low));
+    }
+    return out;
+  }
+}
+// ==================== END FILE: lib/data/repos/warehouse_limits_repo.dart ====================
+
+// ==================== FILE: lib/domain/item_barcode.dart ====================
+/// الباركود النظامي للأصناف: ١٢ رقمًا = السنة (٤) + يوم-ساعة-دقيقة (٦) + تسلسل (٢).
+///
+/// مثال: `202610143001` ⇐ سنة 2026، يوم 10، الساعة 14، الدقيقة 30، تسلسل 01.
+/// السنة تُؤخذ من الساعة لا من ثابت. التسلسل 01–99 داخل الدقيقة؛ بعد 99
+/// ينتقل إلى الدقيقة التالية ويعود إلى 01. الباركودات القديمة (`104…`) لا تُمسّ.
+class ItemBarcode {
+  ItemBarcode._(this._at, this._seq);
+
+  /// يبدأ من [now] بعد أكبر تسلسل مستعمل في دقيقته ([usedSeqs]: تسلسلات
+  /// الباركودات المحفوظة ببادئة تلك الدقيقة، انظر [prefixOf]).
+  factory ItemBarcode.startingAt(DateTime now, Iterable<int> usedSeqs) {
+    final at = DateTime(now.year, now.month, now.day, now.hour, now.minute);
+    final top = usedSeqs.fold<int>(0, (a, b) => b > a ? b : a);
+    final g = ItemBarcode._(at, 1);
+    if (top >= maxSeq) {
+      g._at = at.add(const Duration(minutes: 1));
+    } else {
+      g._seq = top + 1;
+    }
+    return g;
+  }
+
+  static const int length = 12;
+  static const int maxSeq = 99;
+
+  /// عدد المرشّحين المفحوصين قبل الاستسلام.
+  static const int maxAttempts = 10;
+
+  DateTime _at;
+  int _seq;
+
+  static String _p2(int v) => v.toString().padLeft(2, '0');
+
+  /// البادئة (١٠ أرقام) لدقيقة [t].
+  static String prefixOf(DateTime t) => '${t.year}${_p2(t.day)}${_p2(t.hour)}${_p2(t.minute)}';
+
+  static String format(DateTime t, int seq) => '${prefixOf(t)}${_p2(seq)}';
+
+  /// تسلسل باركودٍ بصيغة النظام ببادئة [prefix]، أو `null` لغيره.
+  static int? seqOf(String barcode, String prefix) {
+    if (barcode.length != length || !barcode.startsWith(prefix)) return null;
+    return int.tryParse(barcode.substring(prefix.length));
+  }
+
+  /// المرشّح التالي، ثم يتقدّم المؤشر.
+  String take() {
+    final out = format(_at, _seq);
+    if (_seq >= maxSeq) {
+      _seq = 1;
+      _at = _at.add(const Duration(minutes: 1));
+    } else {
+      _seq++;
+    }
+    return out;
+  }
+
+  /// أول مرشّح غير مستعمل خلال [maxAttempts] محاولة؛ وإلا `StateError`.
+  Future<String> nextFree(Future<bool> Function(String barcode) taken) async {
+    for (var i = 0; i < maxAttempts; i++) {
+      final bc = take();
+      if (!await taken(bc)) return bc;
+    }
+    throw StateError('تعذّر توليد باركود غير مكرر بعد $maxAttempts محاولات');
+  }
+}
+// ==================== END FILE: lib/domain/item_barcode.dart ====================
+
+// ==================== FILE: lib/domain/main_warehouse.dart ====================
+/// قيد تغذية المعسكرات: لا تُغذّى إلا من المخزن الرئيسي.
+///
+/// **لماذا القيد أصلًا:** حين يُحوَّل إلى معسكر من أي مخزن، يصير رصيد المعسكر
+/// مجموع تحويلات متفرّقة لا مصدر واحد، فيستحيل مطابقة ما خرج من العهدة بما
+/// دخل المعسكر. وبمصدرٍ واحد يصير سجل المعسكر مرآةً لصادر المخزن الرئيسي.
+///
+/// والقيد يُفحص في طبقة الحفظ لا في القائمة المنسدلة وحدها: إخفاء الخيار من
+/// الشاشة تجميل، ومنعُه عند الحفظ هو الحماية.
+library;
+
+/// مستودع كما يحتاجه الفحص — بلا ارتباط بجدول.
+class WarehouseRef {
+  const WarehouseRef({required this.id, required this.name, this.isMain = false});
+
+  final String id;
+  final String name;
+  final bool isMain;
+}
+
+class MainWarehouse {
+  const MainWarehouse._();
+
+  static WarehouseRef? find(Iterable<WarehouseRef> warehouses) {
+    for (final w in warehouses) {
+      if (w.isMain) return w;
+    }
+    return null;
+  }
+
+  /// يفحص تحويلًا إلى معسكر. يعيد رسالة المنع، أو `null` إن كان مسموحًا.
+  ///
+  /// [toCamp] هل وجهة التحويل معسكر؟ التحويل بين مخزنين عاديين لا يخضع لهذا
+  /// القيد — المنع عن مسارات مشروعة يدفع المستخدمين إلى الالتفاف عليه.
+  static String? validate({
+    required String fromWarehouse,
+    required String destWarehouse,
+    required bool toCamp,
+    required Iterable<WarehouseRef> warehouses,
+    bool fromCamp = false,
+  }) {
+    final main = find(warehouses);
+
+    // مخزن معسكر لا يُصدِّر بالتحويل: ما زاد عنه يعود **مرتجعًا** لا تحويلًا.
+    // والفرق ليس شكليًا: المرتجع يخصم من المُسلَّم في سجل المعسكر فيصحّح
+    // رصيد استحقاقه، والتحويل لا يمسّه — فيبدو المعسكر مستلمًا ما ردّه.
+    if (fromCamp) {
+      return 'مخزن المعسكر لا يُحوَّل منه — سجّل ما زاد عنه **مرتجعًا** '
+          'فيُخصم من حسابه';
+    }
+    if (!toCamp) return null;
+
+    if (main == null) {
+      // لا يُمنع التحويل لغياب إعداد لم يضبطه أحد: الميدان لا يتوقف لأن
+      // المدير لم يفتح شاشة الإعدادات. يُنبَّه ويُسمح.
+      return null;
+    }
+    if (fromWarehouse.trim().isEmpty) return 'اختر المستودع المُرسِل';
+    if (fromWarehouse.trim() != main.name.trim()) {
+      return 'تغذية المعسكرات من المخزن الرئيسي «${main.name}» وحده — '
+          'حوِّل إليه أولًا ثم منه إلى المعسكر';
+    }
+    if (destWarehouse.trim() == main.name.trim()) {
+      return 'وجهة التحويل هي المخزن الرئيسي نفسه';
+    }
+    return null;
+  }
+
+  /// المستودعات التي يجوز الإرسال منها إلى هذه الوجهة.
+  static List<WarehouseRef> allowedSources({
+    required bool toCamp,
+    required List<WarehouseRef> warehouses,
+  }) {
+    if (!toCamp) return warehouses;
+    final main = find(warehouses);
+    return main == null ? warehouses : [main];
+  }
+}
+// ==================== END FILE: lib/domain/main_warehouse.dart ====================
+
+// ==================== FILE: lib/domain/unit_split.dart ====================
+/// تفكيك رصيدٍ بوحدة الأساس على وحداتٍ مختارة للطباعة: ٢٠٣٠ كجم بالكيس (٤٠) والكجم
+/// ⇒ «٥٠ كيس + ٣٠ كجم». الكبرى تأخذ أعدادًا صحيحة، والصغرى المختارة تأخذ الباقي (وقد
+/// يكون كسرًا إن لم تكن الأساس).
+library;
+
+/// مستويات الوحدة المختارة في الطباعة.
+enum UnitLevel {
+  large('الوحدة الكبرى'),
+  second('الوحدة الثانية'),
+  base('وحدة الأساس');
+
+  const UnitLevel(this.label);
+
+  final String label;
+}
+
+/// وحدةٌ بمعاملها إلى الأساس.
+typedef SplitUnit = ({String name, double factor});
+
+class UnitSplit {
+  const UnitSplit._();
+
+  /// وحدات المستويات المختارة لصنفٍ من وحداته: الأساس أصغرها (المعامل ١)، والثانية
+  /// التي تليها، والكبرى أكبرها. مستويان يقعان على الوحدة نفسها (صنفٌ بوحدتين أو
+  /// بوحدةٍ واحدة) يُحسبان لأكبرهما وحده.
+  static Map<UnitLevel, SplitUnit> levels(List<SplitUnit> units, Set<UnitLevel> chosen) {
+    if (units.isEmpty) return const {};
+    final asc = [...units]..sort((a, b) => a.factor.compareTo(b.factor));
+    final at = <UnitLevel, SplitUnit>{
+      UnitLevel.base: asc.first,
+      UnitLevel.second: asc.length > 1 ? asc[1] : asc.first,
+      UnitLevel.large: asc.last,
+    };
+    final out = <UnitLevel, SplitUnit>{};
+    for (final l in UnitLevel.values) {
+      if (!chosen.contains(l)) continue;
+      final u = at[l]!;
+      if (out.values.any((x) => x.name == u.name)) continue;
+      out[l] = u;
+    }
+    return out;
+  }
+
+  /// يفكّك [baseQty] على [units] من الكبرى إلى الصغرى. الكبرى أعدادٌ صحيحة، والأخيرة
+  /// الباقي مقرَّبًا إلى ثلاث خانات. السالب يُفكَّك بقيمته المطلقة وتُسلَب أجزاؤه.
+  static List<(String, double)> split(double baseQty, List<SplitUnit> units) {
+    if (units.isEmpty) return const [];
+    final desc = [...units]..sort((a, b) => b.factor.compareTo(a.factor));
+    final sign = baseQty < 0 ? -1.0 : 1.0;
+    var rest = baseQty.abs();
+    final out = <(String, double)>[];
+    for (var i = 0; i < desc.length; i++) {
+      final f = desc[i].factor <= 0 ? 1.0 : desc[i].factor;
+      final last = i == desc.length - 1;
+      final q = last ? rest / f : ((rest + 1e-9) / f).floorToDouble();
+      rest -= q * f;
+      if (rest.abs() < 1e-9) rest = 0;
+      out.add((desc[i].name, sign * ((q * 1000).round() / 1000)));
+    }
+    return out;
+  }
+
+  /// «٥٠ كيس + ٣٠ كجم» — الأجزاء الصفرية تُسقط ما لم يكن الرصيد كله صفرًا.
+  static String text(List<(String, double)> parts, String Function(double) fmt) {
+    final nz = [for (final p in parts) if (p.$2 != 0) p];
+    final show = nz.isEmpty ? parts.take(1).toList() : nz;
+    return show.map((p) => '${fmt(p.$2)} ${p.$1}').join(' + ');
+  }
+}
+// ==================== END FILE: lib/domain/unit_split.dart ====================
+
+// ==================== FILE: lib/domain/group_classifier.dart ====================
+/// تصنيف أصناف المخزن إلى مجموعات استحقاق من أسمائها.
+///
+/// لكل سطرٍ من المعيار ([RationStandard]) كلماتٌ دالة (أسماء مكوّناته القياسية وما
+/// يضاف إليها): الأصناف التي تحوي اسمها إحداها تُجمع في مجموعةٍ **متى بلغت صنفين**
+/// — صنفٌ وحيد لا يحتاج مجموعة. وصنفٌ يطابق أكثر من سطرٍ يذهب إلى الأول بترتيب
+/// الجدول، فلا يكون في مجموعتين. الناتج **اقتراح** يُراجَع ولا يُحفظ من تلقاء نفسه.
+library;
+
+import 'entitlement_groups.dart';
+import 'official_rations.dart';
+import 'standard_rations.dart';
+
+/// صنفٌ من الكتالوج كما يحتاجه التصنيف.
+class ClassifierItem {
+  const ClassifierItem({required this.id, required this.name, required this.baseUnit, this.isAsset = false});
+
+  final String id;
+  final String name;
+  final String baseUnit;
+  final bool isAsset;
+}
+
+class GroupClassifier {
+  const GroupClassifier._();
+
+  /// كلماتٌ إضافية لأسطر تضمّ أصنافًا كثيرة الأسماء.
+  static const Map<String, List<String>> extraWords = {
+    'spices': ['كمون', 'كركم', 'هيل', 'قرفة', 'كزبرة', 'زنجبيل', 'قرنفل', 'حبهان', 'فلفل أسود', 'بهار', 'بهارات', 'كبسة', 'مندي', 'برياني'],
+    'legumes': ['فول', 'فاصوليا', 'فاصولياء', 'عدس', 'حمص', 'بقوليات', 'لوبيا', 'بازلاء', 'بزالياء'],
+    'oil': ['زيت', 'سمن'],
+    'tea': ['شاي', 'شاهي'],
+    'sugar': ['سكر'],
+    'rice': ['أرز', 'ارز', 'رز'],
+    'flour': ['دقيق', 'طحين'],
+    'milk': ['حليب', 'لبن مجفف'],
+    'tuna': ['تونة', 'تونه'],
+    'paste': ['صلصة', 'صلصه', 'معجون طماطم'],
+  };
+
+  static String _norm(String s) => s.replaceAll(RegExp('[ً-ْـ]'), '').replaceAll('أ', 'ا').replaceAll('إ', 'ا').replaceAll('آ', 'ا').replaceAll('ة', 'ه').replaceAll('ى', 'ي').toLowerCase();
+
+  /// مطابقة كلمة: كلمةٌ كاملة (أو بـ«ال») في اسم الصنف، لا جزءٌ من كلمة أخرى —
+  /// «بيض» لا تلتقط «دقيق أبيض». والكلمة من أربعة أحرف فأكثر تلتقط تصريفاتها.
+  static bool _matches(String name, String w) {
+    if (w.contains(' ')) return name.contains(w);
+    for (final t in name.split(RegExp(r'[\s\-_/،,()]+'))) {
+      if (t == w || t == 'ال$w' || (w.length >= 4 && t.startsWith(w))) return true;
+    }
+    return false;
+  }
+
+  static List<String> _wordsOf(OfficialRationItemSpec spec) {
+    final out = <String>{...?extraWords[spec.itemCode]};
+    for (final k in spec.allKeys) {
+      final ing = StandardRations.of(k);
+      if (ing != null) out.addAll(ing.aliases);
+    }
+    return [for (final w in out) _norm(w)]..removeWhere((w) => w.isEmpty);
+  }
+
+  /// يقترح مجموعاتٍ لأصناف [items] من [standard]، بمقررها لدورة [cycle].
+  ///
+  /// [taken] أصنافٌ في مجموعاتٍ قائمة فلا تدخل في أخرى، و[existingCodes] أسطرٌ لها
+  /// مجموعةٌ بالفعل فلا تُقترح ثانيةً.
+  static List<EntitlementGroup> propose(
+    List<ClassifierItem> items, {
+    RationStandard standard = RationStandard.detailed32,
+    RationCycle cycle = RationCycle.month30,
+    RationVariant variant = RationVariant.primary,
+    Set<String> taken = const {},
+    Set<String> existingCodes = const {},
+    required String Function() newId,
+  }) {
+    final byCode = <String, List<ClassifierItem>>{};
+    final claimed = <String>{...taken};
+    for (final spec in standard.specs) {
+      if (!spec.hasQuantity || existingCodes.contains(spec.itemCode)) continue;
+      final words = _wordsOf(spec);
+      final hits = [
+        for (final it in items)
+          if (!it.isAsset && !claimed.contains(it.id) && words.any((w) => _matches(_norm(it.name), w))) it,
+      ];
+      // سطرٌ يطابقه صنفٌ واحد لا يحتاج مجموعة، وأصنافه تبقى متاحةً لسطرٍ بعده.
+      if (hits.length < 2) continue;
+      byCode[spec.itemCode] = hits;
+      claimed.addAll(hits.map((h) => h.id));
+    }
+    final v = standard == RationStandard.compact27 ? variant : RationVariant.primary;
+    return [
+      for (final e in byCode.entries)
+        () {
+          final spec = standard.specOf(e.key)!;
+          return EntitlementGroup(
+            id: newId(),
+            name: spec.itemName,
+            unitName: spec.unitName,
+            monthlyPerPerson: (OfficialMerge.per30(spec, cycle, variant: v) * 1000).round() / 1000,
+            isCritical: spec.isCritical,
+            stdCode: spec.itemCode,
+            members: [
+              for (final it in e.value)
+                GroupMember(
+                  itemId: it.id,
+                  itemName: it.name,
+                  perBase: GroupUnitGuess.perBase(spec.unitName, it.baseUnit, it.name) ?? 1,
+                ),
+            ],
+          );
+        }(),
+    ];
+  }
+}
+// ==================== END FILE: lib/domain/group_classifier.dart ====================
+
+// ==================== FILE: lib/domain/warehouse_limits.dart ====================
+/// حدود مخزون الصنف في مستودع — التحويل بين الوحدات وحساب الحالة.
+///
+/// **المشكلة التي يحلّها هذا الملف كلّه: وحدتان لرقم واحد.**
+/// الرصيد محفوظ بوحدة الأساس (حبة، كجم)، والمستخدم يفكّر بوحدة التعامل
+/// (كرتون، شوال). فلو خُزّن الحد كما كُتب لقُورن كرتونٌ بحبة وظهر مخزونٌ
+/// كافٍ وهو نافد، أو العكس. ولو خُزّن بالأساس وحده لعاد إلى من كتبه رقمًا
+/// لا يعرفه.
+///
+/// فالحلّ: يُخزَّن الحدّ **بالأساس** ويُحفظ معه **معامل وحدة الإدخال**،
+/// فتُقارن الأرقام بلغةٍ واحدة وتُعرض بلغة صاحبها.
+library;
+
+/// حالة الصنف أمام حدوده.
+enum LimitStatus {
+  /// لا حدّ مضبوط — لا حكم.
+  none,
+
+  /// تحت الحد الأدنى.
+  low,
+
+  /// فوق الحد الأعلى — مالٌ مجمَّد ومساحةٌ مشغولة.
+  over,
+
+  /// ضمن الحدين.
+  ok,
+}
+
+extension LimitStatusLabel on LimitStatus {
+  String get label => switch (this) {
+        LimitStatus.none => 'بلا حدود',
+        LimitStatus.low => 'تحت الأدنى',
+        LimitStatus.over => 'فوق الأعلى',
+        LimitStatus.ok => 'ضمن الحدود',
+      };
+
+  /// نغمة الشارة في الجداول: err | pend | ok | off.
+  String get tone => switch (this) {
+        LimitStatus.none => 'off',
+        LimitStatus.low => 'err',
+        LimitStatus.over => 'pend',
+        LimitStatus.ok => 'ok',
+      };
+}
+
+class WarehouseLimits {
+  const WarehouseLimits._();
+
+  /// معاملٌ صالح: غير الموجب يُعامَل ١ فلا تُقسم كميةٌ على صفر.
+  static double safeFactor(double factor) => factor > 0 ? factor : 1.0;
+
+  /// من وحدة الإدخال إلى وحدة الأساس.
+  static double toBase(double qty, double factor) =>
+      round(qty * safeFactor(factor));
+
+  /// من وحدة الأساس إلى وحدة العرض.
+  static double fromBase(double base, double factor) =>
+      round(base / safeFactor(factor));
+
+  /// ثلاث منازل تكفي أي وحدة تعامل، وتمنع ذيل الكسور العشرية من الظهور.
+  static double round(double v) => (v * 1000).round() / 1000;
+
+  /// حالة الرصيد أمام حدّيه — الثلاثة **بوحدة الأساس**.
+  ///
+  /// الحد صفرٌ يعني «غير مضبوط» لا «صفر قطعة»: مستودعٌ بلا حدّ أدنى لا يُنبَّه
+  /// عليه كلما فرغ صنفٌ لا يعني أحدًا.
+  static LimitStatus statusOf({
+    required double balance,
+    required double minStock,
+    required double maxStock,
+  }) {
+    final hasMin = minStock > 0;
+    final hasMax = maxStock > 0;
+    if (!hasMin && !hasMax) return LimitStatus.none;
+    if (hasMin && balance < minStock) return LimitStatus.low;
+    if (hasMax && balance > maxStock) return LimitStatus.over;
+    return LimitStatus.ok;
+  }
+
+  /// كم ينقص لبلوغ الحد الأدنى — صفرٌ إن لم ينقص شيء.
+  static double shortfall({required double balance, required double minStock}) {
+    if (minStock <= 0 || balance >= minStock) return 0;
+    return round(minStock - balance);
+  }
+
+  /// كم يزيد عن الحد الأعلى.
+  static double surplus({required double balance, required double maxStock}) {
+    if (maxStock <= 0 || balance <= maxStock) return 0;
+    return round(balance - maxStock);
+  }
+
+  /// نسبة الامتلاء إلى الحد الأعلى (0..1 فأكثر)، أو `null` بلا حد أعلى.
+  ///
+  /// منها يُرسم الشريط: رقمٌ وحده لا يُري الفرق بين «قارب الامتلاء» و«تجاوز».
+  static double? fillRatio({required double balance, required double maxStock}) {
+    if (maxStock <= 0) return null;
+    return balance <= 0 ? 0 : round(balance / maxStock);
+  }
+
+  /// تحقّق من سطر حدود قبل حفظه — الأرقام **بوحدة الإدخال**.
+  ///
+  /// يعيد رسالة الخطأ، أو `null` إن صحّ السطر.
+  static String? validate({
+    required String itemId,
+    required double min,
+    required double max,
+  }) {
+    if (itemId.trim().isEmpty) return 'اختر الصنف';
+    if (min < 0 || max < 0) return 'الحدود لا تكون سالبة';
+    if (min == 0 && max == 0) {
+      return 'اضبط حدًّا واحدًا على الأقل — أو احذف السطر';
+    }
+    // الأعلى دون الأدنى يجعل الصنف «تحت الأدنى وفوق الأعلى» معًا، فلا يُفهم
+    // منه قرار.
+    if (min > 0 && max > 0 && max < min) {
+      return 'الحد الأعلى أقل من الأدنى';
+    }
+    return null;
+  }
+
+  // ───────────────────────── الحدود الديناميكية بأيام الكفاية
+
+  /// الحد الأدنى الديناميكي = (حاجة الفرد اليومية × القوة الحالية) × أيام الكفاية.
+  ///
+  /// [dailyPerPerson] بوحدة الأساس، من الخطة الشهرية أو من المقرر. الحدّ يتبع
+  /// القوة: لواءٌ تضاعفت قوته يتضاعف حدّه، وحدٌّ ثابتٌ كُتب لقوةٍ سابقة يُنبّه
+  /// متأخرًا.
+  static double dynamicMin({
+    required double dailyPerPerson,
+    required double strength,
+    int supplyDays = DaysOfSupply.defaultSupplyDays,
+  }) {
+    if (dailyPerPerson <= 0 || strength <= 0 || supplyDays <= 0) return 0;
+    return round(dailyPerPerson * strength * supplyDays);
+  }
+
+  /// حدّ الخطر الحرج = (حاجة الفرد اليومية × القوة الحالية) × أيام الخطر (٣).
+  static double criticalLevel({
+    required double dailyPerPerson,
+    required double strength,
+    int criticalDays = DaysOfSupply.defaultCriticalDays,
+  }) =>
+      dynamicMin(dailyPerPerson: dailyPerPerson, strength: strength, supplyDays: criticalDays);
+
+  /// حدودٌ نافذة: حدّ إعادة الطلب هو الأكبر من المضبوط والديناميكي — الحدّ
+  /// المكتوب يبقى أرضيةً لا يُنزل تحتها، والديناميكي يرفعها حين تكبر القوة.
+  static DaysOfSupply supplyLevels({
+    required double dailyPerPerson,
+    required double strength,
+    double staticMin = 0,
+    int supplyDays = DaysOfSupply.defaultSupplyDays,
+    int criticalDays = DaysOfSupply.defaultCriticalDays,
+  }) {
+    final dyn = dynamicMin(dailyPerPerson: dailyPerPerson, strength: strength, supplyDays: supplyDays);
+    return DaysOfSupply(
+      dailyNeed: round(dailyPerPerson * strength),
+      dynamicMin: dyn,
+      reorderLevel: dyn > staticMin ? dyn : staticMin,
+      criticalLevel:
+          criticalLevel(dailyPerPerson: dailyPerPerson, strength: strength, criticalDays: criticalDays),
+    );
+  }
+
+  /// تحقّق من دفعة سطور: التكرار يُفسد الحفظ الجماعي صامتًا.
+  ///
+  /// آخر سطرٍ لصنفٍ مكرر يدهس ما قبله، فيظن المستخدم أنه ضبط حدّين وقد ضبط
+  /// واحدًا — ولا يعلم أيّهما بقي.
+  static String? validateBatch(List<({String itemId, double min, double max})> rows) {
+    if (rows.isEmpty) return 'أضف سطرًا واحدًا على الأقل';
+    for (final r in rows) {
+      final error = validate(itemId: r.itemId, min: r.min, max: r.max);
+      if (error != null) return error;
+    }
+    final ids = <String>{};
+    for (final r in rows) {
+      if (!ids.add(r.itemId.trim())) {
+        return 'صنف مكرر في الدفعة — ادمج سطريه في سطر واحد';
+      }
+    }
+    return null;
+  }
+}
+
+/// مستويات صنفٍ في مستودع بأيام الكفاية — كلها بوحدة الأساس.
+class DaysOfSupply {
+  const DaysOfSupply({
+    required this.dailyNeed,
+    required this.dynamicMin,
+    required this.reorderLevel,
+    required this.criticalLevel,
+  });
+
+  static const int defaultSupplyDays = 7;
+  static const int defaultCriticalDays = 3;
+
+  static const DaysOfSupply none =
+      DaysOfSupply(dailyNeed: 0, dynamicMin: 0, reorderLevel: 0, criticalLevel: 0);
+
+  /// حاجة القوة كلها في يوم.
+  final double dailyNeed;
+  final double dynamicMin;
+  final double reorderLevel;
+  final double criticalLevel;
+
+  /// كم يومًا يكفي [balance] بالحاجة اليومية — `null` بلا حاجة معروفة.
+  double? daysOfCover(double balance) =>
+      dailyNeed <= 0 ? null : WarehouseLimits.round(balance <= 0 ? 0 : balance / dailyNeed);
+}
+// ==================== END FILE: lib/domain/warehouse_limits.dart ====================
+
+// ==================== FILE: lib/features/catalog/items_screen.dart ====================
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/print/barcode_labels.dart';
+import '../../core/print/barcode128.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_context_menu.dart';
+import '../../core/ui/imd_files.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_layout.dart';
+import '../../core/ui/imd_scan.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_toolbar.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/asset_register_repo.dart';
+import '../../data/repos/catalog_repo.dart';
+import '../../domain/assets.dart';
+import '../../data/repos/movements_repo.dart';
+import '../../domain/access_control.dart';
+import '../../domain/stock_alerts.dart';
+import '../../core/error_log.dart';
+import '../../data/migration/excel_templates/excel_templates.dart' show TemplateKind;
+import '../excel_templates/excel_templates_dialog.dart';
+
+/// إدارة الأصناف بتبويباتها الست:
+/// القائمة، التصنيفات، بطاقة الصنف، الأرصدة، حركة الصنف، الباركودات.
+class ItemsScreen extends StatefulWidget {
+  const ItemsScreen({super.key});
+
+  @override
+  State<ItemsScreen> createState() => _ItemsScreenState();
+}
+
+/// صف وحدة قياس في النموذج.
+class _URow {
+  _URow(String name, double factor, this.base)
+      : name = TextEditingController(text: name),
+        factor = TextEditingController(text: _fmtNum(factor));
+  final TextEditingController name;
+  final TextEditingController factor;
+  bool base;
+
+  void dispose() {
+    name.dispose();
+    factor.dispose();
+  }
+}
+
+String _fmtNum(double v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+class _ItemsScreenState extends State<ItemsScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final CatalogRepo _repo = CatalogRepo(_db);
+  late final MovementsRepo _moves = MovementsRepo(_db);
+
+  // حالة الشاشة `itm`
+  String _tab = 'list';
+  String? _editId;
+  List<Item> _items = const [];
+  List<Category> _cats = const [];
+  Map<String, double> _ledger = const {};
+  bool _loading = true;
+  String _movsId = '';
+
+  // القائمة
+  final _search = TextEditingController();
+
+  // التصنيفات
+  final _cName = TextEditingController();
+  final _cDesc = TextEditingController();
+
+  // النموذج
+  final _iCode = TextEditingController();
+  final _iBC = TextEditingController();
+  final _iName = TextEditingController();
+  final _iMin = TextEditingController();
+
+  /// هل لهذا الصنف حدّ أدنى عام؟
+  ///
+  /// صار للحدود موضعان: حدٌّ عام في بطاقة الصنف، وحدودٌ لكل مستودع في
+  /// «لوحة المستودعات». والعام يُنبّه على الرصيد الكلي ولو كان موزّعًا
+  /// بما يكفي كل مستودع — فيصير ضجيجًا يُتجاهل. فمن ضبط حدود مستودعاته
+  /// يُطفئ العام هنا بدل أن يكتب فيه صفرًا يظنّه حدًّا.
+  bool _iMinOn = false;
+  String _iCat = '';
+  bool _iRef = false;
+  String _iReportUnit = '';
+
+  // الأصل الثابت (v27): يُستلم ويُصرف ويُجرد ويُتلف كأي صنف، ويُتابَع في سجل الأصول.
+  bool _iAsset = false;
+  String _iAssetType = '';
+  final _iLife = TextEditingController();
+  final _iValue = TextEditingController();
+  List<String> _assetTypes = AssetType.all;
+  List<_URow> _uRows = [];
+  bool _saving = false;
+
+  // الأرصدة والحركة
+  String _balId = '';
+  Widget? _balOut;
+  Widget? _movOut;
+
+  // الباركودات
+  final Set<String> _bcChecked = {};
+  final _bcCopies = TextEditingController(text: '1');
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted && _tab == 'form') _save();
+      },
+    );
+    _fetch().then((_) => _switch('list'));
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_search, _cName, _cDesc, _iCode, _iBC, _iName, _iMin, _iLife, _iValue, _bcCopies]) {
+      c.dispose();
+    }
+    for (final r in _uRows) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  /// `itmFetchData()`
+  Future<void> _fetch() async {
+    final items = await _repo.items();
+    final cats = await _repo.categories();
+    final ledger = await MovementsRepo(_db).balances();
+    if (!mounted) return;
+    setState(() {
+      _items = items;
+      _cats = cats;
+      _ledger = ledger;
+      _loading = false;
+    });
+  }
+
+  /// رصيد الصنف من دفتر الحركات وحده (الأرصدة الافتتاحية + صافي الحركات).
+  ///
+  /// كان يُضاف إليه عمود `items.qty`، وهو رصيد عرضٍ يُعاد حسابه من
+  /// الدفتر نفسه — فكانت البيانات المرحَّلة تُحسب مرتين هنا، بينما
+  /// تتجاهله أرصدة المستودعات وفحوص الكفاية، فيظهر للصنف رصيدان مختلفان.
+  double _qty(Item x) => _ledger[x.id] ?? 0;
+
+  bool _w(BuildContext context) => Perm.of(context).writable('items');
+
+  /// صلاحية الحذف وحدها: [Perm.writable] يصدق بالإضافة أو التعديل أو
+  /// الاعتماد، فكان زرُّ الحذف يظهر لمن لا يملك الحذف.
+  bool _canDel(BuildContext context) => Perm.of(context).canDelete('items');
+
+  void _switch(String t) {
+    setState(() => _tab = t);
+    if (t == 'form') _initForm();
+    if (t == 'list' || t == 'cats' || t == 'bc') _fetch();
+    if (t == 'movs' && _movsId.isNotEmpty && _items.any((x) => x.id == _movsId)) _loadMovs(_movsId);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ImdPage(
+      children: [
+        ImdPageTitle(
+          title: 'إدارة الأصناف',
+          icon: 'package',
+          subtitle: 'بطاقات الأصناف والتصنيفات والوحدات والأرصدة وحركة الصنف والباركودات',
+          actions: [ExcelTemplatesButton(kind: TemplateKind.items, onImported: _fetch)],
+        ),
+        ImdItabs(
+          value: _tab,
+          onChanged: _switch,
+          tabs: const [
+            ImdTab('list', 'القائمة', icon: 'clipboard'),
+            ImdTab('cats', 'التصنيفات', icon: 'folder'),
+            ImdTab('form', 'بطاقة الصنف', icon: 'package'),
+            ImdTab('bals', 'الأرصدة', icon: 'chart'),
+            ImdTab('movs', 'حركة الصنف', icon: 'repeat'),
+            ImdTab('bc', 'الباركودات', icon: 'camera'),
+          ],
+        ),
+        if (_loading)
+          const ImdLd('جارٍ التحميل…')
+        else
+          switch (_tab) {
+            'list' => _list(context),
+            'cats' => _catsView(context),
+            'form' => _form(context),
+            'bals' => _bals(context),
+            'movs' => _movs(context),
+            _ => _bc(context),
+          },
+      ],
+    );
+  }
+
+  // ───────────────────────── القائمة ─────────────────────────
+  Widget _list(BuildContext context) {
+    final w = _w(context);
+    final c = context.imd;
+    final lowN = _items.where((x) => StockAlerts.isLow(_qty(x), x.minQty)).length;
+    final q = _search.text.trim().toLowerCase();
+    final rows = _items
+        .where((x) =>
+            q.isEmpty ||
+            x.code.toLowerCase().contains(q) ||
+            x.name.toLowerCase().contains(q) ||
+            x.barcode.contains(q))
+        .toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // .lst-bar
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                style: TextStyle(fontSize: 14, color: c.text),
+                decoration: imdFieldDecoration(context, hint: 'بحث بالكود أو الاسم أو الباركود…'),
+              ),
+            ),
+            const SizedBox(width: 6),
+            ImdScanButton(controller: _search, onScanned: (_) => setState(() {})),
+            const SizedBox(width: 8),
+            ImdButton.outline(label: 'تحديث', icon: 'refresh', small: true, onPressed: _fetch),
+          ]),
+        ),
+        ImdChipsRow(children: [
+          ImdChip('الأصناف: ${nf(_items.length)}', tone: ImdTone.ok),
+          ImdChip('التصنيفات: ${nf(_cats.length)}', tone: ImdTone.code),
+          ImdChip('تحت الحد: ${nf(lowN)}', tone: ImdTone.pend, icon: 'alert'),
+          if (!w) const ImdChip('عرض فقط — التعديل للمدير', tone: ImdTone.off, icon: 'eye'),
+        ]),
+        ImdTableToolbar(
+          page: 'items',
+          onExport: () => _exportList(rows, w),
+        ),
+        ImdTable(
+          minWidth: 720,
+          cards: true,
+          empty: 'لا أصناف مطابقة — أضف أول صنف من تبويب «بطاقة الصنف»',
+          columns: [
+            const ImdCol('الكود'),
+            const ImdCol('اسم الصنف', flex: 2),
+            const ImdCol('التصنيف'),
+            const ImdCol('حد ⚠'),
+            const ImdCol('الرصيد'),
+            const ImdCol('الوحدات', flex: 2),
+            if (w) const ImdCol('', width: 110),
+          ],
+          pageSize: 50,
+          maxHeight: ImdSizes.tableMaxHeight(context),
+          // كليك يمين / ضغطة مطوّلة: نفس إجراءي عمود الأزرار.
+          rowMenu: !w
+              ? null
+              : (i) => [
+                    ImdMenuItem(
+                      label: 'تعديل',
+                      icon: 'edit',
+                      onTap: () {
+                        _editId = rows[i].id;
+                        _switch('form');
+                      },
+                    ),
+                    if (_canDel(context))
+                      ImdMenuItem(label: 'حذف', icon: 'trash', danger: true, onTap: () => _delete(rows[i])),
+                  ],
+          // قيم الخلايا الخام: تصفية الأعمدة والتجميع (مثلًا حسب التصنيف).
+          values: [
+            for (final x in rows)
+              [x.code, x.name, x.categoryName.isEmpty ? '—' : x.categoryName, x.minQty != 0 ? nf(x.minQty) : '—', nf(_qty(x))],
+          ],
+          rows: [
+            for (final x in rows)
+              [
+                Text(x.code, style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(x.name),
+                Text(x.categoryName.isEmpty ? '—' : x.categoryName),
+                Text(x.minQty != 0 ? nf(x.minQty) : '—'),
+                Text(nf(_qty(x)),
+                    style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: (StockAlerts.isLow(_qty(x), x.minQty)) ? c.danger : c.text)),
+                _unitsStr(x),
+                if (w)
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    ImdIconButton(
+                      icon: 'edit',
+                      tooltip: 'تعديل',
+                      onPressed: () {
+                        _editId = x.id;
+                        _switch('form');
+                      },
+                    ),
+                    if (_canDel(context)) ...[
+                      const SizedBox(width: 4),
+                      ImdIconButton(
+                          icon: 'trash',
+                          tooltip: 'حذف',
+                          kind: ImdBtnKind.danger,
+                          onPressed: () => _delete(x)),
+                    ],
+                  ]),
+              ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// `itmUnitsStr`
+  Widget _unitsStr(Item x) {
+    final us = _unitsRaw(x);
+    if (us.isEmpty) return Text('—', style: TextStyle(color: context.imd.faint));
+    return Text(us.map((u) => u.name + (u.isBase ? ' (أساسية)' : '')).join(' · '));
+  }
+
+  /// وحدات الصنف كما خُزّنت (بدون افتراض وحدة عند الخلو).
+  List<ItemUnit> _unitsRaw(Item x) {
+    if (x.units.trim().isEmpty || x.units.trim() == '[]') return const [];
+    return _repo.unitsOf(x);
+  }
+
+  Future<void> _delete(Item x) async {
+    if (!Perm.of(context).guard(context, 'items', PermAction.delete)) return;
+    if (!await imdConfirm(context, 'حذف هذا الصنف نهائيًا؟ لا يمكن التراجع.', ok: 'حذف', danger: true)) return;
+    try {
+      await _repo.deleteItem(x.id);
+      if (!mounted) return;
+      showImdToast(context, '✔ تم الحذف');
+      await _fetch();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  Future<void> _exportList(List<Item> rows, bool w) async {
+    if (!Perm.of(context).guard(context, 'items', 'export')) return;
+    await ImdExcel.save(
+      context,
+      'الأصناف ${ImdFiles.today()}',
+      const ['الكود', 'اسم الصنف', 'التصنيف', 'حد ⚠', 'الرصيد', 'الوحدات'],
+      [
+        for (final x in rows)
+          [
+            x.code,
+            x.name,
+            x.categoryName.isEmpty ? '—' : x.categoryName,
+            x.minQty != 0 ? nf(x.minQty) : '—',
+            nf(_qty(x)),
+            _unitsRaw(x).isEmpty ? '—' : _unitsRaw(x).map((u) => u.name + (u.isBase ? ' (أساسية)' : '')).join(' · '),
+          ],
+      ],
+    );
+  }
+
+  // ───────────────────────── التصنيفات ─────────────────────────
+  Widget _catsView(BuildContext context) {
+    final w = _w(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ImdICard(
+          title: 'إضافة تصنيف رئيسي',
+          icon: 'plus',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ImdF2(children: [
+                ImdFld(controller: _cName, hint: 'اسم التصنيف (مثال: مواد غذائية)'),
+                ImdFld(controller: _cDesc, hint: 'وصف / ملاحظات (اختياري)'),
+              ]),
+              if (w)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ImdButton(label: 'إضافة التصنيف +', onPressed: _addCat),
+                  ),
+                )
+              else
+                const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: ImdLdText('👁 عرض فقط — الإضافة للمدير')),
+            ],
+          ),
+        ),
+        ImdICard(
+          title: 'التصنيفات المسجلة',
+          icon: 'folder',
+          child: ImdTable(
+            cards: true,
+            empty: 'لا تصنيفات بعد',
+            columns: [
+              const ImdCol('م', width: 60),
+              const ImdCol('الاسم', flex: 2),
+              const ImdCol('الوصف', flex: 3),
+              // عمودٌ لا يحمل غير زرِّ الحذف: يتبع صلاحية الحذف نفسها، فلا
+              // يبقى ترويسةً بلا خلية (فيختلف عدد الخلايا عن عدد الأعمدة).
+              if (_canDel(context)) const ImdCol('', width: 110),
+            ],
+            rows: [
+              for (var i = 0; i < _cats.length; i++)
+                [
+                  Text(nf(i + 1)),
+                  Text(_cats[i].name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(_cats[i].description.isEmpty ? '—' : _cats[i].description),
+                  if (_canDel(context))
+                    ImdButton(
+                      label: 'حذف',
+                      icon: 'trash',
+                      kind: ImdBtnKind.danger,
+                      small: true,
+                      onPressed: () => _deleteCat(_cats[i]),
+                    ),
+                ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _addCat() async {
+    final name = _cName.text.trim();
+    if (name.isEmpty) {
+      showImdToast(context, '✖ اكتب اسم التصنيف');
+      return;
+    }
+    try {
+      await _repo.saveCategory(name: name, description: _cDesc.text.trim());
+      _cName.clear();
+      _cDesc.clear();
+      if (!mounted) return;
+      showImdToast(context, '✔ أُضيف التصنيف');
+      await _fetch();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  Future<void> _deleteCat(Category cat) async {
+    if (!Perm.of(context).guard(context, 'items', PermAction.delete)) return;
+    if (!await imdConfirm(context, 'حذف التصنيف؟ الأصناف المرتبطة به تحتفظ بالاسم القديم.', ok: 'حذف', danger: true)) {
+      return;
+    }
+    await _repo.deleteCategory(cat.id);
+    if (!mounted) return;
+    showImdToast(context, '✔ حُذف التصنيف');
+    await _fetch();
+  }
+
+  // ───────────────────────── بطاقة الصنف ─────────────────────────
+  Item? get _cur => _editId == null ? null : _items.where((x) => x.id == _editId).firstOrNull;
+
+  void _initForm() {
+    final cur = _cur;
+    var next = 1;
+    final nums = _items
+        .map((x) => int.tryParse(RegExp(r'\d+').firstMatch(x.code)?.group(0) ?? '0') ?? 0)
+        .where((n) => n > 0)
+        .toList();
+    if (nums.isNotEmpty) next = nums.reduce(math.max) + 1;
+    imdSetText(_iCode, cur?.code ?? '$next');
+    imdSetText(_iBC, cur?.barcode ?? '');
+    imdSetText(_iName, cur?.name ?? '');
+    _iMinOn = cur != null && cur.minQty != 0;
+    imdSetText(_iMin, _iMinOn ? _fmtNum(cur!.minQty) : '');
+    _iCat = cur?.categoryId ?? '';
+    _iRef = cur?.isRefillable ?? false;
+    _iReportUnit = cur?.reportUnit ?? '';
+    _iAsset = cur?.isAsset ?? false;
+    _iAssetType = cur?.assetType ?? '';
+    imdSetText(_iLife, (cur?.lifespanMonths ?? 0) > 0 ? '${cur!.lifespanMonths}' : '');
+    imdSetText(_iValue, (cur?.unitValue ?? 0) > 0 ? _fmtNum(cur!.unitValue) : '');
+    AssetRegisterRepo(_repo.db).allTypes().then((t) {
+      if (mounted) setState(() => _assetTypes = t);
+    });
+    for (final r in _uRows) {
+      r.dispose();
+    }
+    _uRows = [];
+    if (cur != null) {
+      for (final u in _unitsRaw(cur)) {
+        _uRows.add(_URow(u.name, u.factor, u.isBase));
+      }
+    }
+    if (_uRows.isEmpty) _uRows.add(_URow('قطعة', 1, true));
+  }
+
+  Widget _form(BuildContext context) {
+    final cur = _cur;
+    final w = _w(context);
+    final c = context.imd;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ImdICard(
+          title: cur != null ? 'وضع التعديل: ${cur.code} — ${cur.name}' : 'وضع الإضافة: تسجيل صنف جديد',
+          icon: cur != null ? 'edit' : 'plus-square',
+          titleColor: context.imd.warn,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ImdF2(children: [
+                ImdLabeled('الكود (فريد) *', ImdFld(controller: _iCode, readOnly: cur != null)),
+                ImdLabeled(
+                  'الباركود',
+                  Row(children: [
+                    Expanded(child: ImdFld(controller: _iBC)),
+                    const SizedBox(width: 6),
+                    ImdScanButton(controller: _iBC),
+                    const SizedBox(width: 6),
+                    ImdButton.outline(
+                      label: 'توليد',
+                      icon: 'settings',
+                      small: true,
+                      onPressed: _genOne,
+                    ),
+                  ]),
+                ),
+              ]),
+              const SizedBox(height: 10),
+              ImdLabeled('اسم الصنف (شجرة المواد) *', ImdFld(controller: _iName)),
+              const SizedBox(height: 10),
+              ImdF2(children: [
+                ImdLabeled(
+                  'التصنيف الرئيسي',
+                  ImdSelect<String>(
+                    value: _iCat,
+                    items: [('', '— بدون تصنيف —'), for (final cat in _cats) (cat.id, cat.name)],
+                    onChanged: (v) => setState(() => _iCat = v ?? ''),
+                  ),
+                ),
+                ImdLabeled(
+                  'الحد الأدنى للتنبيه ⚠',
+                  Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    ImdCheckbox(
+                      value: _iMinOn,
+                      label: 'تعيين حد عام لهذا الصنف',
+                      onChanged: (v) => setState(() {
+                        _iMinOn = v;
+                        if (!v) imdSetText(_iMin, '');
+                      }),
+                    ),
+                    if (_iMinOn)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: ImdFld(controller: _iMin, number: true),
+                      )
+                    else
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          'بلا حد عام — تُضبط الحدود لكل مستودع من '
+                          '«المستودعات ← لوحة المستودعات»، فينبّه كلٌّ على نقصه.',
+                          style: TextStyle(fontSize: 11.5, color: context.imd.muted, height: 1.5),
+                        ),
+                      ),
+                  ]),
+                ),
+                // الرصيد يُخزَّن بالوحدة الأساسية دائمًا؛ هذه للعرض فقط في
+                // التقارير وفي رصيد شاشات الإدخال.
+                ImdLabeled(
+                  'وحدة العرض في التقارير',
+                  ImdSelect<String>(
+                    value: _iReportUnit,
+                    items: [
+                      ('', '— الوحدة الأساسية —'),
+                      for (final r in _uRows)
+                        if (r.name.text.trim().isNotEmpty)
+                          (r.name.text.trim(), r.name.text.trim()),
+                    ],
+                    onChanged: (v) => setState(() => _iReportUnit = v ?? ''),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 12),
+              InkWell(
+                onTap: () => setState(() => _iRef = !_iRef),
+                child: Row(children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: Checkbox(
+                      value: _iRef,
+                      activeColor: c.accent,
+                      onChanged: (v) => setState(() => _iRef = v ?? false),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('صنف قابل للتعبئة/الاستبدال (كالغاز)',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: c.text)),
+                ]),
+              ),
+              const SizedBox(height: 10),
+              ImdCheckbox(
+                value: _iAsset,
+                label: 'أصل ثابت (يُتابَع في سجل الأصول بعُهده لدى الوحدات والمطابخ والأفران)',
+                onChanged: (v) => setState(() {
+                  _iAsset = v;
+                  if (v && _iAssetType.isEmpty) _iAssetType = AssetType.equipment;
+                }),
+              ),
+              if (_iAsset) ...[
+                const SizedBox(height: 8),
+                ImdGrid(columns: 3, minItemWidth: 170, gap: 10, children: [
+                  ImdLabeled(
+                    'نوع الأصل',
+                    ImdSelect<String>(
+                      value: _iAssetType,
+                      items: [
+                        for (final t in {..._assetTypes, if (_iAssetType.isNotEmpty) _iAssetType}) (t, AssetType.label(t)),
+                      ],
+                      onChanged: (v) => setState(() => _iAssetType = v ?? AssetType.equipment),
+                    ),
+                  ),
+                  ImdLabeled('العمر الافتراضي (أشهر)', ImdFld(controller: _iLife, number: true, hint: 'مثال: 60')),
+                  ImdLabeled('القيمة الدفترية للوحدة الأساسية', ImdFld(controller: _iValue, number: true, hint: '0')),
+                ]),
+              ],
+            ],
+          ),
+        ),
+        ImdICard(
+          title: 'وحدات القياس ومعاملات التحويل',
+          icon: 'scale',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('المعامل = كم وحدة أساسية تساوي هذه الوحدة (كرتون ×12 = 12 قطعة)',
+                    style: TextStyle(fontSize: 12, color: c.muted)),
+              ),
+              for (final r in _uRows) _unitRow(r),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: ImdButton.outline(
+                  label: '+ إضافة وحدة',
+                  small: true,
+                  onPressed: () => setState(() => _uRows.add(_URow('', 1, false))),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 20),
+          child: Row(children: [
+            Expanded(
+              child: ImdButton.outline(
+                label: 'إلغاء / مسح',
+                expand: true,
+                onPressed: () => setState(() {
+                  _editId = null;
+                  _initForm();
+                }),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              flex: 2,
+              child: w
+                  ? ImdButton(
+                      label: cur != null ? 'حفظ التعديلات' : 'حفظ بطاقة الصنف',
+                      icon: 'save',
+                      expand: true,
+                      busy: _saving,
+                      onPressed: _save,
+                    )
+                  : const ImdButton(label: 'عرض فقط — الإضافة للمدير', icon: 'eye', expand: true),
+            ),
+          ]),
+        ),
+      ],
+    );
+  }
+
+  Widget _unitRow(_URow r) {
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(children: [
+        Expanded(flex: 14, child: ImdFld(controller: r.name, hint: 'اسم الوحدة (مثال: كرتون)', dense: true)),
+        const SizedBox(width: 8),
+        Expanded(flex: 7, child: ImdFld(controller: r.factor, hint: 'المعامل ×', number: true, dense: true)),
+        const SizedBox(width: 8),
+        InkWell(
+          onTap: () => setState(() {
+            for (final x in _uRows) {
+              x.base = identical(x, r);
+            }
+          }),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: Radio<bool>(
+                value: true,
+                // ignore: deprecated_member_use
+                groupValue: r.base,
+                activeColor: c.accent,
+                // ignore: deprecated_member_use
+                onChanged: (_) => setState(() {
+                  for (final x in _uRows) {
+                    x.base = identical(x, r);
+                  }
+                }),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text('أساسية', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: c.text)),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        ImdIconButton(
+          icon: 'x',
+          tooltip: 'حذف السطر',
+          kind: ImdBtnKind.danger,
+          onPressed: () => setState(() {
+            _uRows.remove(r);
+            r.dispose();
+          }),
+        ),
+      ]),
+    );
+  }
+
+  Future<void> _save() async {
+    final cur = _cur;
+    if (!Perm.of(context).guard(context, 'items', cur != null ? 'edit' : 'create')) return;
+    final name = _iName.text.trim(), code = _iCode.text.trim();
+    if (name.isEmpty) return showImdToast(context, '✖ أدخل اسم الصنف');
+    if (code.isEmpty) return showImdToast(context, '✖ أدخل كود الصنف');
+    final us = <ItemUnit>[];
+    for (final r in _uRows) {
+      final nm = r.name.text.trim();
+      final fc = double.tryParse(r.factor.text.trim());
+      if (nm.isNotEmpty) us.add(ItemUnit(name: nm, factor: (fc == null || fc == 0) ? 1 : fc, isBase: r.base));
+    }
+    if (us.isEmpty) return showImdToast(context, '✖ أضف وحدة قياس واحدة على الأقل');
+    if (!us.any((u) => u.isBase)) us[0] = ItemUnit(name: us[0].name, factor: us[0].factor, isBase: true);
+    final dup = await _repo.itemByCode(code);
+    if (!mounted) return;
+    if (dup != null && dup.id != _editId) return showImdToast(context, '✖ الكود مستخدم لصنف آخر');
+    setState(() => _saving = true);
+    try {
+      final cat = _cats.where((x) => x.id == _iCat).firstOrNull;
+      await _repo.saveItem(
+        id: cur?.id,
+        code: code,
+        name: name,
+        barcode: _iBC.text.trim(),
+        categoryId: _iCat,
+        categoryName: cat?.name ?? '',
+        minQty: _iMinOn ? (double.tryParse(_iMin.text.trim()) ?? 0) : 0,
+        isRefillable: _iRef,
+        reportUnit: _iReportUnit,
+        isAsset: _iAsset,
+        assetType: _iAsset ? (_iAssetType.isEmpty ? AssetType.equipment : _iAssetType) : '',
+        lifespanMonths: _iAsset ? (int.tryParse(_iLife.text.trim()) ?? 0) : 0,
+        unitValue: _iAsset ? (double.tryParse(_iValue.text.trim().replaceAll(',', '')) ?? 0) : 0,
+        units: us,
+        baseUnit: (us.where((u) => u.isBase).firstOrNull ?? us.first).name,
+      );
+      if (!mounted) return;
+      showImdToast(context, cur != null ? '✔ تم حفظ التعديلات' : '🎉 تم حفظ الصنف بنجاح');
+      _editId = null;
+      await _fetch();
+      _switch('list');
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ───────────────────────── الأرصدة ─────────────────────────
+  Widget _itemSelect(String value, ValueChanged<String> onChanged) => ImdSelect<String>(
+        value: value,
+        items: [('', '— اختر الصنف —'), for (final x in _items) (x.id, '${x.code} — ${x.name}')],
+        onChanged: (v) => onChanged(v ?? ''),
+      );
+
+  Widget _bals(BuildContext context) {
+    return ImdICard(
+      title: 'أرصدة الصنف (بوحدة الأساس)',
+      icon: 'chart',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _itemSelect(_balId, (v) {
+            setState(() => _balId = v);
+            _calcBal(v);
+          }),
+          const SizedBox(height: 14),
+          _balOut ?? ImdLd(_items.isNotEmpty ? 'اختر صنفًا لعرض رصيده' : 'لا أصناف بعد', center: true),
+        ],
+      ),
+    );
+  }
+
+  /// `itmCalcBal(id)` — من الاستلام والصرف غير المسودة، بمعامل وحدة السطر.
+  Future<void> _calcBal(String id) async {
+    if (id.isEmpty) {
+      setState(() => _balOut = const ImdLd('اختر صنفًا', center: true));
+      return;
+    }
+    setState(() => _balOut = const ImdLd('جارٍ الحساب…', center: true));
+    final it = _items.firstWhere((x) => x.id == id);
+    final rc = (await _moves.receiptsOfItem(id))
+        .where((r) => r.status != 'DRAFT');
+    final iss = (await _moves.issuesOfItem(id))
+        .where((r) => r.status != 'DRAFT');
+    final units = _unitsRaw(it);
+    double fac(String u) {
+      final f = units.where((y) => y.name == u).firstOrNull;
+      return f == null ? 1 : (f.factor == 0 ? 1 : f.factor);
+    }
+
+    var tin = 0.0, tout = 0.0, nin = 0, nout = 0;
+    for (final r in rc) {
+      tin += r.qty * fac(r.unitName);
+      nin++;
+    }
+    for (final r in iss) {
+      tout += r.qty * fac(r.unitName);
+      nout++;
+    }
+    final bal = tin - tout, min = it.minQty;
+    final base = it.baseUnit.isNotEmpty
+        ? it.baseUnit
+        : (units.where((u) => u.isBase).firstOrNull?.name ?? 'وحدة الأساس');
+    double r2(double v) => (v * 100).round() / 100;
+    if (!mounted) return;
+    final c = context.imd;
+    setState(() {
+      _balOut = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ImdKpis(children: [
+            ImdKpi(label: 'إجمالي الوارد (${nf(nin)} حركة)', value: nf(r2(tin)), color: c.accent),
+            ImdKpi(label: 'إجمالي المنصرف (${nf(nout)} حركة)', value: nf(r2(tout)), color: c.danger),
+            ImdKpi(
+              label: 'الرصيد الحالي — $base',
+              value: nf(r2(bal)),
+              extra: bal <= 0
+                  ? const ImdChip('فارغ ❌', tone: ImdTone.off)
+                  : (StockAlerts.isLow(bal, min)
+                      ? const ImdChip('تحت الحد ⚠️', tone: ImdTone.pend)
+                      : const ImdChip('جيد ✅', tone: ImdTone.ok)),
+            ),
+            ImdKpi(label: 'حد التنبيه ⚠', value: min != 0 ? nf(min) : '—'),
+          ]),
+          if (nin == 0 && nout == 0) const ImdLd('لا حركات بعد — استخدم شاشة «استلام بضاعة» لإضافة أول رصيد'),
+        ],
+      );
+    });
+  }
+
+  // ───────────────────────── حركة الصنف ─────────────────────────
+  Widget _movs(BuildContext context) {
+    return ImdICard(
+      title: 'كارت الصنف (سجل الحركة الكامل)',
+      icon: 'repeat',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _itemSelect(_movsId, _loadMovs),
+          const SizedBox(height: 14),
+          _movOut ?? const ImdLd('اختر صنفًا لعرض حركته', center: true),
+        ],
+      ),
+    );
+  }
+
+  /// `itmLoadMovs(id)`
+  Future<void> _loadMovs(String id) async {
+    setState(() => _movsId = id);
+    if (id.isEmpty) {
+      setState(() => _movOut = const ImdLd('اختر صنفًا', center: true));
+      return;
+    }
+    setState(() => _movOut = const ImdLd('جارٍ التحميل…', center: true));
+    final rc = (await _moves.receiptsOfItem(id))
+        .where((r) => r.status != 'DRAFT')
+        .map((r) => (t: 'in', at: r.createdAt, date: r.date, side: r.supplier.isNotEmpty ? r.supplier : r.warehouse, qty: r.qty, unit: r.unitName, ref: r.refNo, notes: r.notes));
+    final iss = (await _moves.issuesOfItem(id))
+        .where((r) => r.status != 'DRAFT')
+        .map((r) => (
+              t: 'out',
+              at: r.createdAt,
+              date: r.date,
+              side: r.recipientDisplay.isNotEmpty
+                  ? r.recipientDisplay
+                  : (r.beneficiaryUnitName.isNotEmpty ? r.beneficiaryUnitName : r.unitName),
+              qty: r.qty,
+              unit: r.unitName,
+              ref: r.refNo,
+              notes: r.notes
+            ));
+    final movs = [...rc, ...iss]..sort((a, b) => b.at.compareTo(a.at));
+    if (!mounted) return;
+    setState(() {
+      if (movs.isEmpty) {
+        _movOut = const ImdLd('لا حركات بعد لهذا الصنف', center: true);
+        return;
+      }
+      _movOut = ImdTable(
+        minWidth: 560,
+        cards: true,
+        columns: const [
+          ImdCol('التاريخ'),
+          ImdCol('النوع'),
+          ImdCol('الجهة', flex: 2),
+          ImdCol('الكمية'),
+          ImdCol('مرجع'),
+          ImdCol('ملاحظات', flex: 2),
+        ],
+        pageSize: 50,
+        rows: [
+          for (final m in movs.take(100))
+            [
+              Text(arDate(m.at)),
+              m.t == 'in'
+                  ? const ImdChip('وارد 🟢', tone: ImdTone.ok)
+                  : const ImdChip('صرف 🔴', tone: ImdTone.pend),
+              Text(m.side.isEmpty ? '—' : m.side),
+              Text.rich(TextSpan(children: [
+                TextSpan(text: nf(m.qty), style: const TextStyle(fontWeight: FontWeight.w600)),
+                TextSpan(text: ' ${m.unit}'),
+              ])),
+              Text(m.ref.isEmpty ? '—' : m.ref),
+              Text(m.notes),
+            ],
+        ],
+      );
+    });
+  }
+
+  // ───────────────────────── الباركودات ─────────────────────────
+  Widget _bc(BuildContext context) {
+    final w = _w(context);
+    final c = context.imd;
+    final withBc = _items.where((x) => x.barcode.isNotEmpty).length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ImdICard(
+          title: 'محطة الباركودات',
+          icon: 'camera',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ImdChipsRow(children: [
+                ImdChip('إجمالي: ${nf(_items.length)}', tone: ImdTone.ok),
+                ImdChip('لديه باركود: ${nf(withBc)}', tone: ImdTone.code),
+                ImdChip('بدون: ${nf(_items.length - withBc)}', tone: ImdTone.pend),
+              ]),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (w) ImdButton(label: 'توليد للناقص', icon: 'settings', small: true, onPressed: _genMissing),
+                  ImdButton.outline(
+                    label: 'تحديد الكل',
+                    icon: 'check-circle',
+                    small: true,
+                    onPressed: () => setState(() {
+                      _bcChecked
+                        ..clear()
+                        ..addAll(_items.where((x) => x.barcode.isNotEmpty).map((x) => x.id));
+                    }),
+                  ),
+                  ImdButton.outline(label: 'إلغاء التحديد', small: true, onPressed: () => setState(_bcChecked.clear)),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('نسخ:', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: c.text)),
+                    const SizedBox(width: 6),
+                    ImdFit(width: 70, child: ImdFld(controller: _bcCopies, number: true, dense: true)),
+                    const SizedBox(width: 6),
+                    ImdScanButton(controller: _bcCopies),
+                  ]),
+                  ImdButton(label: 'معاينة الملصقات وطباعتها', icon: 'printer', small: true, onPressed: _printLabels),
+                ],
+              ),
+            ],
+          ),
+        ),
+        if (_items.isEmpty)
+          const ImdLd('لا أصناف بعد — أنشئ أصنافًا أولًا', center: true)
+        else
+          for (final x in _items) _bcRow(x),
+      ],
+    );
+  }
+
+  Widget _bcRow(Item x) {
+    final c = context.imd;
+    final has = x.barcode.isNotEmpty;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border.all(color: c.line),
+        borderRadius: BorderRadius.circular(ImdSizes.radius),
+        boxShadow: imdShadow(c),
+      ),
+      child: Row(children: [
+        SizedBox(
+          width: 20,
+          height: 20,
+          child: Checkbox(
+            value: has && _bcChecked.contains(x.id),
+            activeColor: c.accent,
+            onChanged: has
+                ? (v) => setState(() => v == true ? _bcChecked.add(x.id) : _bcChecked.remove(x.id))
+                : null,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('${x.code} — ${x.name}', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.text)),
+              const SizedBox(height: 4),
+              has ? Barcode128View(x.barcode) : const ImdChip('⚠️ بدون باركود', tone: ImdTone.pend),
+            ],
+          ),
+        ),
+        if (has) ...[
+          const SizedBox(width: 10),
+          ImdButton.outline(
+            label: 'نسخ',
+            icon: 'clipboard',
+            small: true,
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: x.barcode));
+              if (mounted) showImdToast(context, '📋 نُسخ: ${x.barcode}');
+            },
+          ),
+        ],
+      ]),
+    );
+  }
+
+  /// زر «توليد» في بطاقة الصنف: يملأ الحقل بباركود نظامي غير مكرر (لا يحفظ).
+  Future<void> _genOne() async {
+    try {
+      final bc = await _repo.newItemBarcode();
+      if (mounted) imdSetText(_iBC, bc);
+    } on StateError catch (e) {
+      if (mounted) showImdToast(context, '✖ ${e.message}', error: true);
+    }
+  }
+
+  /// `itmGenMissing()`
+  Future<void> _genMissing() async {
+    final miss = _items.where((x) => x.barcode.isEmpty).toList();
+    if (miss.isEmpty) return showImdToast(context, '✔ جميع الأصناف لديها باركود');
+    if (!await imdConfirm(context, 'توليد باركود نظامي لـ ${miss.length} صنف؟')) return;
+    var n = 0;
+    final gen = await _repo.barcodeGenerator();
+    for (final x in miss) {
+      try {
+        await _repo.setItemBarcode(x.id, await _repo.newItemBarcode(generator: gen));
+        n++;
+      } catch (err, stack) {
+        ErrorLogger.log('items.barcodeGenerate', err, stack);
+      }
+    }
+    if (!mounted) return;
+    showImdToast(context, '✔ ولّد باركود لـ $n صنف');
+    await _fetch();
+    // الأصناف ذات الباركود محددة افتراضيًا.
+    setState(() => _bcChecked.addAll(_items.where((x) => x.barcode.isNotEmpty).map((x) => x.id)));
+  }
+
+  /// `itmPrintLabels()`
+  Future<void> _printLabels() async {
+    if (!Perm.of(context).guard(context, 'items', 'print')) return;
+    final sel = _items.where((x) => x.barcode.isNotEmpty && _bcChecked.contains(x.id)).toList();
+    if (sel.isEmpty) return showImdToast(context, '⚠ حدد صنوفًا لها باركود');
+    final copies = (int.tryParse(_bcCopies.text.trim()) ?? 1).clamp(1, 50);
+    showImdToast(context, '💡 على الجوال: اختر «حفظ كملف PDF» ثم شاركه مع الطابعة');
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => BarcodeLabelsSheet(
+        labels: [
+          for (final x in sel)
+            for (var i = 0; i < copies; i++) (name: x.name, code: x.code, barcode: x.barcode),
+        ],
+      ),
+    ));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // الأصناف ذات الباركود محددة مبدئيًا.
+    if (_bcChecked.isEmpty) _bcChecked.addAll(_items.where((x) => x.barcode.isNotEmpty).map((x) => x.id));
+  }
+}
+// ==================== END FILE: lib/features/catalog/items_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/warehouses_screen.dart ====================
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/security/auth_service.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_layout.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/audit_repo.dart';
+import '../../data/repos/camp_ledger_repo.dart';
+import '../../data/repos/catalog_repo.dart';
+import '../../data/repos/movements_repo.dart';
+import 'warehouse_dashboard_view.dart';
+import 'camp_link_field.dart';
+
+/// المستودعات — نقل مطابق لـ `renderStores()`: بحث وإحصاءات، نموذج إضافة/تعديل مع حقل «يغذي معسكر»،
+/// ملاحظات تشغيلية، وجدول بالاستخدام (وارد/صرف/تحويل) وآخر حركة.
+class WarehousesScreen extends StatefulWidget {
+  const WarehousesScreen({super.key});
+
+  @override
+  State<WarehousesScreen> createState() => _WarehousesScreenState();
+}
+
+class _Usage {
+  int count = 0, receipts = 0, issues = 0, transfers = 0, returns = 0, facs = 0;
+  String lastDate = '';
+}
+
+class _WarehousesScreenState extends State<WarehousesScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final CatalogRepo _repo = CatalogRepo(_db);
+
+  List<Warehouse> _items = const [];
+  List<BeneficiaryUnit> _camps = const [];
+  Map<String, _Usage> _usage = const {};
+  bool _feedsAll = true;
+  List<String> _campIds = const [];
+  String? _editId;
+  bool _loading = true;
+
+  final _q = TextEditingController();
+  final _code = TextEditingController();
+  final _name = TextEditingController();
+  final _manager = TextEditingController();
+  final _location = TextEditingController();
+  final _notes = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted) _save();
+      },
+    );
+    _render();
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_q, _code, _name, _manager, _location, _notes]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// `stoLoad()` ثم `renderStores()`
+  Future<void> _render() async {
+    final moves = MovementsRepo(_db);
+    final whs = await _repo.warehouses();
+    final receipts = await moves.usageOf('receipts', 'warehouse');
+    final issues = await moves.usageOf('issues', 'warehouse');
+    final transfers = await moves.usageOf('transfers', 'warehouse');
+    final transfersIn = await moves.usageOf('transfers', 'dest_warehouse');
+    final returns = await moves.usageOf('returns', 'warehouse');
+    final facs = await _repo.facilities();
+    final units = await _repo.units();
+    whs.sort((a, b) => a.name.compareTo(b.name));
+    final camps = units.where((u) => u.type == 'camp' || u.parentId.isEmpty).toList()
+      ..sort((a, b) => a.code.compareTo(b.code));
+    final usage = <String, _Usage>{};
+    void add(String name, String kind, int n, String date) {
+      final k = name.trim();
+      if (k.isEmpty) return;
+      final u = usage.putIfAbsent(k, _Usage.new);
+      u.count += n;
+      switch (kind) {
+        case 'receipts':
+          u.receipts += n;
+        case 'issues':
+          u.issues += n;
+        case 'transfers':
+          u.transfers += n;
+        case 'returns':
+          u.returns += n;
+        case 'facs':
+          u.facs += n;
+      }
+      if (date.isNotEmpty && (u.lastDate.isEmpty || date.compareTo(u.lastDate) > 0)) u.lastDate = date;
+    }
+
+    void addAll(Map<String, ({int count, String lastDate})> src, String kind) =>
+        src.forEach((k, v) => add(k, kind, v.count, v.lastDate));
+
+    addAll(receipts, 'receipts');
+    addAll(issues, 'issues');
+    addAll(transfers, 'transfers');
+    addAll(transfersIn, 'transfers');
+    addAll(returns, 'returns');
+    for (final f in facs) {
+      add(f.warehouse, 'facs', 1, '');
+    }
+    if (!mounted) return;
+    final cur = whs.where((x) => x.id == _editId).firstOrNull;
+    imdSetText(_code, cur?.code ?? '');
+    imdSetText(_name, cur?.name ?? '');
+    imdSetText(_manager, cur?.manager ?? '');
+    imdSetText(_location, cur?.location ?? '');
+    imdSetText(_notes, cur?.notes ?? '');
+    final ids = cur == null ? <String>[] : _repo.campsOf(cur);
+    setState(() {
+      _items = whs;
+      _camps = camps;
+      _usage = usage;
+      _campIds = ids;
+      _feedsAll = cur == null ? true : (cur.feedsAllCamps && ids.isEmpty);
+      _loading = false;
+    });
+  }
+
+  /// `stoFeedsCampLabel(w)`
+  String _feedsLabel(Warehouse w) {
+    if (w.feedsAllCamps) return 'كل المعسكرات';
+    final ids = _repo.campsOf(w);
+    if (ids.isEmpty) return '—';
+    final names = [for (final id in ids) _camps.where((c) => c.id == id).firstOrNull?.name].whereType<String>();
+    return names.isEmpty ? '—' : names.join('، ');
+  }
+
+  /// `stoSave()`
+  Future<void> _save() async {
+    if (!Perm.of(context).guard(context, 'stores', _editId != null ? 'edit' : 'create')) return;
+    final name = _name.text.trim(), code = _code.text.trim();
+    if (name.isEmpty) return showImdToast(context, '✖ أدخل اسم المستودع');
+    if (_items.any((x) => x.id != _editId && x.name.trim().toLowerCase() == name.toLowerCase())) {
+      return showImdToast(context, '✖ يوجد مستودع بنفس الاسم بالفعل');
+    }
+    if (code.isNotEmpty && _items.any((x) => x.id != _editId && x.code.trim().toLowerCase() == code.toLowerCase())) {
+      return showImdToast(context, '✖ يوجد مستودع بنفس الكود بالفعل');
+    }
+    // «محدد» بلا أي معسكر يُعامل كجميع المعسكرات حتى لا يختفي المستودع من الصرف والتحويل.
+    final all = _feedsAll || _campIds.isEmpty;
+    final audit = AuditRepo(_db);
+    final actor = context.read<AuthService>().currentUser;
+    try {
+      await _repo.saveWarehouse(
+        id: _editId,
+        code: code,
+        name: name,
+        manager: _manager.text.trim(),
+        location: _location.text.trim(),
+        notes: _notes.text.trim(),
+        feedsAllCamps: all,
+        campIds: all ? const [] : _campIds,
+      );
+      if (_editId != null) {
+        await audit.write('WAREHOUSE_UPDATED', 'warehouse', 'تعديل بيانات مستودع',
+            details: {'target': name, 'status': 'UPDATED', 'risk': 'normal'}, actor: actor);
+        if (mounted) showImdToast(context, '✔ تم تحديث المستودع');
+      } else {
+        await audit.write('WAREHOUSE_CREATED', 'warehouse', 'إضافة مستودع جديد',
+            details: {'target': name, 'status': 'CREATED', 'risk': 'normal'}, actor: actor);
+        if (mounted) showImdToast(context, '🎉 تم إضافة المستودع');
+      }
+      _editId = null;
+      await _render();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  Future<void> _delete(Warehouse it) async {
+    if (!Perm.of(context).guard(context, 'stores', 'delete')) return;
+    final u = _usage[it.name.trim()];
+    if ((u?.count ?? 0) > 0 &&
+        !await imdConfirm(context, 'هذا المستودع مرتبط بحركات سابقة (${nf(u!.count)}). هل تريد حذفه رغم ذلك؟',
+            danger: true)) {
+      return;
+    }
+    if (!mounted || !await imdConfirm(context, 'حذف المستودع «${it.name}»؟', ok: 'حذف', danger: true)) return;
+    if (!mounted) return;
+    final actor = context.read<AuthService>().currentUser;
+    try {
+      await _repo.deleteWarehouse(it.id);
+      await AuditRepo(_db).write('WAREHOUSE_DELETED', 'warehouse', 'حذف مستودع',
+          details: {'target': it.name, 'status': 'DELETED', 'qty': u?.count ?? 0, 'risk': 'sensitive'}, actor: actor);
+      if (!mounted) return;
+      showImdToast(context, '✔ تم حذف المستودع');
+      if (_editId == it.id) _editId = null;
+      await _render();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  /// تعيين المخزن الرئيسي — منه وحده تُغذّى المعسكرات.
+  Future<void> _setMain(Warehouse w) async {
+    if (!Perm.of(context).guard(context, 'stores', 'edit')) return;
+    final current = await CampLedgerRepo(_db).mainWarehouse();
+    if (!mounted) return;
+    final ok = await imdConfirm(
+      context,
+      current == null
+          ? 'تعيين «${w.name}» مخزنًا رئيسيًا؟ تغذية المعسكرات ستكون منه وحده.'
+          : 'نقل الصفة من «${current.name}» إلى «${w.name}»؟ '
+              'تغذية المعسكرات ستكون من «${w.name}» وحده بعد ذلك.',
+      ok: 'تعيين',
+    );
+    if (!ok || !mounted) return;
+    await CampLedgerRepo(_db).setMainWarehouse(
+      w.id,
+      actor: context.read<AuthService>().currentUser?.email ?? '',
+    );
+    if (!mounted) return;
+    showImdToast(context, '✔ صار «${w.name}» المخزن الرئيسي');
+    await _render();
+  }
+
+  void _newRecord() {
+    _editId = null;
+    _render();
+  }
+
+  /// dir | board
+  String _tab = 'dir';
+
+  @override
+  Widget build(BuildContext context) {
+    // الإضافة والتعديل والحذف بصلاحية «المستودعات» نفسها (لا بالمدير وحده)، وكل إجراءٍ محروسٌ في دالته.
+    final can = Perm.of(context).writable('stores');
+    // صلاحية الحذف وحدها: `writable` يصدق بالإضافة أو التعديل أو الاعتماد،
+    // فكان زرُّ الحذف يظهر لمن لا يملك الحذف.
+    final canDel = Perm.of(context).canDelete('stores');
+    final cur = _items.where((x) => x.id == _editId).firstOrNull;
+    final q = _q.text.trim().toLowerCase();
+    final rows = _items
+        .where((x) => q.isEmpty || [x.code, x.name, x.manager, x.notes, x.location].any((v) => v.toLowerCase().contains(q)))
+        .toList();
+    final used = _items.where((x) => (_usage[x.name.trim()]?.count ?? 0) > 0).length;
+    final withCode = _items.where((x) => x.code.trim().isNotEmpty).length;
+    final linkedF = _items.where((x) => (_usage[x.name.trim()]?.facs ?? 0) > 0).length;
+
+    return ImdPage(children: [
+      const ImdPageTitle(
+        title: 'المستودعات',
+        icon: 'warehouse',
+        subtitle: 'تعريف المستودعات وحدود مخزونها — ما تحت الحد الأدنى وما فوق الأعلى',
+      ),
+      ImdItabs(
+        value: _tab,
+        onChanged: (v) => setState(() => _tab = v),
+        tabs: const [
+          ImdTab('dir', 'دليل المستودعات', icon: 'warehouse'),
+          ImdTab('board', 'لوحة المستودعات', icon: 'radio'),
+        ],
+      ),
+      const SizedBox(height: 4),
+      // اللوحة حيث يقع الرصيد لا في شاشةٍ أخرى تُبحث عنها: من يعرّف المستودع
+      // هو من يضبط حدوده ويقرأ نقصها.
+      if (_tab == 'board')
+        WarehouseDashboardView(warehouses: _items)
+      else ...[
+      ImdICard(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          ImdSearchBar(
+            controller: _q,
+            hint: 'بحث بالكود أو الاسم أو الموقع…',
+            onChanged: (_) => setState(() {}),
+            actions: [
+              ImdButton.outline(label: 'تحديث', icon: 'refresh', small: true, onPressed: _render),
+              if (can) ImdButton.outline(label: 'مستودع جديد', icon: 'plus-square', small: true, onPressed: _newRecord),
+            ],
+          ),
+          ImdChipsRow(bottom: 0, children: [
+            ImdChip('المستودعات: ${nf(_items.length)}', tone: ImdTone.ok),
+            ImdChip('بأكواد: ${nf(withCode)}', tone: ImdTone.code),
+            ImdChip('نشطة بالحركات: ${nf(used)}', tone: ImdTone.pend),
+            ImdChip('مرتبطة بمطابخ/أفران: ${nf(linkedF)}', tone: ImdTone.off),
+          ]),
+        ]),
+      ),
+      ImdGrid2(children: [
+        ImdPanel(
+          margin: EdgeInsets.zero,
+          title: cur != null ? 'تعديل مستودع: ${cur.name}' : 'إضافة مستودع جديد',
+          icon: cur != null ? 'edit' : 'plus-square',
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            ImdF2(children: [
+              ImdLabeled('الكود', ImdFld(controller: _code, enabled: can), size: 11),
+              ImdLabeled('اسم المستودع *', ImdFld(controller: _name, enabled: can), size: 11),
+              ImdLabeled('المسؤول', ImdFld(controller: _manager, enabled: can), size: 11),
+              ImdLabeled('الموقع', ImdFld(controller: _location, enabled: can), size: 11),
+              // forms-ux.js يُدرج الحقل بعد خانة «الموقع» داخل شبكة .f2 نفسها فيأخذ نصف العرض.
+              CampLinkField(
+                camps: _camps,
+                all: _feedsAll,
+                ids: _campIds,
+                enabled: can,
+                onChanged: (all, ids) => setState(() {
+                  _feedsAll = all;
+                  _campIds = all ? const [] : ids;
+                }),
+              ),
+            ]),
+            const SizedBox(height: 13),
+            ImdLabeled('ملاحظات', ImdFld(controller: _notes, enabled: can), size: 11),
+            if (can)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: ImdRbar(bottom: 0, children: [
+                  ImdButton(
+                    label: cur != null ? 'حفظ التعديلات' : 'إضافة المستودع',
+                    icon: cur != null ? 'save' : 'plus',
+                    onPressed: _save,
+                  ),
+                  ImdButton.outline(label: 'إلغاء', onPressed: _newRecord),
+                ]),
+              )
+            else
+              const Padding(padding: EdgeInsets.only(top: 8), child: ImdLdText('👁 عرض فقط — الإدارة متاحة لمدير النظام')),
+          ]),
+        ),
+        const ImdPanel(
+          margin: EdgeInsets.zero,
+          title: 'ملاحظات تشغيلية',
+          icon: 'pin',
+          child: ImdBullets([
+            'يفضل إعطاء كل مستودع كودًا مختصرًا ثابتًا لتسهيل الطباعة والتقارير.',
+            'لا تحذف مستودعًا له حركات تاريخية إلا بعد التأكد من عدم تأثير ذلك على الأرشفة.',
+            'اربط المستودع بالمسؤول والموقع لتقليل أخطاء التحويل والاستلام.',
+          ]),
+        ),
+      ]),
+      if (_loading)
+        const ImdLd('جارٍ التحميل…')
+      else
+        ImdTable(
+          minWidth: 960,
+          cards: true,
+          empty: 'لا مستودعات مطابقة — أضف أول مستودع من النموذج أعلاه',
+          columns: [
+            const ImdCol('الكود'),
+            const ImdCol('اسم المستودع', flex: 2),
+            const ImdCol('المسؤول'),
+            const ImdCol('الموقع'),
+            const ImdCol('🏕️ يغذي معسكر', flex: 2),
+            const ImdCol('رئيسي', center: true),
+            const ImdCol('الاستخدام', flex: 2),
+            const ImdCol('آخر حركة'),
+            const ImdCol('ملاحظات'),
+            if (can) const ImdCol('', width: 110),
+          ],
+          pageSize: 50,
+          rows: [
+            for (final x in rows)
+              () {
+                final u = _usage[x.name.trim()];
+                String or(String v) => v.isEmpty ? '—' : v;
+                return <Widget>[
+                  Text(or(x.code), style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(or(x.name)),
+                  Text(or(x.manager)),
+                  Text(or(x.location)),
+                  Text(_feedsLabel(x)),
+                  x.isMain
+                      ? const ImdChip('المخزن الرئيسي', tone: ImdTone.ok)
+                      : (can
+                          ? ImdButton.outline(
+                              label: 'تعيين',
+                              icon: 'shield',
+                              small: true,
+                              onPressed: () => _setMain(x),
+                            )
+                          : const Text('—')),
+                  Text((u?.count ?? 0) > 0
+                      ? 'وارد ${nf(u!.receipts)} • صرف ${nf(u.issues)} • تحويل ${nf(u.transfers)}'
+                      : '—'),
+                  Text(or(u?.lastDate ?? '')),
+                  Text(or(x.notes)),
+                  if (can)
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      ImdIconButton(
+                        icon: 'edit',
+                        tooltip: 'تعديل',
+                        onPressed: () {
+                          _editId = x.id;
+                          _render();
+                        },
+                      ),
+                      if (canDel) ...[
+                        const SizedBox(width: 4),
+                        ImdIconButton(
+                            icon: 'trash',
+                            tooltip: 'حذف',
+                            kind: ImdBtnKind.danger,
+                            onPressed: () => _delete(x)),
+                      ],
+                    ]),
+                ];
+              }(),
+          ],
+        ),
+      ],
+    ]);
+  }
+}
+// ==================== END FILE: lib/features/catalog/warehouses_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/suppliers_screen.dart ====================
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/security/auth_service.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_context_menu.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_layout.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_shimmer.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/audit_repo.dart';
+import '../../data/repos/catalog_repo.dart';
+import '../../data/repos/movements_repo.dart';
+
+/// الموردون — نقل مطابق لـ `renderSuppliers()`: بحث وإحصاءات، نموذج إضافة/تعديل،
+/// ملاحظات تشغيلية، وجدول بالاستخدام (الوارد والمرتجع للمورد) وآخر استخدام.
+class SuppliersScreen extends StatefulWidget {
+  const SuppliersScreen({super.key});
+
+  @override
+  State<SuppliersScreen> createState() => _SuppliersScreenState();
+}
+
+class _Usage {
+  int count = 0, receipts = 0, returns = 0;
+  String lastDate = '';
+}
+
+class _SuppliersScreenState extends State<SuppliersScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final CatalogRepo _repo = CatalogRepo(_db);
+
+  List<Supplier> _items = const [];
+  Map<String, _Usage> _usage = const {};
+  String? _editId;
+  bool _loading = true;
+
+  final _q = TextEditingController();
+  final _name = TextEditingController();
+  final _contact = TextEditingController();
+  final _phone = TextEditingController();
+  final _city = TextEditingController();
+  final _notes = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted) _save();
+      },
+    );
+    _render();
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_q, _name, _contact, _phone, _city, _notes]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// `supLoad()` ثم `renderSuppliers()`
+  Future<void> _render() async {
+    final sups = await _repo.suppliers();
+    final moves = MovementsRepo(_db);
+    final receipts = await moves.usageOf('receipts', 'supplier');
+    final returns = await moves.usageOf('returns', 'party', where: "type = 'TO_SUPPLIER'");
+    sups.sort((a, b) => a.name.compareTo(b.name));
+    final usage = <String, _Usage>{};
+    void add(Map<String, ({int count, String lastDate})> src, String kind) {
+      src.forEach((k, v) {
+        final u = usage.putIfAbsent(k, _Usage.new);
+        u.count += v.count;
+        if (kind == 'receipts') u.receipts += v.count;
+        if (kind == 'returns') u.returns += v.count;
+        if (v.lastDate.isNotEmpty && (u.lastDate.isEmpty || v.lastDate.compareTo(u.lastDate) > 0)) u.lastDate = v.lastDate;
+      });
+    }
+
+    add(receipts, 'receipts');
+    add(returns, 'returns');
+    if (!mounted) return;
+    final cur = sups.where((x) => x.id == _editId).firstOrNull;
+    imdSetText(_name, cur?.name ?? '');
+    imdSetText(_contact, cur?.contact ?? '');
+    imdSetText(_phone, cur?.phone ?? '');
+    imdSetText(_city, cur?.city ?? '');
+    imdSetText(_notes, cur?.notes ?? '');
+    setState(() {
+      _items = sups;
+      _usage = usage;
+      _loading = false;
+    });
+  }
+
+  Future<void> _save() async {
+    final perm = Perm.of(context);
+    if (!perm.guard(context, 'suppliers', _editId != null ? 'edit' : 'create')) return;
+    final name = _name.text.trim();
+    if (name.isEmpty) return showImdToast(context, '✖ أدخل اسم المورد');
+    final dup = _items.any((x) => x.id != _editId && x.name.trim().toLowerCase() == name.toLowerCase());
+    if (dup) return showImdToast(context, '✖ يوجد مورد بنفس الاسم بالفعل');
+    final audit = AuditRepo(_db);
+    final actor = context.read<AuthService>().currentUser;
+    try {
+      await _repo.saveSupplier(
+        id: _editId,
+        name: name,
+        contact: _contact.text.trim(),
+        phone: _phone.text.trim(),
+        city: _city.text.trim(),
+        notes: _notes.text.trim(),
+      );
+      if (_editId != null) {
+        await audit.write('SUPPLIER_UPDATED', 'supplier', 'تعديل بيانات مورد',
+            details: {'target': name, 'status': 'UPDATED', 'risk': 'normal'}, actor: actor);
+        if (mounted) showImdToast(context, '✔ تم تحديث المورد');
+      } else {
+        await audit.write('SUPPLIER_CREATED', 'supplier', 'إضافة مورد جديد',
+            details: {'target': name, 'status': 'CREATED', 'risk': 'normal'}, actor: actor);
+        if (mounted) showImdToast(context, '🎉 تم إضافة المورد');
+      }
+      _editId = null;
+      await _render();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  Future<void> _delete(Supplier it) async {
+    if (!Perm.of(context).guard(context, 'suppliers', 'delete')) return;
+    final u = _usage[it.name.trim()];
+    if ((u?.count ?? 0) > 0 &&
+        !await imdConfirm(context, 'هذا المورد مستخدم في سجلات سابقة (${nf(u!.count)}). هل تريد حذفه رغم ذلك؟',
+            danger: true)) {
+      return;
+    }
+    if (!mounted || !await imdConfirm(context, 'حذف المورد «${it.name}»؟', ok: 'حذف', danger: true)) return;
+    if (!mounted) return;
+    final actor = context.read<AuthService>().currentUser;
+    try {
+      await _repo.deleteSupplier(it.id);
+      await AuditRepo(_db).write('SUPPLIER_DELETED', 'supplier', 'حذف مورد',
+          details: {'target': it.name, 'status': 'DELETED', 'qty': u?.count ?? 0, 'risk': 'sensitive'}, actor: actor);
+      if (!mounted) return;
+      showImdToast(context, '✔ تم حذف المورد');
+      if (_editId == it.id) _editId = null;
+      await _render();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  void _newRecord() {
+    _editId = null;
+    _render();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // الإضافة والتعديل والحذف بصلاحية «الموردون» نفسها (لا بالمدير وحده)، وكل إجراءٍ محروسٌ في دالته.
+    final can = Perm.of(context).writable('suppliers');
+    // صلاحية الحذف وحدها: `writable` يصدق بالإضافة أو التعديل أو الاعتماد،
+    // فكان زرُّ الحذف يظهر لمن لا يملك الحذف.
+    final canDel = Perm.of(context).canDelete('suppliers');
+    final cur = _items.where((x) => x.id == _editId).firstOrNull;
+    final q = _q.text.trim().toLowerCase();
+    final rows = _items
+        .where((x) => q.isEmpty || [x.name, x.phone, x.city, x.contact, x.notes].any((v) => v.toLowerCase().contains(q)))
+        .toList();
+    final withPhone = _items.where((x) => x.phone.trim().isNotEmpty).length;
+    final used = _items.where((x) => (_usage[x.name.trim()]?.count ?? 0) > 0).length;
+
+    return ImdPage(children: [
+      const ImdPageTitle(
+        title: 'الموردون',
+        icon: 'truck',
+        subtitle: 'إدارة بيانات الموردين المستخدمة في سندات الاستلام والمرتجعات وإعدادات التوريد',
+      ),
+      ImdICard(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          ImdSearchBar(
+            controller: _q,
+            hint: 'بحث باسم المورد أو الهاتف أو المدينة…',
+            onChanged: (_) => setState(() {}),
+            actions: [
+              ImdButton.outline(label: 'تحديث', icon: 'refresh', small: true, onPressed: _render),
+              if (can) ImdButton.outline(label: 'مورد جديد', icon: 'plus-square', small: true, onPressed: _newRecord),
+            ],
+          ),
+          ImdChipsRow(bottom: 0, children: [
+            ImdChip('إجمالي الموردين: ${nf(_items.length)}', tone: ImdTone.ok),
+            ImdChip('بأرقام هاتف: ${nf(withPhone)}', tone: ImdTone.code),
+            ImdChip('موردون مستخدمون: ${nf(used)}', tone: ImdTone.pend),
+            ImdChip('غير مستخدمين: ${nf(_items.length - used)}', tone: ImdTone.off),
+          ]),
+        ]),
+      ),
+      ImdGrid2(children: [
+        ImdPanel(
+          margin: EdgeInsets.zero,
+          title: cur != null ? 'تعديل مورد: ${cur.name}' : 'إضافة مورد جديد',
+          icon: cur != null ? 'edit' : 'plus-square',
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            ImdF2(children: [
+              ImdLabeled('اسم المورد *', ImdFld(controller: _name, enabled: can), size: 11),
+              ImdLabeled('اسم جهة الاتصال', ImdFld(controller: _contact, enabled: can), size: 11),
+              ImdLabeled('رقم الهاتف', ImdFld(controller: _phone, enabled: can), size: 11),
+              ImdLabeled('المدينة / العنوان المختصر', ImdFld(controller: _city, enabled: can), size: 11),
+            ]),
+            const SizedBox(height: 4),
+            ImdLabeled('ملاحظات', ImdFld(controller: _notes, enabled: can), size: 11),
+            if (can)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: ImdRbar(bottom: 0, children: [
+                  ImdButton(
+                    label: cur != null ? 'حفظ التعديلات' : 'إضافة المورد',
+                    icon: cur != null ? 'save' : 'plus',
+                    onPressed: _save,
+                  ),
+                  ImdButton.outline(label: 'إلغاء', onPressed: _newRecord),
+                ]),
+              )
+            else
+              const Padding(padding: EdgeInsets.only(top: 8), child: ImdLdText('👁 عرض فقط — الإدارة متاحة لمدير النظام')),
+          ]),
+        ),
+        const ImdPanel(
+          margin: EdgeInsets.zero,
+          title: 'ملاحظات تشغيلية',
+          icon: 'pin',
+          child: ImdBullets([
+            'يفضل توحيد اسم المورد بنفس الصياغة المستخدمة في سندات الاستلام.',
+            'أضف رقم الهاتف واسم جهة الاتصال لتسريع المتابعة وقت التوريد أو المرتجعات.',
+            'حذف المورد المستخدم سابقًا قد يربك السجلات التاريخية؛ الأفضل إيقاف استخدامه فقط أو تعديل بياناته.',
+          ]),
+        ),
+      ]),
+      if (_loading)
+        const ImdShimmerTable(rows: 6, columns: 5)
+      else
+        ImdTable(
+          minWidth: 820,
+          cards: true,
+          empty: 'لا موردين مطابقين — أضف أول مورد من النموذج أعلاه',
+          columns: [
+            const ImdCol('الاسم', flex: 2),
+            const ImdCol('جهة الاتصال'),
+            const ImdCol('الهاتف'),
+            const ImdCol('المدينة'),
+            const ImdCol('الاستخدام', flex: 2),
+            const ImdCol('آخر استخدام'),
+            const ImdCol('ملاحظات'),
+            if (can) const ImdCol('', width: 110),
+          ],
+          pageSize: 50,
+          maxHeight: ImdSizes.tableMaxHeight(context),
+          rowMenu: !can
+              ? null
+              : (i) => [
+                    ImdMenuItem(
+                      label: 'تعديل',
+                      icon: 'edit',
+                      onTap: () {
+                        _editId = rows[i].id;
+                        _render();
+                      },
+                    ),
+                    if (canDel)
+                      ImdMenuItem(label: 'حذف', icon: 'trash', danger: true, onTap: () => _delete(rows[i])),
+                  ],
+          // قيم الخلايا الخام: تصفية الأعمدة والتجميع (مثلًا حسب المدينة).
+          values: [
+            for (final x in rows)
+              () {
+                final u = _usage[x.name.trim()];
+                String or(String v) => v.isEmpty ? '—' : v;
+                return <Object?>[
+                  or(x.name),
+                  or(x.contact),
+                  or(x.phone),
+                  or(x.city),
+                  (u?.count ?? 0) > 0 ? 'وارد ${nf(u!.receipts)} • مرتجع ${nf(u.returns)}' : '—',
+                  or(u?.lastDate ?? ''),
+                  or(x.notes),
+                ];
+              }(),
+          ],
+          rows: [
+            for (final x in rows)
+              () {
+                final u = _usage[x.name.trim()];
+                String or(String v) => v.isEmpty ? '—' : v;
+                return <Widget>[
+                  Text(or(x.name), style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(or(x.contact)),
+                  Text(or(x.phone)),
+                  Text(or(x.city)),
+                  Text((u?.count ?? 0) > 0 ? 'وارد ${nf(u!.receipts)} • مرتجع ${nf(u.returns)}' : '—'),
+                  Text(or(u?.lastDate ?? '')),
+                  Text(or(x.notes)),
+                  if (can)
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      ImdIconButton(
+                        icon: 'edit',
+                        tooltip: 'تعديل',
+                        onPressed: () {
+                          _editId = x.id;
+                          _render();
+                        },
+                      ),
+                      if (canDel) ...[
+                        const SizedBox(width: 4),
+                        ImdIconButton(
+                            icon: 'trash',
+                            tooltip: 'حذف',
+                            kind: ImdBtnKind.danger,
+                            onPressed: () => _delete(x)),
+                      ],
+                    ]),
+                ];
+              }(),
+          ],
+        ),
+    ]);
+  }
+}
+// ==================== END FILE: lib/features/catalog/suppliers_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/units_screen.dart ====================
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/catalog_repo.dart';
+import '../../data/repos/movements_repo.dart';
+import '../../data/migration/excel_templates/excel_templates.dart' show TemplateKind;
+import '../excel_templates/excel_templates_dialog.dart';
+
+/// الوحدات المستفيدة — نقل مطابق لـ `renderUnits()`: الشجرة التنظيمية (معسكرات ووحدات تابعة)
+/// مع الترقيم التلقائي من `imdad-upgrade-v4.js`، وسجل الصرف الاستهلاكي للوحدة.
+class UnitsScreen extends StatefulWidget {
+  const UnitsScreen({super.key});
+
+  @override
+  State<UnitsScreen> createState() => _UnitsScreenState();
+}
+
+class _UnitsScreenState extends State<UnitsScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final CatalogRepo _repo = CatalogRepo(_db);
+
+  String _tab = 'tree';
+  String? _editId;
+  List<BeneficiaryUnit> _units = const [];
+  final Map<String, bool> _open = {};
+  bool _loading = true;
+
+  final _code = TextEditingController();
+  final _name = TextEditingController();
+  final _cat = TextEditingController();
+  final _search = TextEditingController();
+  String _parent = '';
+  String _type = 'camp';
+
+  // سجل الصرف
+  String _hUnit = '';
+  late String _hFrom = _dstr(DateTime.now().subtract(const Duration(days: 30)));
+  late String _hTo = _dstr(DateTime.now());
+  Widget? _histOut;
+
+  static String _dstr(DateTime d) => isoDay(d);
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted) _save();
+      },
+    );
+    _fetch().then((_) => _initForm());
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_code, _name, _cat, _search]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// `unFetch()` — بترتيب الإنشاء.
+  Future<void> _fetch() async {
+    final rows = await _repo.unitsUnsorted();
+    if (!mounted) return;
+    setState(() {
+      _units = rows;
+      _loading = false;
+    });
+  }
+
+  List<BeneficiaryUnit> _children(String pid) => _units.where((u) => u.parentId == pid).toList();
+
+  /// `unDescSet(id)`
+  Set<String> _desc(String id) {
+    final set = <String>{};
+    final q = [id];
+    while (q.isNotEmpty) {
+      final c = q.removeLast();
+      for (final u in _units.where((u) => u.parentId == c)) {
+        if (set.add(u.id)) q.add(u.id);
+      }
+    }
+    return set;
+  }
+
+  /// `nextCode(units, parentId)` — ترقيم تلقائي: المعسكر رقم تسلسلي، والتابعة «كود الأب-تسلسل».
+  String _nextCode(String parentId) {
+    var max = 0;
+    for (final u in _units.where((u) => u.parentId == parentId)) {
+      final m = RegExp(r'(\d+)$').firstMatch(u.code);
+      if (m != null) max = [max, int.parse(m.group(1)!)].reduce((a, b) => a > b ? a : b);
+    }
+    final p = parentId.isEmpty ? null : _units.where((u) => u.id == parentId).firstOrNull;
+    return p != null ? '${p.code.isEmpty ? '1' : p.code}-${max + 1}' : '${max + 1}';
+  }
+
+  BeneficiaryUnit? get _cur => _editId == null ? null : _units.where((x) => x.id == _editId).firstOrNull;
+
+  void _initForm() {
+    final cur = _cur;
+    _parent = cur?.parentId ?? '';
+    imdSetText(_code, cur?.code ?? _nextCode(_parent));
+    imdSetText(_name, cur?.name ?? '');
+    _type = cur?.type == 'unit' ? 'unit' : 'camp';
+    imdSetText(_cat, cur?.category ?? '');
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ImdPage(children: [
+      ImdPageTitle(
+        title: 'الوحدات المستفيدة',
+        icon: 'users',
+        subtitle: 'شجرة المعسكرات والوحدات التابعة + سجل الصرف الاستهلاكي',
+        actions: [ExcelTemplatesButton(kind: TemplateKind.units, onImported: _fetch)],
+      ),
+      ImdItabs(
+        value: _tab,
+        onChanged: (t) => setState(() => _tab = t),
+        tabs: const [
+          ImdTab('tree', 'الشجرة التنظيمية', icon: 'tent'),
+          ImdTab('hist', 'سجل الصرف', icon: 'file'),
+        ],
+      ),
+      if (_loading)
+        const ImdLd('جارٍ التحميل…')
+      else if (_tab == 'tree')
+        _tree(context)
+      else
+        _hist(context),
+    ]);
+  }
+
+  // ───────── الشجرة ─────────
+  Widget _tree(BuildContext context) {
+    final w = Perm.of(context).writable('units');
+    final c = context.imd;
+    final cur = _cur;
+    final skip = cur == null ? <String>{} : _desc(cur.id);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      if (w)
+        ImdICard(
+          title: cur != null ? 'وضع التعديل: ${cur.code} — ${cur.name}' : 'إضافة معسكر / وحدة',
+          icon: cur != null ? 'edit' : 'plus-square',
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            ImdF2(children: [
+              ImdLabeled(
+                'كود الوحدة *',
+                Semantics(
+                  label: 'يتم توليد الكود تلقائيًا',
+                  child: TextField(
+                    controller: _code,
+                    readOnly: true,
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: c.text),
+                    decoration: imdFieldDecoration(context).copyWith(
+                      fillColor: c.fieldFill,
+                    ),
+                  ),
+                ),
+              ),
+              ImdLabeled(
+                'التسلسل التبعي',
+                ImdSelect<String>(
+                  value: _parent,
+                  items: [
+                    ('', '— بدون (معسكر رئيسي) —'),
+                    for (final u in _units)
+                      if (u.id != cur?.id && !skip.contains(u.id)) (u.id, '${u.code} — ${u.name}'),
+                  ],
+                  onChanged: (v) => setState(() {
+                    _parent = v ?? '';
+                    if (_editId == null) imdSetText(_code, _nextCode(_parent));
+                  }),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            ImdF2(children: [
+              ImdLabeled('اسم المعسكر / الوحدة *', ImdFld(controller: _name)),
+              ImdLabeled(
+                'نوع الجهة *',
+                ImdSelect<String>(
+                  value: _type,
+                  items: const [('camp', 'معسكر رئيسي'), ('unit', 'وحدة مستفيدة')],
+                  onChanged: (v) => setState(() => _type = v ?? 'camp'),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            ImdF2(children: [
+              ImdLabeled('الاختصاص (مثال: مشاة)', ImdFld(controller: _cat)),
+              const SizedBox.shrink(),
+            ]),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(
+                child: ImdButton.outline(
+                  label: 'إلغاء / مسح',
+                  expand: true,
+                  onPressed: () {
+                    _editId = null;
+                    _initForm();
+                  },
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: ImdButton(
+                  label: cur != null ? 'حفظ التعديلات' : 'إضافة وحدة',
+                  icon: cur != null ? 'save' : 'plus',
+                  expand: true,
+                  onPressed: _save,
+                ),
+              ),
+            ]),
+          ]),
+        )
+      else
+        const ImdICard(
+          title: 'عرض فقط',
+          icon: 'eye',
+          child: Padding(padding: EdgeInsets.symmetric(vertical: 6), child: ImdLdText('الإضافة والتعديل متاحان لمدير النظام')),
+        ),
+      // .unbar
+      Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _search,
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(fontSize: 14, color: c.text),
+              decoration: imdFieldDecoration(context, hint: 'بحث بالكود أو الاسم أو الاختصاص…'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          ImdIconButton(
+            icon: 'refresh',
+            tooltip: 'تحديث الشجرة',
+            onPressed: () async {
+              await _fetch();
+              if (context.mounted) showImdToast(context, '🔄 حُدّثت الشجرة');
+            },
+          ),
+        ]),
+      ),
+      // .uTree
+      Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border.all(color: c.line),
+          borderRadius: BorderRadius.circular(ImdSizes.radius),
+          boxShadow: imdShadow(c),
+        ),
+        child: () {
+          final nodes = _build(_children(''), w);
+          if (nodes.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+              child: Text('لا توجد وحدات بعد — أضف أول معسكر من النموذج أعلاه',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: c.muted, fontWeight: FontWeight.w700)),
+            );
+          }
+          return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: nodes);
+        }(),
+      ),
+    ]);
+  }
+
+  /// `unPaintTree(q)` — بناء تكراري مع إبقاء آباء النتائج المطابقة.
+  List<Widget> _build(List<BeneficiaryUnit> list, bool w) {
+    final q = _search.text.trim().toLowerCase();
+    bool hit(BeneficiaryUnit u) => q.isEmpty || [u.code, u.name, u.category].any((v) => v.toLowerCase().contains(q));
+    final out = <Widget>[];
+    for (final u in list) {
+      final kids = _children(u.id);
+      final kidNodes = _build(kids, w);
+      final isCamp = u.parentId.isEmpty;
+      if (!hit(u) && kidNodes.isEmpty) continue;
+      final open = q.isNotEmpty ? true : (_open[u.id] != false);
+      out.add(_node(u, isCamp, kids.length, open, w));
+      if (kids.isNotEmpty && open) {
+        out.add(Padding(
+          padding: const EdgeInsetsDirectional.only(start: 22, top: 4, bottom: 6),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: kidNodes),
+        ));
+      }
+    }
+    return out;
+  }
+
+  Widget _node(BeneficiaryUnit u, bool isCamp, int kids, bool open, bool w) {
+    final c = context.imd;
+    final fg = isCamp ? c.onInverse : c.text;
+    return Container(
+      margin: EdgeInsets.only(bottom: isCamp ? 4 : 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: isCamp ? c.inverse : c.surface,
+        border: Border.all(color: isCamp ? c.inverseLine : c.line),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: DefaultTextStyle.merge(
+        style: TextStyle(color: fg, fontSize: isCamp ? 14 : 13.5, fontWeight: isCamp ? FontWeight.w600 : FontWeight.w400),
+        child: Row(
+          children: [
+            if (isCamp && kids > 0)
+              MouseRegion(
+                cursor: ImdCursor.click,
+                child: ImdTap(
+                  onTap: () => setState(() => _open[u.id] = !open),
+                  child: Container(
+                    width: 28,
+                    height: ImdSizes.touchMin,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(color: c.onInverseSoft, borderRadius: BorderRadius.circular(8)),
+                    child: ImdIcon(open ? 'chevron-down' : 'chevron-left', size: 14, color: c.onInverse),
+                  ),
+                ),
+              )
+            else
+              const SizedBox(width: 28),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Row(children: [
+              Text(u.code,
+                  style: TextStyle(fontWeight: FontWeight.w900, color: isCamp ? ImdColors.dark.accentHover : fg)),
+              const SizedBox(width: 8),
+              Flexible(child: Text(u.name, overflow: TextOverflow.ellipsis)),
+              if (u.category.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isCamp ? c.onInverseSoft2 : c.subtle,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                    child: Text(u.category,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: isCamp ? c.onInverseText : c.text2)),
+                  ),
+                ),
+              ],
+              ]),
+            ),
+            if (isCamp) Text('${nf(kids)} تابعة', style: TextStyle(fontSize: 11.5, color: c.onInverseMuted)),
+            if (w) ...[
+              const SizedBox(width: 8),
+              ImdIconButton(
+                icon: 'edit',
+                tooltip: 'تعديل',
+                onPressed: () {
+                  _editId = u.id;
+                  _initForm();
+                },
+              ),
+              if (kids == 0 && Perm.of(context).canDelete('units')) ...[
+                const SizedBox(width: 6),
+                ImdIconButton(
+                    icon: 'trash',
+                    tooltip: 'حذف',
+                    kind: ImdBtnKind.danger,
+                    onPressed: () => _delete(u)),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _delete(BeneficiaryUnit u) async {
+    if (!Perm.of(context).guard(context, 'units', 'delete')) return;
+    if (!await imdConfirm(context, 'حذف هذه الوحدة نهائيًا؟', ok: 'حذف', danger: true)) return;
+    try {
+      await _repo.deleteUnit(u.id);
+      if (_editId == u.id) _editId = null;
+      if (!mounted) return;
+      showImdToast(context, '✔ حُذفت الوحدة');
+      await _fetch();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  /// `unSave()`
+  Future<void> _save() async {
+    if (!Perm.of(context).guard(context, 'units', _editId != null ? 'edit' : 'create')) return;
+    final code = _code.text.trim(), name = _name.text.trim(), cat = _cat.text.trim();
+    if (code.isEmpty) return showImdToast(context, '✖ أدخل كود الوحدة');
+    if (name.isEmpty) return showImdToast(context, '✖ أدخل اسم الوحدة');
+    final dup = _units.where((x) => x.code == code).firstOrNull;
+    if (dup != null && dup.id != _editId) return showImdToast(context, '✖ الكود مستخدم لوحدة أخرى');
+    final parent = _parent.isEmpty ? null : _units.where((x) => x.id == _parent).firstOrNull;
+    try {
+      await _repo.saveUnit(
+        id: _editId,
+        code: code,
+        name: name,
+        category: cat,
+        type: _type,
+        parentId: _parent,
+        parentName: parent?.name ?? '',
+        facilityId: _editId == null ? '' : null,
+      );
+      if (!mounted) return;
+      showImdToast(context, _editId != null ? '✔ حُفظت التعديلات' : '🎉 أُضيفت الوحدة بنجاح');
+      _editId = null;
+      await _fetch();
+      _initForm();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  // ───────── سجل الصرف ─────────
+  Widget _hist(BuildContext context) {
+    return ImdICard(
+      title: 'سجل الصرف الاستهلاكي للوحدة',
+      icon: 'file',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        ImdSelect<String>(
+          value: _hUnit,
+          items: [('', '— اختر الوحدة —'), for (final u in _units) (u.id, '${u.code} — ${u.name}')],
+          onChanged: (v) => setState(() => _hUnit = v ?? ''),
+        ),
+        const SizedBox(height: 10),
+        ImdF2(children: [
+          ImdLabeled('من تاريخ', ImdDateField(value: _hFrom, onChanged: (v) => setState(() => _hFrom = v))),
+          ImdLabeled('إلى تاريخ', ImdDateField(value: _hTo, onChanged: (v) => setState(() => _hTo = v))),
+        ]),
+        const SizedBox(height: 12),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: ImdButton(label: 'عرض السجل', icon: 'search', onPressed: _loadHist),
+        ),
+        const SizedBox(height: 14),
+        _histOut ?? const ImdLdText('اختر الوحدة ثم اضغط «عرض السجل»'),
+      ]),
+    );
+  }
+
+  /// `unLoadHist()`
+  Future<void> _loadHist() async {
+    final u = _units.where((x) => x.id == _hUnit).firstOrNull;
+    final c = context.imd;
+    if (u == null) {
+      setState(() => _histOut = const ImdLdText('اختر الوحدة أولًا'));
+      return;
+    }
+    final f = _hFrom, t = _hTo;
+    if (f.isNotEmpty && t.isNotEmpty && f.compareTo(t) > 0) {
+      setState(() => _histOut = ImdEmojiText('✖ نطاق التاريخ غير صحيح (من بعد إلى؟)', style: TextStyle(color: c.danger)));
+      return;
+    }
+    setState(() => _histOut = const ImdLdText('⏳ جارٍ التحميل…'));
+    final iss = await MovementsRepo(_db).issuesOfUnit(u.id, u.name);
+    final items = {for (final i in await _repo.items()) i.id: i.name.isNotEmpty ? i.name : i.code};
+    final fMs = f.isEmpty ? null : DateTime.parse('${f}T00:00:00').millisecondsSinceEpoch;
+    final tMs = t.isEmpty ? null : DateTime.parse('${t}T23:59:59').millisecondsSinceEpoch;
+    final rows = iss.where((r) {
+      if (r.status == 'DRAFT') return false;
+      if (r.unitId != u.id &&
+          r.beneficiaryUnitId != u.id &&
+          r.beneficiaryUnitName != u.name &&
+          r.recipientDisplay != u.name) {
+        return false;
+      }
+      final m = r.createdAt.millisecondsSinceEpoch;
+      if (fMs != null && m < fMs) return false;
+      if (tMs != null && m > tMs) return false;
+      return true;
+    }).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    if (!mounted) return;
+    setState(() {
+      if (rows.isEmpty) {
+        _histOut = const ImdLdText('لا حركات صرف لهذه الوحدة في النطاق المحدد');
+        return;
+      }
+      _histOut = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        ImdChipsRow(children: [
+          ImdChip('الحركات: ${nf(rows.length)}', tone: ImdTone.ok),
+          if (f.isNotEmpty || t.isNotEmpty)
+            ImdChip('${f.isEmpty ? '…' : f} ← ${t.isEmpty ? '…' : t}', tone: ImdTone.code),
+        ]),
+        ImdTable(
+          minWidth: 560,
+          cards: true,
+          columns: const [ImdCol('التاريخ'), ImdCol('الصنف', flex: 2), ImdCol('الكمية'), ImdCol('المرجع'), ImdCol('ملاحظات', flex: 2)],
+          pageSize: 50,
+          rows: [
+            for (final r in rows)
+              [
+                Text(arDate(r.createdAt)),
+                Text(r.itemName.isNotEmpty ? r.itemName : (items[r.itemId] ?? '—'),
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text('-${nf(r.qty)} ${r.unitName}', style: TextStyle(fontWeight: FontWeight.w900, color: c.danger)),
+                Text(r.refNo.isEmpty ? '—' : r.refNo),
+                Text(r.notes),
+              ],
+          ],
+        ),
+      ]);
+    });
+  }
+}
+// ==================== END FILE: lib/features/catalog/units_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/kitchens_screen.dart ====================
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/catalog_repo.dart';
+import '../../domain/access_control.dart';
+
+/// المطابخ والأفران — نقل مطابق لـ `renderKitchens()` بتبويباتها الثلاث:
+/// القائمة، بطاقة مطبخ/فرن، اشتراكات الوحدات.
+class KitchensScreen extends StatefulWidget {
+  const KitchensScreen({super.key});
+
+  @override
+  State<KitchensScreen> createState() => _KitchensScreenState();
+}
+
+class _KitchensScreenState extends State<KitchensScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final CatalogRepo _repo = CatalogRepo(_db);
+
+  String _tab = 'list';
+  String? _editId;
+  List<Facility> _facs = const [];
+  List<Warehouse> _whs = const [];
+  List<BeneficiaryUnit> _units = const [];
+  bool _loading = true;
+  String _subFid = '';
+
+  final _name = TextEditingController();
+  final _cap = TextEditingController();
+  final _notes = TextEditingController();
+  String _type = 'KITCHEN';
+  String _wh = '';
+
+  /// حالة مربعات الاشتراك قبل الحفظ.
+  final Map<String, bool> _subChecks = {};
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted && _tab == 'form') _save();
+      },
+    );
+    _fetch().then((_) => _switch(_tab));
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_name, _cap, _notes]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// `kitFetchAll()`
+  Future<void> _fetch() async {
+    final facs = await _repo.facilities();
+    final whs = await _repo.warehouses();
+    final units = await _repo.units();
+    if (!mounted) return;
+    setState(() {
+      _facs = facs;
+      _whs = whs;
+      _units = units;
+      _loading = false;
+    });
+  }
+
+  void _switch(String t) {
+    setState(() => _tab = t);
+    if (t == 'form') _initForm();
+    if (t == 'subs') _resetChecks();
+  }
+
+  int _subCount(String fid) => _units.where((u) => facilityIdsOf(u).contains(fid)).length;
+
+  static bool _isKitchen(Facility f) => f.fType.toUpperCase() == 'KITCHEN';
+
+  @override
+  Widget build(BuildContext context) {
+    return ImdPage(children: [
+      const ImdPageTitle(
+        title: 'المطابخ والأفران',
+        icon: 'utensils',
+        subtitle: 'تعريف مطابخ الإعاشة والأفران، طاقتها الاستيعابية، والمستودع المغذي لها + ربط الوحدات المشتركة',
+      ),
+      ImdItabs(
+        value: _tab,
+        onChanged: _switch,
+        tabs: const [
+          ImdTab('list', 'القائمة', icon: 'clipboard'),
+          ImdTab('form', 'بطاقة مطبخ/فرن', icon: 'utensils'),
+          ImdTab('subs', 'اشتراكات الوحدات', icon: 'link'),
+        ],
+      ),
+      if (_loading)
+        const ImdLd('جارٍ التحميل…')
+      else
+        switch (_tab) {
+          'list' => _list(context),
+          'form' => _form(context),
+          _ => _subs(context),
+        },
+    ]);
+  }
+
+  // ───────── القائمة ─────────
+  Widget _list(BuildContext context) {
+    final w = Perm.of(context).writable('kitchens');
+    if (_facs.isEmpty) {
+      return const ImdICard(child: ImdLdText('لا مطابخ/أفران مسجلة بعد — أضف أول واحد من تبويب «بطاقة مطبخ/فرن»'));
+    }
+    return ImdTable(
+      minWidth: 720,
+      columns: [
+        const ImdCol('الاسم', flex: 2),
+        const ImdCol('النوع'),
+        const ImdCol('الطاقة الاستيعابية'),
+        const ImdCol('المستودع المغذي', flex: 2),
+        const ImdCol('وحدات مشتركة'),
+        if (w) const ImdCol('', width: 110),
+      ],
+      pageSize: 50,
+      rows: [
+        for (final f in _facs)
+          [
+            Text(f.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+            ImdEmojiText(_isKitchen(f) ? '🍽️ مطبخ' : '🔥 فرن'),
+            Text(f.capacity != 0 ? '${nf(f.capacity)} فرد' : '—'),
+            Text(f.warehouse.isEmpty ? '—' : f.warehouse),
+            ImdChip('${nf(_subCount(f.id))} وحدة', tone: ImdTone.ok),
+            if (w)
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                ImdIconButton(
+                  icon: 'edit',
+                  tooltip: 'تعديل',
+                  onPressed: () {
+                    _editId = f.id;
+                    _switch('form');
+                  },
+                ),
+                // صلاحية الحذف وحدها: `writable` يصدق بالإضافة أو التعديل.
+                if (Perm.of(context).canDelete('kitchens')) ...[
+                  const SizedBox(width: 4),
+                  ImdIconButton(
+                    icon: 'trash',
+                    tooltip: 'حذف',
+                    kind: ImdBtnKind.danger,
+                    onPressed: () => _delete(f),
+                  ),
+                ],
+              ]),
+          ],
+      ],
+    );
+  }
+
+  // ───────── البطاقة ─────────
+  Facility? get _cur => _editId == null ? null : _facs.where((x) => x.id == _editId).firstOrNull;
+
+  void _initForm() {
+    final cur = _cur;
+    imdSetText(_name, cur?.name ?? '');
+    _type = cur == null || _isKitchen(cur) ? 'KITCHEN' : 'OVEN';
+    imdSetText(_cap, cur != null && cur.capacity != 0 ? '${cur.capacity}' : '');
+    _wh = cur?.warehouse ?? '';
+    imdSetText(_notes, cur?.notes ?? '');
+  }
+
+  Widget _form(BuildContext context) {
+    if (!Perm.of(context).writable('kitchens')) {
+      return const ImdICard(
+        title: 'عرض فقط',
+        icon: 'eye',
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 6),
+          child: ImdLdText('الإضافة والتعديل متاحان لمدير النظام'),
+        ),
+      );
+    }
+    final cur = _cur;
+    return ImdICard(
+      title: cur != null ? 'وضع التعديل: ${cur.name}' : 'إضافة مطبخ / فرن جديد',
+      icon: cur != null ? 'edit' : 'plus-square',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        ImdF2(children: [
+          ImdLabeled('الاسم *', ImdFld(controller: _name)),
+          ImdLabeled(
+            'النوع',
+            ImdSelect<String>(
+              value: _type,
+              items: const [('KITCHEN', 'مطبخ'), ('OVEN', 'فرن')],
+              onChanged: (v) => setState(() => _type = v ?? 'KITCHEN'),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        ImdF2(children: [
+          ImdLabeled('الطاقة الاستيعابية (أفراد)', ImdFld(controller: _cap, number: true)),
+          ImdLabeled(
+            'المستودع المغذي',
+            ImdSelect<String>(
+              value: _wh,
+              items: [('', '— بدون تحديد —'), for (final w in _whs) (w.name, w.name)],
+              onChanged: (v) => setState(() => _wh = v ?? ''),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        ImdLabeled('ملاحظات', ImdFld(controller: _notes)),
+        const SizedBox(height: 16),
+        Row(children: [
+          Expanded(
+            child: ImdButton.outline(
+              label: 'إلغاء / مسح',
+              expand: true,
+              onPressed: () => setState(() {
+                _editId = null;
+                _initForm();
+              }),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: ImdButton(
+              label: cur != null ? 'حفظ التعديلات' : 'حفظ البطاقة',
+              icon: 'save',
+              expand: true,
+              onPressed: _save,
+            ),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  Future<void> _delete(Facility f) async {
+    if (!Perm.of(context).guard(context, 'kitchens', PermAction.delete)) return;
+    if (!await imdConfirm(context, 'حذف هذا المطبخ/الفرن نهائيًا؟', ok: 'حذف', danger: true)) return;
+    try {
+      await _repo.deleteFacility(f.id);
+      if (!mounted) return;
+      showImdToast(context, '✔ تم الحذف');
+      await _fetch();
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e', error: true);
+    }
+  }
+
+  Future<void> _save() async {
+    final name = _name.text.trim();
+    if (name.isEmpty) return showImdToast(context, '✖ أدخل اسم المطبخ/الفرن');
+    final cur = _cur;
+    try {
+      await _repo.saveFacility(
+        id: cur?.id,
+        name: name,
+        fType: _type,
+        capacity: int.tryParse(_cap.text.trim()) ?? (double.tryParse(_cap.text.trim())?.toInt() ?? 0),
+        warehouse: _wh,
+        notes: _notes.text.trim(),
+      );
+      if (!mounted) return;
+      showImdToast(context, cur != null ? '✔ حُفظت التعديلات' : '🎉 أُضيف بنجاح');
+      _editId = null;
+      await _fetch();
+      _switch('list');
+    } catch (e) {
+      if (mounted) showImdToast(context, '✖ $e');
+    }
+  }
+
+  // ───────── الاشتراكات ─────────
+  void _resetChecks() {
+    _subChecks
+      ..clear()
+      ..addAll({
+        for (final u in _units)
+          u.id: _subFid.isNotEmpty && facilityIdsOf(u).contains(_subFid),
+      });
+  }
+
+  Widget _subs(BuildContext context) {
+    final w = Perm.of(context).writable('kitchens');
+    final c = context.imd;
+    if (_facs.isEmpty) return const ImdICard(child: ImdLdText('أضف مطبخًا أو فرنًا أولًا'));
+    Widget list;
+    if (_subFid.isEmpty) {
+      list = const ImdLdText('اختر المطبخ/الفرن');
+    } else if (_units.isEmpty) {
+      list = const ImdLdText('لا وحدات مسجلة بعد');
+    } else {
+      list = ImdTable(
+        columns: const [ImdCol('اشتراك', width: 70), ImdCol('الكود'), ImdCol('الوحدة', flex: 2), ImdCol('مشترك حاليًا مع', flex: 2)],
+        pageSize: 50,
+        rows: [
+          for (final u in _units)
+            () {
+              // الوحدة قد تشترك في مطبخ وفرن معًا، فتُعرض بقية اشتراكاتها كلها.
+              final others = facilityIdsOf(u).where((id) => id != _subFid).toList();
+              final linkedName = others.isEmpty
+                  ? null
+                  : others
+                      .map((id) => _facs.where((f) => f.id == id).firstOrNull?.name ?? '')
+                      .where((n) => n.isNotEmpty)
+                      .join('، ');
+              return <Widget>[
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: Checkbox(
+                    value: _subChecks[u.id] ?? false,
+                    activeColor: c.accent,
+                    onChanged: w ? (v) => setState(() => _subChecks[u.id] = v ?? false) : null,
+                  ),
+                ),
+                Text(u.code),
+                Text(u.name),
+                // لم تعد تحذيرًا: الاشتراك المتعدد صار مسموحًا (مطبخ وفرن معًا).
+                linkedName == null ? const Text('—') : ImdChip(linkedName, tone: ImdTone.info),
+              ];
+            }(),
+        ],
+      );
+    }
+    return ImdICard(
+      title: 'ربط الوحدات المشتركة بالمطبخ/الفرن',
+      icon: 'link',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text('اختر المطبخ/الفرن ثم حدد الوحدات التي تُدمج قوتها التموينية تلقائيًا معه',
+              style: TextStyle(fontSize: 12, color: c.muted)),
+        ),
+        ImdSelect<String>(
+          value: _subFid,
+          items: [('', '— اختر المطبخ/الفرن —'), for (final f in _facs) (f.id, f.name)],
+          onChanged: (v) => setState(() {
+            _subFid = v ?? '';
+            _resetChecks();
+          }),
+        ),
+        const SizedBox(height: 14),
+        list,
+        if (w)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ImdButton(label: 'حفظ الاشتراكات', icon: 'save', onPressed: _saveSubs),
+            ),
+          ),
+      ]),
+    );
+  }
+
+  /// `kitSaveSubs()`
+  Future<void> _saveSubs() async {
+    if (!Perm.of(context).guard(context, 'kitchens', 'edit')) return;
+    if (_subFid.isEmpty) return showImdToast(context, '✖ اختر المطبخ/الفرن أولًا');
+    final changes = <String, List<String>>{};
+    for (final u in _units) {
+      final checked = _subChecks[u.id] ?? false;
+      final current = facilityIdsOf(u);
+      final was = current.contains(_subFid);
+      if (checked == was) continue;
+
+      // هذا الاشتراك وحده يُضاف أو يُزال؛ بقية اشتراكات الوحدة لا تُمس.
+      changes[u.id] = checked ? [...current, _subFid] : current.where((id) => id != _subFid).toList();
+    }
+    await _repo.setUnitFacilities(changes);
+    final n = changes.length;
+    if (!mounted) return;
+    if (n == 0) return showImdToast(context, 'لا تغييرات لحفظها');
+    showImdToast(context, '✔ حُفظت الاشتراكات ($n تغيير)');
+    await _fetch();
+    _resetChecks();
+  }
+}
+// ==================== END FILE: lib/features/catalog/kitchens_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/authorities_screen.dart ====================
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/security/auth_service.dart';
+import '../../core/security/perm.dart';
+import '../../core/ui/imd_context_menu.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_layout.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/ration_repo.dart';
+import '../../domain/access_control.dart';
+
+/// جهات الاعتمادات: من يعتمدون الطلبيات ومن يطلب منهم **المخزن الرئيسي**.
+///
+/// المخزن الرئيسي لا يطلب من مستودعٍ آخر — يطلب من جهةٍ في تسلسل الفرقة: ركن
+/// الإمداد، رئيس الشعبة، قائد الفرقة. وهذه ليست طرفًا مخزنيًّا فلا رصيد لها
+/// ولا حركة عليها؛ ولذلك دليلٌ مستقل لا صفٌّ في المستودعات.
+///
+/// ويُدار من هنا لا من الكود: تُضاف جهةٌ أو يُغيَّر مسمّاها بلا تحديثٍ
+/// للبرنامج، ويُزامَن كبقية الأدلة.
+///
+/// وموضعه الإعدادات لا قائمة العمليات: دليلٌ يُضبط مرةً ثم يُنسى، لا شاشةٌ
+/// تُفتح كل يوم — فوجوده بين شاشات التشغيل يزحم ما يُستعمل فعلًا.
+class AuthoritiesScreen extends StatefulWidget {
+  const AuthoritiesScreen({super.key, this.embedded = false});
+
+  /// تبويبًا داخل الإعدادات: بلا عنوان صفحة ولا هوامشها.
+  final bool embedded;
+
+  @override
+  State<AuthoritiesScreen> createState() => _AuthoritiesScreenState();
+}
+
+class _AuthoritiesScreenState extends State<AuthoritiesScreen> {
+  late final AppDatabase _db = context.read<AppDatabase>();
+  late final RationRepo _repo = RationRepo(_db);
+
+  List<SupplyAuthority> _items = const [];
+
+  /// عدد الطلبيات المعلّقة بكل جهة — بها تُعرف الجهة التي لا تُحذف.
+  Map<String, int> _usage = const {};
+  String? _editId;
+  bool _loading = true;
+  bool _active = true;
+
+  final _name = TextEditingController();
+  final _title = TextEditingController();
+  final _notes = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Ctrl+S وF5 وCtrl+P لهذه الصفحة (CLAUDE.md §8 البند 24): تُسجَّل في خانة الصفحة
+    // فلا تعمل إلا وهي الظاهرة.
+    ImdScreenActions.maybeOf(context)?.register(
+      onSave: () {
+        if (mounted) _save();
+      },
+    );
+    _render();
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_name, _title, _notes]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _render() async {
+    final rows = await _repo.authorities();
+    final orders = await _repo.orders();
+    final usage = <String, int>{};
+    for (final o in orders) {
+      if (o.authorityId.isEmpty) continue;
+      usage.update(o.authorityId, (v) => v + 1, ifAbsent: () => 1);
+    }
+    if (!mounted) return;
+    setState(() {
+      _items = rows;
+      _usage = usage;
+      _loading = false;
+    });
+  }
+
+  void _reset() {
+    imdSetText(_name, '');
+    imdSetText(_title, '');
+    imdSetText(_notes, '');
+    setState(() {
+      _editId = null;
+      _active = true;
+    });
+  }
+
+  void _edit(SupplyAuthority a) {
+    imdSetText(_name, a.name);
+    imdSetText(_title, a.title);
+    imdSetText(_notes, a.notes);
+    setState(() {
+      _editId = a.id;
+      _active = a.active;
+    });
+  }
+
+  Future<void> _save() async {
+    final perm = Perm.of(context);
+    if (!perm.guard(context, 'supplyAuthorities',
+        _editId == null ? PermAction.create : PermAction.edit)) {
+      return;
+    }
+    final res = await _repo.saveAuthority(
+      id: _editId,
+      name: _name.text,
+      title: _title.text,
+      notes: _notes.text,
+      active: _active,
+      actor: context.read<AuthService>().currentUser?.email ?? '',
+    );
+    if (!mounted) return;
+    showImdToast(context, res.ok ? '✔ حُفظت الجهة' : res.error, error: !res.ok);
+    if (res.ok) {
+      _reset();
+      await _render();
+    }
+  }
+
+  Future<void> _delete(SupplyAuthority a) async {
+    final perm = Perm.of(context);
+    if (!perm.guard(context, 'supplyAuthorities', PermAction.delete)) return;
+    if (!await imdConfirm(context, 'حذف الجهة «${a.name}»؟',
+        ok: 'حذف', danger: true)) {
+      return;
+    }
+    if (!mounted) return;
+    final res = await _repo.deleteAuthority(
+      a.id,
+      actor: context.read<AuthService>().currentUser?.email ?? '',
+    );
+    if (!mounted) return;
+    showImdToast(context, res.ok ? '✔ حُذفت الجهة' : res.error, error: !res.ok);
+    if (res.ok) {
+      if (_editId == a.id) _reset();
+      await _render();
+    }
+  }
+
+  /// إطار القسم: لوحةٌ حين تكون الشاشة مستقلة، وعنوانٌ خفيف حين تُضمَّن.
+  ///
+  /// لوحةٌ داخل لوحة تُضاعف الهوامش، فيضيق الجدول عن أضيق عرضٍ يقبله ويفيض
+  /// خارج الشاشة. والإعدادات تضع محتواها في لوحةٍ أصلًا.
+  Widget _wrap({required String title, required String icon, required Widget child}) {
+    if (!widget.embedded) {
+      return ImdPanel(title: title, icon: icon, child: child);
+    }
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(children: [
+            ImdIcon(icon, size: 15, color: c.accent),
+            const SizedBox(width: 6),
+            Text(title,
+                style: TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w700, color: c.text)),
+          ]),
+        ),
+        child,
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      const spinner = ImdLd('⏳ جارٍ التحميل…');
+      return widget.embedded
+          ? spinner
+          : const ImdPage(children: [
+              ImdPageTitle(title: 'جهات الاعتمادات', icon: 'users'),
+              spinner,
+            ]);
+    }
+    final can = Perm.of(context).writable('supplyAuthorities');
+    // صلاحية الحذف وحدها: `writable` يصدق بالإضافة أو التعديل أو الاعتماد.
+    final canDel = Perm.of(context).canDelete('supplyAuthorities');
+    final active = _items.where((a) => a.active).length;
+
+    final body = <Widget>[
+      if (!widget.embedded)
+        const ImdPageTitle(
+          title: 'جهات الاعتمادات',
+          icon: 'users',
+          subtitle: 'من يعتمدون الطلبيات ويطلب منهم المخزن الرئيسي: ركن '
+              'الإمداد، رئيس الشعبة، قائد الفرقة — جهاتٌ لا مستودعات',
+        ),
+      ImdKpis(children: [
+        ImdKpi(label: 'إجمالي الجهات', value: nf(_items.length)),
+        ImdKpi(label: 'مفعَّلة', value: nf(active)),
+        ImdKpi(
+          label: 'معطَّلة',
+          value: nf(_items.length - active),
+          extra: _items.length == active
+              ? null
+              : const ImdChip('لا تظهر في الطلبيات', tone: ImdTone.off),
+        ),
+      ]),
+      if (can)
+        _wrap(
+          title: _editId == null ? 'إضافة جهة' : 'تعديل جهة',
+          icon: _editId == null ? 'plus-square' : 'edit',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ImdF2(children: [
+                ImdLabeled('اسم الجهة *', ImdFld(controller: _name), size: 11),
+                ImdLabeled(
+                  'المسمّى الوظيفي',
+                  ImdFld(controller: _title, hint: 'ركن إمداد الفرقة'),
+                  size: 11,
+                ),
+              ]),
+              const SizedBox(height: 10),
+              ImdLabeled('ملاحظات', ImdFld(controller: _notes, maxLines: 2)),
+              const SizedBox(height: 10),
+              ImdCheckbox(
+                value: _active,
+                label: 'مفعَّلة — تظهر في قائمة الطلبيات',
+                onChanged: (v) => setState(() => _active = v),
+              ),
+              const SizedBox(height: 12),
+              Wrap(spacing: 10, runSpacing: 10, children: [
+                ImdButton(
+                  label: _editId == null ? 'إضافة' : 'حفظ التعديل',
+                  icon: 'check',
+                  onPressed: _save,
+                ),
+                if (_editId != null)
+                  ImdButton.outline(
+                      label: 'إلغاء', icon: 'x', onPressed: _reset),
+              ]),
+            ],
+          ),
+        ),
+      _wrap(
+        title: 'الجهات',
+        icon: 'list',
+        child: ImdTable(
+          empty: 'لا جهات بعد — أضف ركن إمداد الفرقة أولًا',
+          minWidth: 560,
+          cards: true,
+          columns: const [
+            ImdCol('الجهة'),
+            ImdCol('المسمّى'),
+            ImdCol('الحالة'),
+            ImdCol('طلبياتها', numeric: true),
+            ImdCol('ملاحظات'),
+            ImdCol('', center: true),
+          ],
+          pageSize: 50,
+          rowMenu: !can
+              ? null
+              : (i) => [
+                    ImdMenuItem(label: 'تعديل', icon: 'edit', onTap: () => _edit(_items[i])),
+                    if (canDel && (_usage[_items[i].id] ?? 0) == 0)
+                      ImdMenuItem(label: 'حذف', icon: 'trash', danger: true, onTap: () => _delete(_items[i])),
+                  ],
+          rows: [
+            for (final a in _items)
+              [
+                Text(a.name,
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(a.title.isEmpty ? '—' : a.title),
+                a.active
+                    ? const ImdChip('مفعَّلة', tone: ImdTone.ok)
+                    : const ImdChip('معطَّلة', tone: ImdTone.off),
+                Text(nf(_usage[a.id] ?? 0)),
+                Text(a.notes.isEmpty ? '—' : a.notes,
+                    style: TextStyle(color: context.imd.muted)),
+                Wrap(spacing: 6, alignment: WrapAlignment.center, children: [
+                  if (can)
+                    ImdIconButton(
+                        icon: 'edit',
+                        tooltip: 'تعديل',
+                        onPressed: () => _edit(a)),
+                  if (canDel && (_usage[a.id] ?? 0) == 0)
+                    ImdIconButton(
+                        icon: 'trash',
+                        tooltip: 'حذف',
+                        onPressed: () => _delete(a)),
+                ]),
+              ],
+          ],
+        ),
+      ),
+    ];
+
+    return widget.embedded
+        ? Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: body)
+        : ImdPage(children: body);
+  }
+}
+// ==================== END FILE: lib/features/catalog/authorities_screen.dart ====================
+
+// ==================== FILE: lib/features/catalog/camp_link_field.dart ====================
+import 'package:flutter/material.dart';
+
+import '../../core/ui/imd_format.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+
+/// حقل «🏕️ يغذي معسكر» — نقل لـ `injectCampLinkRow()` في forms-ux.js:
+/// زر يعرض ملخص الاختيار ويفتح قائمة منبثقة: بحث (إذا زادت المعسكرات على ست)،
+/// «جميع المعسكرات»، ثم المعسكرات، وتذييل بالعدد وزر «تم». يُغلق بالنقر خارجه أو Esc.
+class CampLinkField extends StatefulWidget {
+  const CampLinkField({
+    super.key,
+    required this.camps,
+    required this.all,
+    required this.ids,
+    required this.onChanged,
+    this.enabled = true,
+  });
+
+  final List<BeneficiaryUnit> camps;
+  final bool all;
+  final List<String> ids;
+  final void Function(bool all, List<String> ids) onChanged;
+  final bool enabled;
+
+  @override
+  State<CampLinkField> createState() => _CampLinkFieldState();
+}
+
+class _CampLinkFieldState extends State<CampLinkField> {
+  final _link = LayerLink();
+  final _portal = OverlayPortalController();
+  final _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  /// `campDDSummary()`
+  String get _summary {
+    if (widget.all) return 'جميع المعسكرات';
+    final names = [for (final c in widget.camps) if (widget.ids.contains(c.id)) c.name];
+    if (names.isEmpty) return 'اختر المعسكرات…';
+    return names.length <= 2 ? names.join('، ') : '${names.take(2).join('، ')} +${names.length - 2}';
+  }
+
+  void _open(bool open) {
+    if (open) {
+      _search.clear();
+      _portal.show();
+    } else {
+      _portal.hide();
+    }
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text.rich(
+          TextSpan(children: [
+            const WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: Padding(padding: EdgeInsetsDirectional.only(end: 6), child: ImdIcon('tent', size: 14)),
+            ),
+            const TextSpan(text: 'يغذي معسكر '),
+            TextSpan(
+              text: '(يتيح ربط المستودع بالصرف/التحويل تلقائيًا)',
+              style: TextStyle(fontWeight: FontWeight.w400, color: c.muted),
+            ),
+          ]),
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: c.text2),
+        ),
+        const SizedBox(height: 6),
+        CompositedTransformTarget(
+          link: _link,
+          child: OverlayPortal(
+            controller: _portal,
+            overlayChildBuilder: (ctx) => _popup(ctx),
+            child: MouseRegion(
+              cursor: widget.enabled ? ImdCursor.click : SystemMouseCursors.basic,
+              child: ImdTap(
+                onTap: widget.enabled ? () => _open(!_portal.isShowing) : null,
+                child: Container(
+                  constraints: BoxConstraints(minHeight: ImdSizes.touchMin),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: widget.enabled ? c.surface : c.bg,
+                    border: Border.all(color: _portal.isShowing ? c.accent : c.lineStrong),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(children: [
+                    Expanded(
+                      child: Text(_summary,
+                          overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, color: c.text)),
+                    ),
+                    AnimatedRotation(
+                      turns: _portal.isShowing ? .5 : 0,
+                      duration: const Duration(milliseconds: 150),
+                      child: ImdIcon('chevron-down', size: 14, color: c.muted),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 7),
+        const ImdNote('سيظهر المستودع في الصرف والتحويل فقط عندما يكون مسموحًا لمعسكر الجهة المستفيدة.'),
+      ],
+    );
+  }
+
+  Widget _popup(BuildContext ctx) {
+    final c = ctx.imd;
+    // من `LayerLink` لا من `findRenderObject().size`: الثاني يقرأ التخطيط
+    // أثناء البناء، وهو ما يمنعه الإطار خارج نطاقه.
+    final width = _link.leaderSize?.width ?? 320;
+    return Stack(children: [
+      // إغلاق عند النقر خارج القائمة
+      Positioned.fill(
+        child: GestureDetector(behavior: HitTestBehavior.translucent, onTap: () => _open(false)),
+      ),
+      CompositedTransformFollower(
+        link: _link,
+        targetAnchor: Alignment.bottomRight,
+        followerAnchor: Alignment.topRight,
+        offset: const Offset(0, 4),
+        child: Focus(
+          autofocus: true,
+          onKeyEvent: (_, e) {
+            if (e.logicalKey.keyLabel == 'Escape') {
+              _open(false);
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: Material(
+            color: Colors.transparent,
+            child: StatefulBuilder(builder: (ctx, setPop) {
+              final q = _search.text.trim();
+              final list = [
+                for (final camp in widget.camps)
+                  if (q.isEmpty || '${camp.code.isNotEmpty ? '${camp.code}-' : ''}${camp.name}'.contains(q)) camp
+              ];
+              void set(bool all, List<String> ids) {
+                widget.onChanged(all, ids);
+                setPop(() {});
+                setState(() {});
+              }
+
+              return Container(
+                width: width,
+                constraints: const BoxConstraints(maxHeight: 320),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: c.surface,
+                  border: Border.all(color: c.popupLine),
+                  borderRadius: BorderRadius.circular(10),
+                  boxShadow: [BoxShadow(color: c.shadowPopup, blurRadius: 28, offset: const Offset(0, 10))],
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  if (widget.camps.length > 6)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: TextField(
+                        controller: _search,
+                        autofocus: true,
+                        onChanged: (_) => setPop(() {}),
+                        style: TextStyle(fontSize: 14, color: c.text),
+                        decoration: imdFieldDecoration(ctx, hint: 'بحث عن معسكر', dense: true),
+                      ),
+                    ),
+                  _opt(ctx, 'جميع المعسكرات', widget.all, (v) => set(v, v ? [] : widget.ids), bold: true),
+                  Flexible(
+                    child: widget.camps.isEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: Text('لا توجد معسكرات بعد — أضف المعسكرات أولًا من شاشة الوحدات',
+                                style: TextStyle(fontSize: 12, color: c.faint)),
+                          )
+                        : list.isEmpty
+                            ? Padding(
+                                padding: const EdgeInsets.all(10),
+                                child: Text('لا نتائج مطابقة', style: TextStyle(fontSize: 12, color: c.faint)),
+                              )
+                            : ListView(shrinkWrap: true, children: [
+                                for (final camp in list)
+                                  _opt(
+                                    ctx,
+                                    '${camp.code.isNotEmpty ? '${camp.code}-' : ''}${camp.name}',
+                                    !widget.all && widget.ids.contains(camp.id),
+                                    (v) {
+                                      final ids = [...widget.ids];
+                                      if (v && !ids.contains(camp.id)) ids.add(camp.id);
+                                      if (!v) ids.remove(camp.id);
+                                      set(false, ids);
+                                    },
+                                  ),
+                              ]),
+                  ),
+                  Container(
+                    margin: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.only(top: 8),
+                    decoration: BoxDecoration(border: Border(top: BorderSide(color: c.line))),
+                    child: Row(children: [
+                      Text(widget.all ? 'كل المعسكرات' : '${nf(widget.ids.length)} محدد',
+                          style: TextStyle(fontSize: 12, color: c.muted)),
+                      const Spacer(),
+                      ImdButton(label: 'تم', small: true, onPressed: () => _open(false)),
+                    ]),
+                  ),
+                ]),
+              );
+            }),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _opt(BuildContext ctx, String label, bool checked, ValueChanged<bool> onTap, {bool bold = false}) {
+    final c = ctx.imd;
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: () => onTap(!checked),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: bold
+            ? BoxDecoration(border: Border(bottom: BorderSide(color: c.line)))
+            : null,
+        margin: bold ? const EdgeInsets.only(bottom: 4) : null,
+        child: Row(children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: Checkbox(value: checked, activeColor: c.accent, onChanged: (v) => onTap(v ?? false)),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(label,
+                style: TextStyle(fontSize: 13, color: c.text, fontWeight: bold ? FontWeight.w700 : FontWeight.w400)),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/catalog/camp_link_field.dart ====================

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { AppDatabase } from '../../data/db/app_database';
+import { NativeDatabase } from '../../data/db/sqlite_driver';
+import { CatalogRepo } from '../../data/repos/catalog_repo';
 import { Ids } from '../ids';
 
 /// حراسة عيب حقيقي ظهر في الاختبار: المعرّف المبني على الوقت وحده يتكرر
@@ -12,16 +15,22 @@ describe('ids_test', () => {
     expect(ids.size).toBe(10000);
   });
 
-  // MISSING: lib/data/db/app_database.dart
-  // MISSING: lib/data/repos/catalog_repo.dart
-  it.skip('سجلّان يُحفظان في اللحظة نفسها يبقيان سجلّين', async () => {
-    // يعتمد على AppDatabase و CatalogRepo (المراحل 4 و 7).
+  it('سجلّان يُحفظان في اللحظة نفسها يبقيان سجلّين', async () => {
+    const db = AppDatabase.forTesting(NativeDatabase.memory());
+    try {
+      const repo = new CatalogRepo(db);
+      const id1 = await repo.saveItem({ code: 'A1', name: 'أرز' });
+      const id2 = await repo.saveItem({ code: 'A2', name: 'سكر' });
+      expect(id1).not.toBe(id2);
+      const all = await repo.items();
+      expect(all).toHaveLength(2);
+    } finally {
+      await db.close();
+    }
   });
 
-  // MISSING: lib/data/db/app_database.dart
-  // MISSING: lib/data/repos/catalog_repo.dart
   // MISSING: lib/data/repos/movements_repo.dart
   it.skip('سند بعدة أصناف يحفظ كل سطوره', async () => {
-    // يعتمد على AppDatabase و CatalogRepo و MovementsRepo (المراحل 4 و 7 و 9).
+    // يعتمد على MovementsRepo (المرحلة 9).
   });
 });

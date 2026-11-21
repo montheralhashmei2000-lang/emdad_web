@@ -1,4 +1,9 @@
 import { ImdShellTab, ImdTabsShell } from '../../core/ui/imd_tabs_shell';
+import { ItemsScreen } from '../catalog/items_screen';
+import { KitchensScreen } from '../catalog/kitchens_screen';
+import { SuppliersScreen } from '../catalog/suppliers_screen';
+import { UnitsScreen } from '../catalog/units_screen';
+import { WarehousesScreen } from '../catalog/warehouses_screen';
 import {
   ActivityIntelScreen,
   ActualEntitlementScreen,
@@ -12,8 +17,6 @@ import {
   ExecutiveCmdScreen,
   HealthOpsScreen,
   IssueScreen,
-  ItemsScreen,
-  KitchensScreen,
   OpeningScreen,
   PendingScreen,
   RationOrderScreen,
@@ -24,10 +27,7 @@ import {
   SensitiveOpsScreen,
   StockAlertsScreen,
   StrengthScreen,
-  SuppliersScreen,
   TransferScreen,
-  UnitsScreen,
-  WarehousesScreen,
 } from './pending_screens_stubs';
 
 /// أبواب قسم الإمداد والتموين.

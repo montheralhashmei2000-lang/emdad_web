@@ -250,13 +250,18 @@ export class GeneratedColumn<T = unknown> {
     return new ExprNode(`"${this.name}" = ?`, [p]);
   }
 
-  isIn(values: readonly T[]): WhereNode {
-    if (values.length === 0) return new ExprNode('0 = 1');
-    const placeholders = values.map(() => '?').join(', ');
+  isIn(values: Iterable<T>): WhereNode {
+    const arr = Array.from(values);
+    if (arr.length === 0) return new ExprNode('0 = 1');
+    const placeholders = arr.map(() => '?').join(', ');
     return new ExprNode(
       `"${this.name}" IN (${placeholders})`,
-      values.map((v) => toSqlParam(v, this.type)),
+      arr.map((v) => toSqlParam(v, this.type)),
     );
+  }
+
+  like(pattern: string): WhereNode {
+    return new ExprNode(`"${this.name}" LIKE ?`, [pattern]);
   }
 
   isSmallerThanValue(val: T): WhereNode {
@@ -390,7 +395,12 @@ export function buildCompanionRow(
 export class QueryRow {
   constructor(readonly data: Record<string, SqlValue>) {}
 
-  read<T = SqlValue>(column: string): T {
+  read<T = SqlValue>(column: string | GeneratedColumn<T>): T {
+    if (column instanceof GeneratedColumn) {
+      const raw = this.data[column.name] ?? null;
+      if (raw === null || raw === undefined) return null as T;
+      return fromSqlValue(raw, column.type, true) as T;
+    }
     return this.data[column] as T;
   }
 }
@@ -488,6 +498,99 @@ export class SelectBuilder<TTable extends TableInfo<TRow>, TRow> {
       throw new Error(`Expected at most 1 row in ${this.table.actualTableName}, got ${rows.length}`);
     }
     return rows[0];
+  }
+}
+
+export class MappedSelectStatement<T> {
+  constructor(private readonly loader: () => Promise<T[]>) {}
+
+  get(): Promise<T[]> {
+    return this.loader();
+  }
+
+  async getSingle(): Promise<T> {
+    const rows = await this.get();
+    if (rows.length !== 1) {
+      throw new Error(`Expected single row, got ${rows.length}`);
+    }
+    return rows[0];
+  }
+
+  async getSingleOrNull(): Promise<T | null> {
+    const rows = await this.get();
+    if (rows.length === 0) return null;
+    if (rows.length > 1) {
+      throw new Error(`Expected at most 1 row, got ${rows.length}`);
+    }
+    return rows[0];
+  }
+}
+
+export class SelectOnlyBuilder<TTable extends TableInfo<unknown>> {
+  private readonly _columns: GeneratedColumn<unknown>[] = [];
+  private _where: WhereNode | null = null;
+  private _orderBy: OrderingTerm[] = [];
+  private _limit: number | null = null;
+
+  constructor(
+    private readonly db: DriftDatabase,
+    private readonly table: TTable,
+  ) {}
+
+  addColumns(columns: readonly GeneratedColumn<unknown>[]): this {
+    this._columns.push(...columns);
+    return this;
+  }
+
+  where(predicate: WhereNode | ((t: TTable) => WhereNode)): this {
+    const next = typeof predicate === 'function' ? predicate(this.table) : predicate;
+    this._where = this._where ? this._where.and(next) : next;
+    return this;
+  }
+
+  orderBy(terms: readonly ((t: TTable) => OrderingTerm)[]): this {
+    for (const fn of terms) {
+      this._orderBy.push(fn(this.table));
+    }
+    return this;
+  }
+
+  limit(limit: number): this {
+    this._limit = limit;
+    return this;
+  }
+
+  async get(): Promise<QueryRow[]> {
+    const selectList =
+      this._columns.length > 0
+        ? this._columns.map((c) => `"${c.name}"`).join(', ')
+        : '*';
+    const parts: string[] = [`SELECT ${selectList} FROM "${this.table.actualTableName}"`];
+    const params: SqlValue[] = [];
+    if (this._where) {
+      parts.push(`WHERE ${this._where.sql}`);
+      params.push(...this._where.params);
+    }
+    if (this._orderBy.length > 0) {
+      parts.push(
+        `ORDER BY ${this._orderBy.map((o) => `${o.columnSql} ${o.mode}`).join(', ')}`,
+      );
+    }
+    if (this._limit !== null) {
+      parts.push(`LIMIT ${Math.max(0, Math.trunc(this._limit))}`);
+    }
+    return this.db
+      .customSelect(parts.join(' '), {
+        variables: params.map((p) => new Variable(p)),
+      })
+      .get();
+  }
+
+  map<T>(mapper: (row: QueryRow) => T): MappedSelectStatement<T> {
+    return new MappedSelectStatement<T>(async () => {
+      const rows = await this.get();
+      return rows.map(mapper);
+    });
   }
 }
 
@@ -1174,6 +1277,11 @@ export abstract class DriftDatabase {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   select<TTable extends TableInfo<any>>(table: TTable): SelectBuilder<TTable, RowOf<TTable>> {
     return new SelectBuilder<TTable, RowOf<TTable>>(this, table);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  selectOnly<TTable extends TableInfo<any>>(table: TTable): SelectOnlyBuilder<TTable> {
+    return new SelectOnlyBuilder<TTable>(this, table);
   }
 
   into<TTable extends TableInfo<unknown>>(table: TTable): InsertBuilder<TTable> {

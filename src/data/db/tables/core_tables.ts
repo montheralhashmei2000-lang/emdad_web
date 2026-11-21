@@ -120,6 +120,27 @@ export class CategoriesTable extends DriftTable<Category> {
   }
 }
 
+export interface CategoriesCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  description?: CompanionInput<string>;
+}
+
+export interface CategoriesCompanionInsert extends CategoriesCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function CategoriesCompanion(data: CategoriesCompanionFields): CategoriesCompanionFields {
+  return data;
+}
+
+CategoriesCompanion.insert = function insert(
+  data: CategoriesCompanionInsert,
+): CategoriesCompanionInsert {
+  return data;
+};
+
 export interface Item extends Record<string, unknown> {
   readonly id: string;
   readonly code: string;
@@ -170,6 +191,39 @@ export class ItemsTable extends DriftTable<Item> {
     return [this.id];
   }
 }
+
+export interface ItemsCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  code?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  categoryId?: CompanionInput<string>;
+  categoryName?: CompanionInput<string>;
+  baseUnit?: CompanionInput<string>;
+  units?: CompanionInput<string>;
+  qty?: CompanionInput<number>;
+  minQty?: CompanionInput<number>;
+  barcode?: CompanionInput<string>;
+  isRefillable?: CompanionInput<boolean>;
+  reportUnit?: CompanionInput<string>;
+  createdAt?: CompanionInput<Date>;
+  isAsset?: CompanionInput<boolean>;
+  assetType?: CompanionInput<string>;
+  lifespanMonths?: CompanionInput<number>;
+  unitValue?: CompanionInput<number>;
+}
+
+export interface ItemsCompanionInsert extends ItemsCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function ItemsCompanion(data: ItemsCompanionFields): ItemsCompanionFields {
+  return data;
+}
+
+ItemsCompanion.insert = function insert(data: ItemsCompanionInsert): ItemsCompanionInsert {
+  return data;
+};
 
 export interface Warehouse extends Record<string, unknown> {
   readonly id: string;
@@ -244,6 +298,30 @@ export class SuppliersTable extends DriftTable<Supplier> {
   }
 }
 
+export interface SuppliersCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  phone?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+  contact?: CompanionInput<string>;
+  city?: CompanionInput<string>;
+}
+
+export interface SuppliersCompanionInsert extends SuppliersCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function SuppliersCompanion(data: SuppliersCompanionFields): SuppliersCompanionFields {
+  return data;
+}
+
+SuppliersCompanion.insert = function insert(
+  data: SuppliersCompanionInsert,
+): SuppliersCompanionInsert {
+  return data;
+};
+
 /// الوحدات المستفيدة والمعسكرات (شجرة: المعسكر أب والوحدات أبناء)
 export interface BeneficiaryUnit extends Record<string, unknown> {
   readonly id: string;
@@ -277,6 +355,36 @@ export class BeneficiaryUnitsTable extends DriftTable<BeneficiaryUnit> {
   }
 }
 
+export interface BeneficiaryUnitsCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  code?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  type?: CompanionInput<string>;
+  parentId?: CompanionInput<string>;
+  parentName?: CompanionInput<string>;
+  isCamp?: CompanionInput<boolean>;
+  facilityId?: CompanionInput<string>;
+  facilityIds?: CompanionInput<string>;
+  category?: CompanionInput<string>;
+}
+
+export interface BeneficiaryUnitsCompanionInsert extends BeneficiaryUnitsCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function BeneficiaryUnitsCompanion(
+  data: BeneficiaryUnitsCompanionFields,
+): BeneficiaryUnitsCompanionFields {
+  return data;
+}
+
+BeneficiaryUnitsCompanion.insert = function insert(
+  data: BeneficiaryUnitsCompanionInsert,
+): BeneficiaryUnitsCompanionInsert {
+  return data;
+};
+
 /// المطابخ والأفران
 export interface Facility extends Record<string, unknown> {
   readonly id: string;
@@ -301,6 +409,30 @@ export class FacilitiesTable extends DriftTable<Facility> {
     return [this.id];
   }
 }
+
+export interface FacilitiesCompanionFields extends Record<string, unknown> {
+  id?: CompanionInput<string>;
+  name?: CompanionInput<string>;
+  fType?: CompanionInput<string>;
+  capacity?: CompanionInput<number>;
+  warehouse?: CompanionInput<string>;
+  notes?: CompanionInput<string>;
+}
+
+export interface FacilitiesCompanionInsert extends FacilitiesCompanionFields {
+  id: CompanionInput<string>;
+  name: CompanionInput<string>;
+}
+
+export function FacilitiesCompanion(data: FacilitiesCompanionFields): FacilitiesCompanionFields {
+  return data;
+}
+
+FacilitiesCompanion.insert = function insert(
+  data: FacilitiesCompanionInsert,
+): FacilitiesCompanionInsert {
+  return data;
+};
 
 /// v5: مراجعة الأحداث الحساسة/الحرجة
 export interface SensitiveReview extends Record<string, unknown> {

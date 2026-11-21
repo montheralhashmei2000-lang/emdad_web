@@ -10,44 +10,34 @@ import { PasswordPolicy } from '../../../domain/password_policy';
 /// وسياسة قوة كلمة المرور.
 describe('repo_guard_test', () => {
   describe('RepoGuard — الصلاحية في طبقة البيانات', () => {
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
-    // MISSING: lib/domain/access_control.dart
     it.skip('بلا جلسة (مزامنة، خدمات داخلية) يمرّ', () => {
-      // يعتمد على CatalogRepo و MovementsRepo (المرحلتان 7 و 9).
+      // يعتمد على MovementsRepo (المرحلة 9).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
-    // MISSING: lib/domain/access_control.dart
     it.skip('مطّلعٌ بلا كتابة يُرفض ولو تجاوز الشاشة', () => {
-      // يعتمد على AccessControl.permissionsForRoles و MovementsRepo (المرحلتان 5 و 9).
+      // يعتمد على MovementsRepo (المرحلة 9).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
-    // MISSING: lib/domain/access_control.dart
     it.skip('مستودعٌ خارج النطاق يُرفض، وداخله يمرّ', () => {
-      // يعتمد على AccessControl.permissionsForRoles و MovementsRepo (المرحلتان 5 و 9).
+      // يعتمد على MovementsRepo (المرحلة 9).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
-    // MISSING: lib/domain/access_control.dart
     it.skip('التحويل: المصدر في النطاق يكفي، والوجهة قد تكون خارجه', () => {
-      // يعتمد على AccessControl.permissionsForRoles و MovementsRepo (المرحلتان 5 و 9).
+      // يعتمد على MovementsRepo (المرحلة 9).
     });
 
-    // MISSING: lib/data/repos/catalog_repo.dart
     // MISSING: lib/data/repos/movements_repo.dart
     it.skip('المدير بلا قيد', () => {
-      // يعتمد على CatalogRepo و MovementsRepo (المرحلتان 7 و 9).
+      // يعتمد على MovementsRepo (المرحلة 9).
     });
 
     // MISSING: lib/data/repos/fuel_repo.dart
-    // MISSING: lib/domain/access_control.dart
     it.skip('المحروقات: خزّانٌ خارج نطاقٍ يذكر خزّانًا يُرفض', () => {
-      // يعتمد على FuelRepo و AccessControl.permissionsForRoles (المرحلتان 5 و 13).
+      // يعتمد على FuelRepo (المرحلة 13).
     });
   });
 

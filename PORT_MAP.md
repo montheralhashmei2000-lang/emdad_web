@@ -108,6 +108,20 @@
 | `lib/features/home/shell/home_shell_bottom_nav.dart` | `src/features/home/shell/home_shell_bottom_nav.tsx` |
 | `lib/features/home/shell/home_shell_sidebar.dart` | `src/features/home/shell/home_shell_sidebar.tsx` |
 | `lib/features/home/shell/home_shell_topbar.dart` | `src/features/home/shell/home_shell_topbar.tsx` |
+| `lib/domain/item_barcode.dart` | `src/domain/item_barcode.ts` |
+| `lib/domain/main_warehouse.dart` | `src/domain/main_warehouse.ts` |
+| `lib/domain/unit_split.dart` | `src/domain/unit_split.ts` |
+| `lib/domain/warehouse_limits.dart` | `src/domain/warehouse_limits.ts` |
+| `lib/domain/group_classifier.dart` | `src/domain/group_classifier.ts` |
+| `lib/data/repos/catalog_repo.dart` | `src/data/repos/catalog_repo.ts` |
+| `lib/data/repos/warehouse_limits_repo.dart` | `src/data/repos/warehouse_limits_repo.ts` |
+| `lib/features/catalog/camp_link_field.dart` | `src/features/catalog/camp_link_field.tsx` |
+| `lib/features/catalog/kitchens_screen.dart` | `src/features/catalog/kitchens_screen.tsx` |
+| `lib/features/catalog/suppliers_screen.dart` | `src/features/catalog/suppliers_screen.tsx` |
+| `lib/features/catalog/units_screen.dart` | `src/features/catalog/units_screen.tsx` |
+| `lib/features/catalog/warehouses_screen.dart` | `src/features/catalog/warehouses_screen.tsx` |
+| `lib/features/catalog/items_screen.dart` | `src/features/catalog/items_screen.tsx` |
+| `lib/features/catalog/authorities_screen.dart` | `src/features/catalog/authorities_screen.tsx` |
 
 ## ملاحظات التحويل والمنصة
 - `iso_date.ts` و`date_span.ts`: السنوات `0–99` عولجت عبر `setFullYear(y, mo - 1, d)` لمنع تحويلها تلقائياً في JS إلى `1900–1999`.
@@ -172,6 +186,13 @@
   - تحويل `HomeShell` و`ImdNav` ومكوّنات `shell/` الخمسة و`SpaceChooserScreen` و`SupplyGroups`: الحفاظ المتوازي على حالتَي القسمين (`supply` و`fuel`)، تطبيق حجب الأقسام (`SectionBlock`) مع استثناء المالك، التجاوب الكامل (شريط كامل + فاصل قابل للسحب، قضيب أيقونات `901–1150px`، شريط سفلي ودرج للجوال `<= 900px` بلا سؤال خروج عند اختيار البند)، تبديل السمة مع الحفظ في `SettingsRepo`، وهوية المحروقات (`ImdSectionTheme.distinctFuel`)، وتنسيق الوقت بـ`arDigits` دون `intl`.
   - استبدال واجهة المعاينة المؤقتة في `src/App.tsx` بتحويل `lib/main.dart` الكامل (`ImdadApp`، `GateTarget`، `gateFor`، `DeviceGate`، `wireErrorLogger`، `boot`)، مع اعتماد بديل ويب بسيط في `DeviceGate` عند `fresh === true` موسوم بـ`// NOT-PORTED: بديل ويب عن DeviceActivationScreen` يستدعي `auth.createAdmin(...)` فقط ثم يعيد فحص البوابة.
   - تجميع البدائل الصورية لشاشات المراحل 7–27 و`NotificationBell` و`showSearchModal` في `src/features/home/pending_screens_stubs.tsx` (عبر `missing_screen_stub.tsx`)، وإبقاء محوّلات المنصة المستبعدة (`imd_window.ts`، `device_activation.ts`، `auto_sync.ts`) موسومة بـ`// NOT-PORTED` وفق القاعدة 12.
+- **المرحلة 7 — الدفعة ١ (تحديث محرك القاعدة والجداول + النطاق والمستودعات السبعة)**:
+  - تحديث `src/data/db/sqlite_driver.ts`: إضافة `like(pattern)` إلى `GeneratedColumn`، وتوسيع `isIn(values: Iterable<T>)` ليقبل `Set<T>`، وإضافة `selectOnly(table)` (`SelectOnlyBuilder` و`MappedSelectStatement`) مع دعم `QueryRow.read(col)` باسم العمود النصي وبكائن `GeneratedColumn`.
+  - إضافة الـ Companions الناقصة في ملفات الجداول الستة: `core_tables.ts` (`CategoriesCompanion`، `ItemsCompanion`، `SuppliersCompanion`، `BeneficiaryUnitsCompanion`، `FacilitiesCompanion`)، `movement_tables.ts` (`OpeningBalancesCompanion`، `IssuesCompanion`، `TransfersCompanion`، `ReturnsCompanion`، `AdjustmentsCompanion`)، `ration_tables.ts` (`WarehouseStockLimitsCompanion`)، `daily_tables.ts` (`MealPlansCompanion`)، `asset_tables.ts` (`AssetsCompanion`)، و`archive_tables.ts` (`ArchiveFilesCompanion`).
+  - تحويل ملفات النطاق الخمسة (`item_barcode.ts` باستخدام كائن/نوع مدمج `ItemBarcode` لتفادي تعارض `Function.length` مع الحفاظ التام على `ItemBarcode.length === 12`، و`main_warehouse.ts`، و`unit_split.ts`، و`warehouse_limits.ts`، و`group_classifier.ts`) والمستودعين (`catalog_repo.ts` مع `RepoGuard` و`AuditRepo` و`warehouse_scope` وإعادة تسمية المستودعات داخل معاملة وحماية الحذف، و`warehouse_limits_repo.ts`).
+- **المرحلة 7 — الدفعة ٢ (شاشات الكتالوج السبعة وربط القشرة)**:
+  - تحويل شاشات ومكوّنات الكتالوج السبعة (`camp_link_field.tsx` بقائمة منسدلة عبر Portal مع البحث و`جميع المعسكرات`، و`kitchens_screen.tsx` بتبويباتها الثلاث وربط اشتراكات الوحدات، و`suppliers_screen.tsx` بالبحث والقائمة السياقية و`AuditRepo`، و`authorities_screen.tsx` مع وضع `embedded` وربط `RationRepo`، و`warehouses_screen.tsx` مع `CampLinkField` و`CampLedgerRepo` و`WarehouseDashboardView`، و`units_screen.tsx` بالشجرة الهرمية والترقيم التلقائي وتبديل المعسكر وسجل الصرف، و`items_screen.tsx` بعنوان `إدارة الأصناف` وتبويباتها الست ووحدات القياس والباركود والأصول الثابتة وتصدير Excel).
+  - تفعيل الشاشات الخمس الحقيقية (`ItemsScreen`، `WarehousesScreen`، `SuppliersScreen`، `UnitsScreen`، `KitchensScreen`) داخل `src/features/home/home_shell.tsx` و`src/features/home/supply_groups.tsx` وحذف بدائل المرحلة 7 الخمسة من `src/features/home/pending_screens_stubs.tsx` مع الإبقاء التام على بدائل المراحل 8–27.
 
 ## ملفات الاختبارات المحوَّلة (المرحلة 1)
 
@@ -216,7 +237,7 @@
 | `test/report_numbering_test.dart` | `src/data/repos/__tests__/report_numbering.test.ts` |
 | `test/audit_prune_test.dart` | `src/data/repos/__tests__/audit_prune.test.ts` |
 | `test/migration_idempotent_test.dart` | `src/data/db/__tests__/migration_idempotent.test.ts` |
-| `test/delete_permission_test.dart` | `src/data/repos/__tests__/delete_permission.test.ts` |
+| `test/delete_permission_test.dart` | `src/data/repos/__tests__/delete_permission.test.tsx` |
 
 ## ملفات الاختبارات المحوَّلة (المرحلة 5)
 
@@ -247,6 +268,16 @@
 | `test/section_switch_test.dart` | `src/features/home/__tests__/section_switch.test.tsx` |
 | `test/mobile_drawer_test.dart` | `src/features/home/__tests__/mobile_drawer.test.tsx` |
 
+## ملفات الاختبارات المحوَّلة (المرحلة 7)
+
+| ملف الاختبار (Dart) | ملف Vitest المقابل |
+|---|---|
+| `test/item_barcode_test.dart` | `src/domain/__tests__/item_barcode.test.ts` |
+| `test/unit_split_test.dart` | `src/domain/__tests__/unit_split.test.ts` |
+| `test/warehouse_limits_test.dart` | `src/data/repos/__tests__/warehouse_limits.test.ts` |
+| `test/warehouse_rename_test.dart` | `src/data/repos/__tests__/warehouse_rename.test.ts` |
+| `test/unit_picker_test.dart` | `src/features/inventory/__tests__/unit_picker.test.tsx` |
+
 ## ربط مؤجل لمراحل لاحقة
 
 | الملف الحالي | الرمز / الاعتماد الناقص | مرحلة التنفيذ المستهدفة | حالة البديل المؤقت |
@@ -268,17 +299,29 @@
 | `src/data/repos/settings_repo.ts` | `lib/domain/esign_policy.dart` (`EsignPolicy`) | المرحلة 18 | بديل صوري مؤقت `src/domain/esign_policy.ts` موسوم بـ`// MISSING` دون قواعد التوقيع الإلكتروني |
 | `src/data/repos/settings_repo.ts` | `lib/domain/print_layout.dart` (`PrintLayout`, `PrintHeaderFooter`) | المرحلة 18 | بديل صوري مؤقت `src/domain/print_layout.ts` موسوم بـ`// MISSING` دون اختراع تخطيطات طباعة |
 | `src/data/repos/settings_repo.ts` | `lib/domain/voucher_copies.dart` (`VoucherCopies`) | المرحلة 18 | بديل صوري مؤقت `src/domain/voucher_copies.ts` موسوم بـ`// MISSING` دون قواعد نسخ السندات |
-| `src/features/home/home_shell.tsx` و`supply_groups.tsx` و`home_shell_topbar.tsx` | شاشات المراحل 7–27 و`NotificationBell` و`showSearchModal` | المراحل 7–27 | بدائل صورية مجمّعة في `src/features/home/pending_screens_stubs.tsx` (معتمدة على `src/features/home/missing_screen_stub.tsx`) موسومة بـ`// MISSING` |
+| `src/features/home/home_shell.tsx` و`supply_groups.tsx` و`home_shell_topbar.tsx` | شاشات المراحل 8–27 و`NotificationBell` و`showSearchModal` (بعد استبدال شاشات المرحلة 7 الخمس بالملفات الفعلية) | المراحل 8–27 | بدائل صورية مجمّعة في `src/features/home/pending_screens_stubs.tsx` (معتمدة على `src/features/home/missing_screen_stub.tsx`) موسومة بـ`// MISSING` |
 | `src/features/home/home_shell.tsx` | `lib/data/repos/reports_repo.dart` (`ReportId`) | المرحلة 19 | بديل أدنى `src/data/repos/reports_repo.ts` موسوم بـ`// MISSING` يصدّر تعداد `ReportId` فقط |
-| `src/features/home/supply_groups.tsx` | `lib/data/repos/camp_ledger_repo.dart` (`CampLedgerRepo`، `SettlementResult`) | المرحلة 15 | بديل أدنى `src/data/repos/camp_ledger_repo.ts` موسوم بـ`// MISSING` |
+| `src/features/home/supply_groups.tsx` و`warehouses_screen.tsx` | `lib/data/repos/camp_ledger_repo.dart` (`CampLedgerRepo`، `SettlementResult`، `mainWarehouse`، `setMainWarehouse`) | المرحلة 15 | بديل أدنى `src/data/repos/camp_ledger_repo.ts` موسوم بـ`// MISSING` (موسَّع بتوقيعَي `mainWarehouse` و`setMainWarehouse` دون منطق) |
 | `src/App.tsx` | `lib/data/backup/backup_scheduler.dart` (`BackupScheduler`) | المرحلة 16 | بديل أدنى `src/data/backup/backup_scheduler.ts` موسوم بـ`// MISSING` |
+| `src/domain/group_classifier.ts` | `lib/domain/entitlement_groups.dart` (`GroupMember`، `EntitlementGroup`، `GroupUnitGuess`) | المرحلة 15 | بديل أدنى `src/domain/entitlement_groups.ts` موسوم بـ`// MISSING` دون اختراع منطق |
+| `src/domain/group_classifier.ts` | `lib/domain/official_rations.dart` (`OfficialRationItemSpec`، `RationStandard`، `RationCycle`، `RationVariant`، `OfficialMerge`) | المرحلة 15 | بديل أدنى `src/domain/official_rations.ts` موسوم بـ`// MISSING` دون اختراع جداول استحقاق |
+| `src/domain/group_classifier.ts` | `lib/domain/standard_rations.dart` (`StandardIngredient`، `StandardRations`) | المرحلة 15 | بديل أدنى `src/domain/standard_rations.ts` موسوم بـ`// MISSING` دون اختراع حصص قياسية |
+| `src/data/repos/catalog_repo.ts` وشاشات الكتالوج | `lib/data/repos/movements_repo.dart` (`MovementUsage`، `MovementsRepo`) | المرحلة 9 | بديل أدنى `src/data/repos/movements_repo.ts` موسوم بـ`// MISSING` دون اختراع حسابات حركة |
+| شاشات الكتالوج (`authorities_screen.tsx`) | `lib/data/repos/ration_repo.dart` (`RationOpResult`، `RationRepo`) | المرحلة 15 | بديل أدنى `src/data/repos/ration_repo.ts` موسوم بـ`// MISSING` دون اختراع قواعد صرف |
+| شاشات الكتالوج (`items_screen.tsx`) | `lib/domain/assets.dart` (`AssetType`) | المرحلة 17 | بديل أدنى `src/domain/assets.ts` موسوم بـ`// MISSING` |
+| شاشات الكتالوج (`items_screen.tsx`) | `lib/data/repos/asset_register_repo.dart` (`AssetRegisterRepo`) | المرحلة 17 | بديل أدنى `src/data/repos/asset_register_repo.ts` موسوم بـ`// MISSING` |
+| شاشات الكتالوج (`items_screen.tsx`) | `lib/domain/stock_alerts.dart` (`StockAlerts.isLow`) | المرحلة 9 | بديل أدنى `src/domain/stock_alerts.ts` موسوم بـ`// MISSING` |
+| شاشات الكتالوج (`items_screen.tsx`) | `lib/core/print/barcode128.dart` (`Barcode128View`) | المرحلة 18 | بديل أدنى `src/core/print/barcode128.tsx` موسوم بـ`// MISSING` |
+| شاشات الكتالوج (`items_screen.tsx`) | `lib/core/print/barcode_labels.dart` (`BarcodeLabelEntry`، `LabelSize`، `BarcodeLabelsSheet`) | المرحلة 18 | بديل أدنى `src/core/print/barcode_labels.tsx` موسوم بـ`// MISSING` |
+| شاشات الكتالوج | `lib/data/migration/excel_templates/excel_templates.dart` (`TemplateKind`) | المرحلة 21 | بديل أدنى `src/data/migration/excel_templates/excel_templates.ts` موسوم بـ`// MISSING` |
+| شاشات الكتالوج | `lib/features/excel_templates/excel_templates_dialog.dart` (`ExcelTemplatesButton`) | المرحلة 21 | بديل أدنى `src/features/excel_templates/excel_templates_dialog.tsx` موسوم بـ`// MISSING` |
+| شاشات الكتالوج (`warehouses_screen.tsx`) | `lib/features/catalog/warehouse_dashboard_view.dart` (`WarehouseDashboardView`) | المرحلة 8 | بديل أدنى `src/features/catalog/warehouse_dashboard_view.tsx` موسوم بـ`// MISSING` |
 
 ## اختبارات مؤجلة
 
 | ملف الاختبار | اسم الحالة المؤجلة | الملف الناقص الذي تنتظره | رقم المرحلة التي ستُفعّله |
 |---|---|---|---|
-| `src/core/__tests__/ids.test.ts` | سجلّان يُحفظان في اللحظة نفسها يبقيان سجلّين | `lib/data/db/app_database.dart`، `lib/data/repos/catalog_repo.dart` | المرحلة 4 و 7 |
-| `src/core/__tests__/ids.test.ts` | سند بعدة أصناف يحفظ كل سطوره | `lib/data/db/app_database.dart`، `lib/data/repos/catalog_repo.dart`، `lib/data/repos/movements_repo.dart` | المرحلة 4 و 7 و 9 |
+| `src/core/__tests__/ids.test.ts` | سند بعدة أصناف يحفظ كل سطوره | `lib/data/repos/movements_repo.dart` | المرحلة 9 |
 | `src/domain/__tests__/iso_date_strict.test.ts` | الطباعة والعرض يعيدان المستحيل كما هو | `lib/core/print/print_format.dart` | المرحلة 18 |
 | `src/core/ui/__tests__/number_format.test.ts` | المطبوعات: لاتينيةٌ كما في ملفات Excel المعتمدة | `lib/core/print/print_format.dart` | المرحلة 18 |
 | `src/core/ui/__tests__/number_format.test.ts` | مطبوعاتٌ هندية | `lib/core/print/print_format.dart` | المرحلة 18 |
@@ -286,18 +329,19 @@
 | `src/core/ui/__tests__/number_format.test.ts` | `يُحفظ ويُقرأ ويسري على المطبوعات معًا (printMoney(10))` *(فُعِّل جزء `SettingsRepo`/`nf(10)` في المرحلة 4 وبقي سطر `printMoney(10)` فقط)* | `lib/core/print/print_format.dart` | المرحلة 18 |
 | `src/core/ui/__tests__/icon_button_label.test.tsx` | كل زرِّ أيقونةٍ في الشِّفرة يحمل اسمًا | `lib/features/*_screen.dart` | المراحل 5+ |
 | `src/core/ui/__tests__/screen_actions.test.tsx` | كل شاشةٍ لها حفظ تسجّل Ctrl+S | `lib/features/*_screen.dart` | المراحل 5+ |
-| `src/domain/__tests__/free_table.test.ts` | البرقية تُطبع بجدول حر وبدونه | `lib/data/db/app_database.dart`، `lib/data/repos/cable_repo.dart`، `lib/core/print/cable_print.dart` | المراحل 4 و 14 و 18 |
-| `src/domain/__tests__/free_table.test.ts` | رقم فاتورة العقد: من الرأس وإلا من أول صنف | `lib/data/db/app_database.dart`، `lib/data/repos/linkage_repo.dart` | المراحل 4 و 12 |
-| `src/data/repos/__tests__/repo_guard.test.ts` | `RepoGuard — الصلاحية في طبقة البيانات` (6 حالات) | `lib/data/repos/catalog_repo.dart`، `movements_repo.dart`، `fuel_repo.dart` | المراحل 7 و 9 و 13 |
+| `src/domain/__tests__/free_table.test.ts` | البرقية تُطبع بجدول حر وبدونه | `lib/data/repos/cable_repo.dart`، `lib/core/print/cable_print.dart` | المرحلتان 14 و 18 |
+| `src/domain/__tests__/free_table.test.ts` | رقم فاتورة العقد: من الرأس وإلا من أول صنف | `lib/data/repos/linkage_repo.dart` | المرحلة 12 |
+| `src/data/repos/__tests__/repo_guard.test.ts` | `RepoGuard — الصلاحية في طبقة البيانات` (6 حالات) | `lib/data/repos/movements_repo.dart`، `lib/data/repos/fuel_repo.dart` | المرحلتان 9 و 13 |
 | `src/data/repos/__tests__/repo_guard.test.ts` | `فرع البرقية (v30)` (3 حالات) | `lib/data/repos/cable_repo.dart`، `lib/domain/cable_clearance.dart` | المرحلة 14 |
-| `src/data/repos/__tests__/doc_numbering.test.ts` | جميع الحالات (7 حالات) | `lib/data/repos/catalog_repo.dart`، `movements_repo.dart`، `stocktake_repo.dart`، `lib/data/sync/sync_marks.dart` | المراحل 7 و 9 و 11 و 16 |
+| `src/data/repos/__tests__/doc_numbering.test.ts` | جميع الحالات (7 حالات) | `lib/data/repos/movements_repo.dart`، `lib/data/repos/stocktake_repo.dart`، `lib/data/sync/sync_marks.dart` | المراحل 9 و 11 و 16 |
 | `src/data/repos/__tests__/report_numbering.test.ts` | الرقم في سطر الذيل بجوار رقم الصفحة | `lib/core/print/document_pdf.dart` | المرحلة 18 |
 | `src/data/repos/__tests__/audit_prune.test.ts` | الحذف يترك شاهدًا فينتقل إلى النظراء | `lib/data/sync/sync_marks.dart` | المرحلة 16 |
-| `src/data/repos/__tests__/delete_permission.test.ts` | حالات الشاشات والكتالوج (4 حالات: الأصناف/الموردون/المطابخ بلا حذف، وحذف الأصناف للمدير — بعد تفعيل الحالتين 1 و 6 في المرحلة 5) | `lib/data/repos/catalog_repo.dart`، `lib/features/catalog/*_screen.dart` | المرحلة 7 |
-| `src/domain/__tests__/maker_checker.test.ts` | `في المستودعات` (3 حالات: محضر الإتلاف ×2، تسوية الجرد) | `lib/data/repos/catalog_repo.dart`، `movements_repo.dart`، `destructions_repo.dart`، `stocktake_repo.dart`، `lib/domain/destruction.dart` | المراحل 7 و 9 و 10 و 11 |
+| `src/domain/__tests__/maker_checker.test.ts` | `في المستودعات` (3 حالات: محضر الإتلاف ×2، تسوية الجرد) | `lib/data/repos/movements_repo.dart`، `lib/data/repos/destructions_repo.dart`، `lib/data/repos/stocktake_repo.dart`، `lib/domain/destruction.dart` | المراحل 9 و 10 و 11 |
 | `src/domain/__tests__/section_block.test.tsx` | `المستودع والتوقيع`: 4 حالات توقيع الأقسام وفكّ الحجب (`إضافة الحجب بلا توقيع`، `فكّ الحجب مع مفتاح المالك`، `فكّ الحجب بلا مفتاح`، `إضافة حجبٍ بعد فكٍّ موقَّع`) | `lib/core/security/esign.dart`، `device_activation.dart`، `owner_signature.dart` | مرحلة لاحقة |
 | `src/domain/__tests__/section_block.test.tsx` | `القشرة` (حالة واحدة متبقية بعد تفعيل 3 حالات في المرحلة 6): `حجب admin.users: قسم «المستخدمون» يختفي من داخل الإعدادات وبقية الأقسام تبقى` | `lib/features/settings/settings_screen.dart` | المرحلة 20 |
 | `src/core/security/__tests__/duplicate_username.test.ts` | فحص السلامة يكشف الاسم المكرّر ويسكت عن المفرد | `lib/data/repos/selfcheck_repo.dart` | مرحلة لاحقة |
-| `src/features/home/__tests__/home_shell.test.tsx` | الدرج على الجوال يفتح شاشة البند المختار ويُغلق بلا سؤال خروج | `lib/features/catalog/items_screen.dart` | المرحلة 7 |
 | `src/features/home/__tests__/home_shell.test.tsx` | المعرّفات القديمة تفتح الإعدادات على القسم نفسه | `lib/features/settings/settings_screen.dart` | المرحلة 20 |
 | `src/features/home/__tests__/section_switch.test.tsx` | التبديل لا يهدم تبويبات القسم الذي غادرناه ولا حالة صفحاته | `lib/data/repos/fuel_repo.dart` | المرحلة 13 |
+| `src/domain/__tests__/item_barcode.test.ts` | `حجم ملصق الباركود` (3 حالات: الافتراضي 35×25 ويُحفظ محليًا، قيمة تالفة أو خارج الحدود ⇒ الافتراضي، PDF: صفحة لكل ملصق بحجمه) | `lib/core/print/barcode_labels.dart` | المرحلة 18 |
+| `src/data/repos/__tests__/warehouse_limits.test.ts` | حالات `dashboard` المعتمدة على `MovementsRepo.balances` (3 حالات: الحفظ بالشوال يُخزَّن بالكجم ويُعرض بالشوال، الرصيد دون الأدنى يظهر تحت الأدنى بالنقص الصحيح، الأحرج يُعرض أولًا) | `lib/data/repos/movements_repo.dart` | المرحلة 9 |
+| `src/features/inventory/__tests__/unit_picker.test.tsx` | جميع الحالات (5 حالات: الكتابة تُصفّي الخيارات، النقر على خيارٍ يُبلّغ به، Enter يختار أول نتيجةٍ مطابقة، المرور بالفأرة لا يرمي استثناء تخطيط، قيمةٌ مُمرَّرة تظهر في الحقل) | `lib/features/inventory/doc_kit.dart` | المرحلة 10 |
