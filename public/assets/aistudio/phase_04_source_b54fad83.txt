@@ -1,0 +1,3544 @@
+// المرحلة 4 — تعريف الجداول وطبقة الحفظ الأساسية — الشيفرة المصدرية (Dart)
+// عدد الملفات: 16
+// فهرس الملفات:
+//   - lib/data/db/tables/asset_tables.dart (77 سطر)
+//   - lib/data/db/tables/core_tables.dart (207 سطر)
+//   - lib/data/db/tables/daily_tables.dart (224 سطر)
+//   - lib/data/db/tables/fuel_tables.dart (312 سطر)
+//   - lib/data/db/tables/movement_tables.dart (173 سطر)
+//   - lib/data/db/tables/ration_tables.dart (214 سطر)
+//   - lib/data/db/tables/stocktake_tables.dart (51 سطر)
+//   - lib/data/db/app_database.dart (767 سطر)
+//   - lib/data/db/linkage_tables.dart (513 سطر)
+//   - lib/data/db/archive_tables.dart (79 سطر)
+//   - lib/data/db/cable_tables.dart (111 سطر)
+//   - lib/data/repos/repo_guard.dart (84 سطر)
+//   - lib/data/repos/doc_numbering.dart (120 سطر)
+//   - lib/data/repos/audit_repo.dart (151 سطر)
+//   - lib/data/repos/settings_repo.dart (364 سطر)
+//   - lib/data/repos/report_numbering.dart (45 سطر)
+
+
+// ==================== FILE: lib/data/db/tables/asset_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+/// v8: الأصول الثابتة — ما يُقتنى ويُعمَّر ثم يُستهلك، لا ما يُصرف.
+///
+/// المعرّف نصّي كبقية جداول النظام لا رقمًا تلقائيًا: جهازان يعملان بلا شبكة
+/// يولّدان الرقم `1` لأصلين مختلفين، فيدهس أحدهما الآخر عند أول مزامنة.
+///
+/// و[warehouse] ليس زينة: به يخضع الأصل لنطاق مستودعات المستخدم كما تخضع
+/// الحركات، فلا يرى مسؤول فرعٍ أصولَ فرعٍ آخر.
+class Assets extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+
+  /// v16: عدد القطع في هذا السطر.
+  ///
+  /// أصلٌ مسلسل قطعةٌ واحدة برقمها، أما خمسون كرسيًّا متطابقًا فسطرٌ واحد
+  /// بكمية. وإجبار كلٍّ منها على سطر يجعل إدخال دفعةٍ عملَ ساعة، ويملأ
+  /// السجل بخمسين سطرًا لا يفرّق بينها شيء.
+  RealColumn get quantity => real().withDefault(const Constant(1))();
+  TextColumn get assetType => text().withDefault(const Constant('equipment'))();
+  TextColumn get serialNumber => text().withDefault(const Constant(''))();
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitName =>
+      text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get status => text().withDefault(const Constant('NEW'))();
+
+  /// yyyy-MM-dd — نصًّا كتواريخ الحركات، فلا يزيحها اختلاف المناطق الزمنية.
+  TextColumn get acquisitionDate => text().withDefault(const Constant(''))();
+  RealColumn get value => real().withDefault(const Constant(0))();
+  IntColumn get lifespanMonths => integer().withDefault(const Constant(0))();
+  TextColumn get supplierId => text().withDefault(const Constant(''))();
+  TextColumn get supplierName => text().withDefault(const Constant(''))();
+  TextColumn get invoiceNumber => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  /// v27: الصنف المخزني (أصلٌ ثابت) الذي هذه القطعة منه — فارغ لقطعةٍ سُجّلت
+  /// قبل ربط الأصول بالمخزون.
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// عهدة أصل لدى وحدة مستفيدة. [returnedDate] فارغة ⇒ العهدة قائمة.
+///
+/// الفراغ لا `NULL` كبقية النظام: عمود نصّي واحد يُقارن ويُصدَّر ويُدمج بلا
+/// حالة ثالثة.
+class AssetAssignments extends Table {
+  TextColumn get id => text()();
+  TextColumn get assetId => text()();
+  TextColumn get assetName => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitName =>
+      text().withDefault(const Constant(''))();
+  TextColumn get assignedDate => text().withDefault(const Constant(''))();
+  TextColumn get returnedDate => text().withDefault(const Constant(''))();
+  TextColumn get assignedTo => text().withDefault(const Constant(''))();
+
+  /// v27: عهدةٌ لدى مطبخ أو فرن (منشأة) بدل وحدةٍ مستفيدة.
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/asset_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/core_tables.dart ====================
+import 'package:drift/drift.dart';
+
+class Users extends Table {
+  TextColumn get id => text()();
+  TextColumn get username => text()();
+  TextColumn get name => text().withDefault(const Constant(''))();
+  TextColumn get email => text().withDefault(const Constant(''))();
+  TextColumn get role =>
+      text().withDefault(const Constant('user'))(); // admin | user
+  TextColumn get roles =>
+      text().withDefault(const Constant('[]'))(); // JSON: قوالب الأدوار
+  TextColumn get permissions =>
+      text().withDefault(const Constant('{}'))(); // JSON
+  TextColumn get warehouseScope => text()
+      .withDefault(const Constant('ALL'))(); // ALL أو JSON بأسماء المستودعات
+  TextColumn get saltHex => text().withDefault(const Constant(''))();
+  TextColumn get hashHex => text().withDefault(const Constant(''))();
+  IntColumn get iterations => integer().withDefault(const Constant(45000))();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  BoolColumn get approved => boolean().withDefault(const Constant(true))();
+  IntColumn get failedAttempts => integer().withDefault(const Constant(0))();
+  DateTimeColumn get lockedUntil => dateTime().nullable()();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  /// الأقسام المحجوبة عن المستخدم: JSON بقائمة من `supply` و`fuel` و`admin.*`.
+  /// فارغ `[]` = لا حجب. (v25)
+  TextColumn get sectionBlocked => text().withDefault(const Constant('[]'))();
+
+  /// توقيع المالك (ECDSA P-256) على منح دور مدير/مالك أو فكّ حجب، يُتحقَّق منه
+  /// بالمفتاح العام المدفون في التطبيق. فارغ = غير موقَّع. (v25)
+  TextColumn get ownerSig => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Categories extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+  TextColumn get description => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Items extends Table {
+  TextColumn get id => text()();
+  TextColumn get code => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get categoryId => text().withDefault(const Constant(''))();
+  TextColumn get categoryName => text().withDefault(const Constant(''))();
+  TextColumn get baseUnit => text().withDefault(const Constant(''))();
+  TextColumn get units => text()
+      .withDefault(const Constant('[]'))(); // JSON: [{name,factor,isBase}]
+  RealColumn get qty =>
+      real().withDefault(const Constant(0))(); // الإجمالي (للتوافق)
+  RealColumn get minQty => real().withDefault(const Constant(0))();
+  TextColumn get barcode => text().withDefault(const Constant(''))();
+  BoolColumn get isRefillable => boolean().withDefault(const Constant(false))();
+
+  /// v7: وحدة العرض الافتراضية — الرصيد يُخزَّن دائمًا بالوحدة الأساسية، لكن
+  /// يُعرض بهذه الوحدة في التقارير وفي رصيد شاشات الإدخال. فارغة = الأساسية.
+  TextColumn get reportUnit => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// v27: أصلٌ ثابت. يُستلم بسند توريد، ويُصرف بسند صرفٍ رسمي لوحدةٍ أو مطبخٍ أو
+  /// فرن، ويُحوَّل ويُجرد ويُتلف — كأي صنف، فرصيده في الأرصدة نفسها. وتتابعه
+  /// شاشة «الأصول الثابتة» بعُهده وحركاته (`AssetRegisterRepo`).
+  BoolColumn get isAsset => boolean().withDefault(const Constant(false))();
+
+  /// نوع الأصل (`AssetType` أو نوعٌ أضافه المستخدم).
+  TextColumn get assetType => text().withDefault(const Constant(''))();
+
+  /// العمر الافتراضي بالأشهر (صفر = غير محدد).
+  IntColumn get lifespanMonths => integer().withDefault(const Constant(0))();
+
+  /// القيمة الدفترية للوحدة الأساسية — بها تُقوَّم الأصول في السجل والتقارير.
+  RealColumn get unitValue => real().withDefault(const Constant(0))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Warehouses extends Table {
+  TextColumn get id => text()();
+  TextColumn get code => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get manager => text().withDefault(const Constant(''))();
+  TextColumn get location => text().withDefault(const Constant(''))();
+  BoolColumn get feedsAllCamps => boolean().withDefault(const Constant(true))();
+
+  /// v17: سعة المستودع من المحروقات باللتر، و**صفرٌ يعني بلا سعة معلومة**.
+  ///
+  /// المحروقات تُخزَّن في مستودعات النظام نفسها لا في دليلٍ ثانٍ: المستودع
+  /// مكانٌ، وبعضه يحمل وقودًا. ودليلان للمكان الواحد يعنيان تعريفه مرتين
+  /// وصيانته مرتين واختلافهما بعد أول تعديل.
+  RealColumn get fuelCapacityLiters => real().withDefault(const Constant(0))();
+
+  /// v10: المخزن الرئيسي للوحدة — منه وحده تُغذّى المعسكرات.
+  ///
+  /// واحد لا أكثر: تعيين مخزن رئيسيًا يُلغي السابق (`CampLedgerRepo.setMain`).
+  BoolColumn get isMain => boolean().withDefault(const Constant(false))();
+  TextColumn get campIds => text().withDefault(const Constant('[]'))(); // JSON
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Suppliers extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+  TextColumn get phone => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get contact =>
+      text().withDefault(const Constant(''))(); // v2: اسم جهة الاتصال
+  TextColumn get city =>
+      text().withDefault(const Constant(''))(); // v2: المدينة / العنوان المختصر
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// الوحدات المستفيدة والمعسكرات (شجرة: المعسكر أب والوحدات أبناء)
+class BeneficiaryUnits extends Table {
+  TextColumn get id => text()();
+  TextColumn get code => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get type =>
+      text().withDefault(const Constant('unit'))(); // camp | unit
+  TextColumn get parentId => text().withDefault(const Constant(''))();
+  TextColumn get parentName => text().withDefault(const Constant(''))();
+  BoolColumn get isCamp => boolean().withDefault(const Constant(false))();
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+
+  /// v6: الوحدة قد تشترك في مطبخ **وفرن معًا**، فصار الربط قائمة لا قيمة واحدة.
+  /// `facilityId` يبقى للتوافق مع البيانات القديمة وملفات التصدير السابقة.
+  TextColumn get facilityIds =>
+      text().withDefault(const Constant('[]'))(); // JSON
+  TextColumn get category =>
+      text().withDefault(const Constant(''))(); // v2: الاختصاص (مشاة…)
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// المطابخ والأفران
+class Facilities extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+  TextColumn get fType => text().withDefault(const Constant('kitchen'))();
+  IntColumn get capacity => integer().withDefault(const Constant(0))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v5: مراجعة الأحداث الحساسة/الحرجة —
+/// سطر لكل حدث في سجل التدقيق تمت مراجعته، فلا يظهر ضمن «غير المراجَع».
+class SensitiveReviews extends Table {
+  TextColumn get id => text()();
+  TextColumn get logId => text()();
+  TextColumn get reviewedBy => text().withDefault(const Constant(''))();
+  TextColumn get note => text().withDefault(const Constant(''))();
+  DateTimeColumn get reviewedAt => dateTime().withDefault(currentDateAndTime)();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class AuditLogs extends Table {
+  TextColumn get id => text()();
+  TextColumn get action => text()();
+  TextColumn get entityType => text().withDefault(const Constant(''))();
+  TextColumn get summary => text().withDefault(const Constant(''))();
+  TextColumn get details => text().withDefault(const Constant('{}'))(); // JSON
+  TextColumn get risk => text().withDefault(const Constant('normal'))();
+  TextColumn get actorEmail => text().withDefault(const Constant(''))();
+  TextColumn get logDate => text().withDefault(const Constant(''))();
+  // v2: حقول سجل التدقيق
+  TextColumn get actorName => text().withDefault(const Constant(''))();
+  TextColumn get actorRole => text().withDefault(const Constant('user'))();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get target => text().withDefault(const Constant(''))();
+  TextColumn get status => text().withDefault(const Constant(''))();
+  IntColumn get itemCount => integer().withDefault(const Constant(0))();
+  RealColumn get qty => real().withDefault(const Constant(0))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// إعدادات عامة (هوية الجهة، تخطيط الطباعة، إعدادات النماذج) بصيغة JSON
+class AppSettings extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text().withDefault(const Constant('{}'))();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+  @override
+  Set<Column> get primaryKey => {key};
+}
+// ==================== END FILE: lib/data/db/tables/core_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/daily_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+/// حصر القوة اليومي (التفريدة)
+class Strengths extends Table {
+  TextColumn get id => text()();
+  TextColumn get unitId => text()();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  TextColumn get campId => text().withDefault(const Constant(''))();
+  TextColumn get campName => text().withDefault(const Constant(''))();
+  TextColumn get strengthDate => text()(); // yyyy-MM-dd
+  RealColumn get soldierCount => real().withDefault(const Constant(0))();
+  RealColumn get officerCount => real().withDefault(const Constant(0))();
+  RealColumn get total => real().withDefault(const Constant(0))();
+  RealColumn get pct => real().withDefault(const Constant(0))();
+  TextColumn get mode =>
+      text().withDefault(const Constant('detail'))(); // camp | detail
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class KitchenLogs extends Table {
+  TextColumn get id => text()();
+  TextColumn get facilityId => text()();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get date => text()();
+  TextColumn get mealType => text().withDefault(const Constant('LUNCH'))();
+  RealColumn get strength => real().withDefault(const Constant(0))();
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get qty => real().withDefault(const Constant(0))();
+  RealColumn get baseQty => real().withDefault(const Constant(0))();
+  RealColumn get expectedBase => real().withDefault(const Constant(0))();
+  RealColumn get varianceBase => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// نسب الاستحقاق: كمية شهرية للفرد بوحدة مختارة
+class Entitlements extends Table {
+  TextColumn get itemId => text()();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  RealColumn get qtyPerPerson =>
+      real().withDefault(const Constant(0))(); // للشهر
+  TextColumn get measureUnitName => text().withDefault(const Constant(''))();
+  RealColumn get measureFactor => real().withDefault(const Constant(1))();
+  TextColumn get notes =>
+      text().withDefault(const Constant(''))(); // v3: ملاحظة أو شرط المقرر
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  /// v28: أساسيٌّ حرج — نقصه بلا بديل يوقف صرف الوجبة. الافتراضي «حرج»: ما
+  /// لم يُصنَّف يُعامل معاملة الأرز لا معاملة البهار، فلا تُصرف وجبةٌ ناقصة صمتًا.
+  BoolColumn get isCritical => boolean().withDefault(const Constant(true))();
+
+  /// v28: البديل القياسي ومعامله (وحدات أساس البديل لكل وحدة أساس من الأصل).
+  TextColumn get substituteItemId => text().withDefault(const Constant(''))();
+  TextColumn get substituteItemName => text().withDefault(const Constant(''))();
+  RealColumn get substituteRatio => real().withDefault(const Constant(0))();
+  @override
+  Set<Column> get primaryKey => {itemId};
+}
+
+
+/// v9: خطة الوجبات — ما يُطبخ في كل يوم ووجبة، وكم لكل فرد.
+///
+/// **وهي غير نسب الاستحقاق.** النسبة مقرَّر شهري ثابت للفرد من كل صنف
+/// (`Entitlements`)، والخطة قائمة طعام: أرزٌ يوم الأحد ومعكرونة يوم الاثنين.
+/// من النسبة تُعرف حصة الشهر، ومن الخطة يُعرف طلب الغد.
+class MealPlans extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+
+  /// WEEKLY | BIWEEKLY | MONTHLY | CUSTOM
+  TextColumn get planType => text().withDefault(const Constant('WEEKLY'))();
+  TextColumn get startDate => text().withDefault(const Constant(''))();
+  TextColumn get endDate => text().withDefault(const Constant(''))();
+
+  /// DRAFT | ACTIVE | ARCHIVED
+  TextColumn get status => text().withDefault(const Constant('DRAFT'))();
+
+  /// المطبخ أو الفرن الذي تنفَّذ فيه الخطة — فارغ يعني الوحدة كلها.
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// صنف واحد في وجبة واحدة من يوم واحد.
+///
+/// [qtyPerPerson] بوحدة [unitName]، و[factor] يحوّلها إلى وحدة الأساس — نفس
+/// اصطلاح سطور الحركات، فيُجمع الاثنان بلا ترجمة.
+class MealPlanEntries extends Table {
+  TextColumn get id => text()();
+  TextColumn get planId => text()();
+  TextColumn get entryDate => text().withDefault(const Constant(''))();
+
+  /// BREAKFAST | LUNCH | DINNER | SNACK
+  TextColumn get mealType => text().withDefault(const Constant('LUNCH'))();
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+  TextColumn get itemCode => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get factor => real().withDefault(const Constant(1))();
+  RealColumn get qtyPerPerson => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  /// v28: درجة المكوّن في الوجبة (BOM) وبديله فيها بكميته للفرد بوحدته.
+  BoolColumn get isCritical => boolean().withDefault(const Constant(true))();
+  TextColumn get substituteItemId => text().withDefault(const Constant(''))();
+  TextColumn get substituteItemName => text().withDefault(const Constant(''))();
+  TextColumn get substituteUnitName => text().withDefault(const Constant(''))();
+  RealColumn get substituteFactor => real().withDefault(const Constant(1))();
+  RealColumn get substituteQtyPerPerson => real().withDefault(const Constant(0))();
+
+  /// v28: المكوّن القياسي الذي وُلّد منه السطر (`StandardRations`)، فارغ لما أُدخل يدويًا.
+  TextColumn get stdKey => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v28: قوة الوجبة في مطبخ/فرن ليوم — من حضر الإفطار ليس من حضر العشاء.
+///
+/// **صفٌّ لكل (مرفق، يوم، وجبة) بمعرّفٍ حتميّ** (`Ids.natural`): جهازان يُدخلان
+/// قوة غداء المطبخ نفسه يصلان إلى الصف نفسه فيلتقيان بالدمج (الأحدث يفوز) بدل
+/// صفّين يُجمعان. ووجبةٌ لا صفّ لها تأخذ قوة اليوم من التفريدة.
+@DataClassName('MealHeadcountRow')
+class MealHeadcounts extends Table {
+  TextColumn get id => text()();
+  TextColumn get facilityId => text()();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get date => text()();
+
+  /// BREAKFAST | LUNCH | DINNER
+  TextColumn get mealType => text()();
+  RealColumn get headcount => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v28: سجل صرف الوجبات — رأسٌ لكل وجبةٍ صُرفت من الخطة إلى مطبخ.
+///
+/// **لا يحرّك مخزونًا بنفسه:** الخصم سند الصرف ([issueRef]) المكتوب معه في
+/// المعاملة نفسها. هذا الجدول يحفظ ما لا يحمله السند: من أيّ خطةٍ ولأيّ وجبةٍ
+/// وبكم فردًا، وما كان مطلوبًا مقابل ما صُرف، والبدائل، وقرار المحرّك ومبرّره
+/// وتوقيع الآمر إن لزم.
+@DataClassName('MealDispatch')
+class MealDispatches extends Table {
+  TextColumn get id => text()();
+  TextColumn get issueRef => text().withDefault(const Constant(''))();
+  TextColumn get planId => text().withDefault(const Constant(''))();
+  TextColumn get planName => text().withDefault(const Constant(''))();
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+  TextColumn get facilityName => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get mealType => text().withDefault(const Constant('LUNCH'))();
+  RealColumn get headcount => real().withDefault(const Constant(0))();
+  RealColumn get wastePct => real().withDefault(const Constant(0))();
+  BoolColumn get wholePacks => boolean().withDefault(const Constant(false))();
+
+  /// `pass` | `soft` | `hard` — درجة قرار المحرّك (`RuleDecision`).
+  TextColumn get decision => text().withDefault(const Constant('pass'))();
+  TextColumn get reason => text().withDefault(const Constant(''))();
+
+  /// تحذيرات المحرّك كما عُرضت (JSON قائمة نصوص).
+  TextColumn get warnings => text().withDefault(const Constant('[]'))();
+
+  /// مَن تجاوز القفل ورمز توقيعه الإلكتروني (`IMD2`) على السند.
+  TextColumn get overrideBy => text().withDefault(const Constant(''))();
+  TextColumn get overrideToken => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v28: سطر صرف وجبة — صنفٌ واحد بحاجته وما صُرف منه ومرحَّله. الكميات بوحدة الأساس.
+class MealDispatchLines extends Table {
+  TextColumn get id => text()();
+  TextColumn get dispatchId => text()();
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get requiredBase => real().withDefault(const Constant(0))();
+  RealColumn get issuedBase => real().withDefault(const Constant(0))();
+  RealColumn get carryIn => real().withDefault(const Constant(0))();
+
+  /// المرحَّل للمطبخ بعد هذا الصرف — منه يبدأ الصرف التالي داخل نافذته.
+  RealColumn get carryOut => real().withDefault(const Constant(0))();
+
+  /// `full` | `substitute` | `partial` | `carried` (`DeductionKind`).
+  TextColumn get kind => text().withDefault(const Constant('full'))();
+  BoolColumn get isCritical => boolean().withDefault(const Constant(true))();
+  TextColumn get substituteForId => text().withDefault(const Constant(''))();
+  TextColumn get substituteForName => text().withDefault(const Constant(''))();
+  TextColumn get note => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/daily_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/fuel_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+/// v8: طلبيات الإعاشة — فرعٌ يطلب من مستودع مورِّد، ثم تُعتمد وتُستلم.
+///
+/// المستودعات بأسمائها لا بمعرّفاتها، كما تفعل الحركات: نطاق صلاحيات المستخدم
+/// (`Perm.canWh`) يُقاس بالاسم، فتخزينه معرّفًا يعني ترجمةً في كل فحص صلاحية.
+/// v18: مستودعات المحروقات — دليلٌ مستقل عن مخازن الإعاشة.
+///
+/// **خزّان الوقود ليس مخزنًا للإعاشة.** له سعةٌ باللتر وموقعٌ يُشترط فيه
+/// البعد عن السكن، ويمسكه أمينٌ غير أمين المستودع، ويُجرد بلجنةٍ أخرى. وجمعُ
+/// الاثنين في دليلٍ واحد يجعل كل شاشة تُرشّح ما لا يخصّها، ويُدخل مخزن الطحين
+/// في قائمة «من أين نصرف الديزل؟».
+class FuelWarehouses extends Table {
+  TextColumn get id => text()();
+  TextColumn get code => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get manager => text().withDefault(const Constant(''))();
+  TextColumn get location => text().withDefault(const Constant(''))();
+
+  /// السعة باللتر — صفرٌ يعني بلا سعة معلومة، فلا تُحسب نسبة إشغال.
+  RealColumn get capacityLiters => real().withDefault(const Constant(0))();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v18: الوحدات المستفيدة من المحروقات — دليلٌ مستقل.
+///
+/// مستفيدُ الوقود ليس مستفيد الإعاشة: تلك وحداتٌ لها قوةٌ تُطعَم، وهذه جهاتٌ
+/// لها مركباتٌ تُزوَّد — وقد تكون ورشةً أو مولّدًا أو رتلًا عابرًا لا قوة له.
+class FuelUnits extends Table {
+  TextColumn get id => text()();
+  TextColumn get code => text().withDefault(const Constant(''))();
+  TextColumn get name => text()();
+  TextColumn get commander => text().withDefault(const Constant(''))();
+  TextColumn get phone => text().withDefault(const Constant(''))();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v18: إعدادات قسم المحروقات — سطرٌ واحد بمعرّف ثابت.
+///
+/// كانت الحدود والتواقيع مدفونةً في الكود، فتغييرُ حدّ التنبيه يحتاج بناءً
+/// جديدًا ونشرًا على كل جهاز. وهي إعداداتُ القسم لا إعداداتُ النظام: توقيع
+/// مسؤول المحروقات غير توقيع أمين المستودع.
+class FuelSettingsRows extends Table {
+  TextColumn get id => text()();
+
+  /// النسبة التي يُنبَّه عند بلوغها من سعة الخزّان.
+  RealColumn get lowStockPercent => real().withDefault(const Constant(20))();
+  RealColumn get defaultDailyLiters =>
+      real().withDefault(const Constant(200))();
+  RealColumn get defaultWeeklyLiters =>
+      real().withDefault(const Constant(1000))();
+  RealColumn get defaultMonthlyLiters =>
+      real().withDefault(const Constant(4000))();
+
+  /// v19: ترويسة البرقية الرسمية — أربعة أسطر فوق التقرير واسمٌ مختصر
+  /// للسندات. كانت مكتوبةً في الطباعة، فتغيير اسم القيادة يحتاج بناءً.
+  ///
+  /// وقيمها الابتدائية ترويسةُ الفرقة لا فراغ: ورقةٌ بلا رأسٍ لا تُرفع،
+  /// وأوّلُ من يفتح الشاشة يطبع قبل أن يمرّ على الإعدادات.
+  TextColumn get parentOrg =>
+      text().withDefault(const Constant('قيادة القوات المشتركة'))();
+  TextColumn get agencyTitle =>
+      text().withDefault(const Constant('هيئة إدارة القوات اليمنية'))();
+  TextColumn get commandTitle =>
+      text().withDefault(const Constant('قيادة الفرقة الأولى'))();
+  TextColumn get branchTitle =>
+      text().withDefault(const Constant('شعبة الإمداد والتموين'))();
+
+  /// اسم الجهة المختصر كما يظهر على السندات.
+  TextColumn get orgName =>
+      text().withDefault(const Constant('شعبة الإمداد والتموين'))();
+
+  /// شعار الترويسة — أسطرٌ داخل الدائرة تفصل بينها فاصلة.
+  TextColumn get sealLines =>
+      text().withDefault(const Constant('الفرقة،الأولى،طوارئ'))();
+
+  /// v20: عملُ كلِّ موقّعٍ ورتبتُه — كانت مكتوبةً في الطباعة، ولا تصلح
+  /// لفرقةٍ غير الأولى ولا لشعبةٍ غير الإمداد.
+  TextColumn get roleOfficer =>
+      text().withDefault(const Constant('مسؤول محروقات المعسكر'))();
+  TextColumn get roleSupply =>
+      text().withDefault(const Constant('ركن إمداد الفرقة الأولى'))();
+  TextColumn get roleChief =>
+      text().withDefault(const Constant('رئيس شعبة الإمداد والتموين'))();
+
+  /// تواقيع أوراق المحروقات.
+  TextColumn get signOfficer => text().withDefault(const Constant(''))();
+  TextColumn get signSupply => text().withDefault(const Constant(''))();
+  TextColumn get signChief => text().withDefault(const Constant(''))();
+
+  /// هل يُشترط رقم الشاصي في كل صرف؟
+  BoolColumn get requireChassis =>
+      boolean().withDefault(const Constant(false))();
+
+  /// هل يُسمح بالصرف الاستثنائي خارج التفريدة؟
+  BoolColumn get allowExceptional =>
+      boolean().withDefault(const Constant(true))();
+
+  /// v26: سقف تراكم الاستحقاق بعدد الفترات — ما لم يُصرف يتراكم، ولا يُتاح منه
+  /// في وقتٍ واحد أكثر من هذا العدد من الفترات (قرار المالك 2026-10-11). صفر ⇒
+  /// بلا سقف. كان التراكم بلا حدٍّ، فوحدةٌ لم تسحب أشهرًا تسحب استحقاقها دفعةً.
+  IntColumn get carryCapPeriods => integer().withDefault(const Constant(3))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: تفريدة المحروقات — استحقاق وحدةٍ من الوقود في كل فترة.
+///
+/// **وهي غير تفريدة الإعاشة.** تلك مقرَّرٌ للفرد يُضرب في القوة، وهذه مخصَّصٌ
+/// للوحدة نفسها في كل فترة: مئتا لتر يوميًّا لمعسكرٍ بصرف النظر عن عدد من فيه.
+///
+/// و[disbursable] ليس تكرارًا لـ[active]: تفريدةٌ سارية قد تُوقَف عن الصرف
+/// حتى يأذن القائد، فتبقى قائمةً محسوبةً ولا تُصرف.
+class FuelAllocations extends Table {
+  TextColumn get id => text()();
+
+  /// رمز التفريدة — يُرقَّم كبقية سندات النظام بـ`DocNumbering`، ولذلك اسمه
+  /// `refNo`: العدّاد يقرأ هذا العمود بعينه في كل جدول.
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get unitId => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+
+  /// petrol | diesel
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+
+  /// daily | weekly | monthly | custom
+  TextColumn get periodType => text().withDefault(const Constant('monthly'))();
+  RealColumn get quantityPerPeriod => real().withDefault(const Constant(0))();
+
+  /// إجمالي الفترة المحددة (periodType = custom) — صفرٌ لغيرها.
+  RealColumn get totalQuantity => real().withDefault(const Constant(0))();
+  RealColumn get weeklyLiters => real().withDefault(const Constant(0))();
+  RealColumn get monthlyLiters => real().withDefault(const Constant(0))();
+  TextColumn get issueLocation => text().withDefault(const Constant(''))();
+  TextColumn get startDate => text().withDefault(const Constant(''))();
+
+  /// فارغ ⇒ بلا نهاية.
+  TextColumn get endDate => text().withDefault(const Constant(''))();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  BoolColumn get disbursable => boolean().withDefault(const Constant(true))();
+
+  /// v26: ما شُطب من الاستحقاق المتراكم بـ«تصفير الرصيد» — يُطرح من المستحق
+  /// فيصير المتبقي صفرًا لحظة التصفير، ويعود يتراكم من الفترة التالية.
+  RealColumn get writtenOffLiters => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: صرف محروقات — لمركبةٍ بسائقها ورقم شاصيها.
+///
+/// الوقود لا يُصرف لوحدةٍ في الهواء: يُصرف لمركبةٍ بعينها. و[chassisNo] هو ما
+/// يجعل السؤال «كم شربت هذه المركبة هذا الشهر؟» قابلًا للإجابة — وبه يُكشف
+/// الصرف المتكرر لمركبةٍ واحدة بأسماء سائقين مختلفين.
+class FuelIssues extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+
+  /// allocation | exceptional
+  TextColumn get source => text().withDefault(const Constant('allocation'))();
+  RealColumn get quantityLiters => real().withDefault(const Constant(0))();
+  TextColumn get driverName => text().withDefault(const Constant(''))();
+  TextColumn get vehicleType => text().withDefault(const Constant(''))();
+  TextColumn get chassisNo => text().withDefault(const Constant(''))();
+  TextColumn get allocationId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryName => text().withDefault(const Constant(''))();
+
+  /// الاستحقاق وقت الصرف — يُحفظ كما كان، فلا يتغيّر السند بتغيّر التفريدة.
+  RealColumn get entitledLiters => real().withDefault(const Constant(0))();
+  TextColumn get periodType => text().withDefault(const Constant(''))();
+  TextColumn get customFrom => text().withDefault(const Constant(''))();
+  TextColumn get customTo => text().withDefault(const Constant(''))();
+  TextColumn get justification => text().withDefault(const Constant(''))();
+  TextColumn get orderAuthority => text().withDefault(const Constant(''))();
+  TextColumn get purpose => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: توريد محروقات إلى مستودع.
+class FuelSupplies extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+  RealColumn get quantityLiters => real().withDefault(const Constant(0))();
+  TextColumn get supplierName => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get transportVehicleType =>
+      text().withDefault(const Constant(''))();
+  TextColumn get driverName => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: رصيد محروقات افتتاحي لمستودع.
+class FuelOpenings extends Table {
+  TextColumn get id => text()();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+  RealColumn get liters => real().withDefault(const Constant(0))();
+  TextColumn get asOfDate => text().withDefault(const Constant(''))();
+  TextColumn get note => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: تحويل محروقات بين مستودعين.
+class FuelTransfers extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+  RealColumn get quantityLiters => real().withDefault(const Constant(0))();
+  TextColumn get fromWarehouse => text().withDefault(const Constant(''))();
+  TextColumn get toWarehouse => text().withDefault(const Constant(''))();
+  TextColumn get driverName => text().withDefault(const Constant(''))();
+  TextColumn get transportVehicleType =>
+      text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v17: جرد محروقات — أمرٌ يمرّ بأربع مراحل قبل أن يمسّ الرصيد.
+///
+/// **لا يُعدَّل الرصيد إلا عند الترحيل** (`posted`): جردٌ في مرحلة العدّ يحمل
+/// أرقامًا لم تُراجَع بعد، ولو أثّرت في الرصيد لصار كل عدٍّ ناقصٍ عجزًا مثبتًا.
+class FuelStocktakes extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+
+  /// full | partial
+  TextColumn get kind => text().withDefault(const Constant('full'))();
+
+  /// all | petrol | diesel
+  TextColumn get fuelFilter => text().withDefault(const Constant('all'))();
+  TextColumn get committee => text().withDefault(const Constant(''))();
+
+  /// open | counting | analysis | posted
+  TextColumn get status => text().withDefault(const Constant('open'))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// سطر جرد: الرصيد الدفتري وقت الفتح، والمعدود فعلًا.
+///
+/// [counted] يفصل «عُدَّ فوُجد صفرًا» عن «لم يُعدّ بعد» — والفراغ لا يُفرّق
+/// بينهما، فيصير خزّانٌ لم يُفتح عجزًا كاملًا عند الترحيل.
+class FuelStocktakeLines extends Table {
+  TextColumn get id => text()();
+  TextColumn get stocktakeId => text()();
+  TextColumn get fuelType => text().withDefault(const Constant('diesel'))();
+  RealColumn get bookLiters => real().withDefault(const Constant(0))();
+  BoolColumn get counted => boolean().withDefault(const Constant(false))();
+  RealColumn get countedLiters => real().withDefault(const Constant(0))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/fuel_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/movement_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+/// أعمدة مشتركة لكل سطور الحركات
+mixin MovementColumns on Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))(); // yyyy-MM-dd
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+  TextColumn get itemCode => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get factor => real().withDefault(const Constant(1))();
+  RealColumn get qty => real().withDefault(const Constant(0))();
+  RealColumn get baseQty => real().withDefault(const Constant(0))();
+  TextColumn get status => text().withDefault(const Constant('COMPLETED'))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  IntColumn get editCount => integer().withDefault(const Constant(0))();
+  TextColumn get editLog => text().withDefault(const Constant('[]'))(); // JSON
+  // v2: تعديل وإلغاء المستندات من سجل المستندات (documents-center.js)
+  TextColumn get editedBy => text().withDefault(const Constant(''))();
+  TextColumn get cancelReason => text().withDefault(const Constant(''))();
+  TextColumn get cancelledBy => text().withDefault(const Constant(''))();
+  TextColumn get prevStatus => text().withDefault(const Constant(''))();
+}
+
+
+class Receipts extends Table with MovementColumns {
+  TextColumn get supplier => text().withDefault(const Constant(''))();
+  TextColumn get invoiceNo => text().withDefault(const Constant(''))();
+  TextColumn get committee => text().withDefault(const Constant(''))();
+  TextColumn get supervision =>
+      text().withDefault(const Constant(''))(); // v2: المراجعة والتفتيش
+  TextColumn get audit =>
+      text().withDefault(const Constant(''))(); // v2: التدقيق
+  // v12: تاريخ انتهاء صلاحية دفعة هذا السطر (yyyy-MM-dd)، فارغ للأصناف بلا صلاحية.
+  TextColumn get expiryDate => text().withDefault(const Constant(''))();
+  TextColumn get cylinderAction => text().withDefault(
+      const Constant(''))(); // v2: RECEIVE_FULL | RECEIVE_EMPTY | REFILL
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Issues extends Table with MovementColumns {
+  IntColumn get targetType => integer()
+      .withDefault(const Constant(0))(); // 0 وحدة 1 منشأة 2 مخصص 3 متعدد
+  TextColumn get recipientDisplay => text().withDefault(const Constant(''))();
+  TextColumn get unitId => text().withDefault(const Constant(''))();
+  TextColumn get facilityId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitName =>
+      text().withDefault(const Constant(''))();
+  RealColumn get soldierCount => real().withDefault(const Constant(0))();
+  IntColumn get durationDays => integer().withDefault(const Constant(1))();
+  // v2: اعتماد/رفض أوامر الصرف
+  TextColumn get approvedBy => text().withDefault(const Constant(''))();
+  TextColumn get rejectReason => text().withDefault(const Constant(''))();
+  TextColumn get rejectedBy => text().withDefault(const Constant(''))();
+  TextColumn get cylinderAction => text().withDefault(const Constant(
+      ''))(); // v2: EXCHANGE | ISSUE_FULL | ISSUE_EMPTY | CONSUME
+  RealColumn get officerCount => real().withDefault(const Constant(0))(); // v2
+
+  /// v27: اسم المستلم ورتبته — يُطبع في «إشعار الاستلام»، وبه تُسمّى عهدة
+  /// الأصل الثابت لدى الوحدة أو المطبخ أو الفرن.
+  TextColumn get receiverName => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Transfers extends Table with MovementColumns {
+  TextColumn get destWarehouse => text().withDefault(const Constant(''))();
+  TextColumn get campId => text().withDefault(const Constant(''))();
+  TextColumn get campName => text().withDefault(const Constant(''))();
+  RealColumn get strength => real().withDefault(const Constant(0))();
+  IntColumn get durationDays => integer().withDefault(const Constant(1))();
+  TextColumn get rejectReason => text().withDefault(const Constant(''))();
+  // v13: حالة الأسطوانات المحوَّلة: TRANSFER_FULL | TRANSFER_EMPTY (فارغ لغيرها).
+  TextColumn get cylinderAction => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class Returns extends Table with MovementColumns {
+  TextColumn get party => text().withDefault(const Constant(''))();
+
+  /// v11: الوحدة التي أعادت الأصناف — **بمعرّفها** لا باسمها وحده.
+  ///
+  /// كان الربط بالاسم ([party]) فقط، فتفشل نسبةُ المرتجع إلى معسكره صامتةً
+  /// كلما اختلف الإملاء أو أُعيدت تسمية الوحدة — فيبدو المعسكر مستلمًا ما
+  /// ردّه، ويُحرم من استحقاقه في الشهر التالي.
+  TextColumn get beneficiaryUnitId => text().withDefault(const Constant(''))();
+  TextColumn get beneficiaryUnitName =>
+      text().withDefault(const Constant(''))();
+  TextColumn get type => text()
+      .withDefault(const Constant('FROM_UNIT'))(); // FROM_UNIT | TO_SUPPLIER
+  TextColumn get condition => text().withDefault(const Constant('صالحة'))();
+  TextColumn get origRef => text().withDefault(const Constant(''))();
+  // v13: حالة الأسطوانات المرتجعة: RETURN_FULL | RETURN_EMPTY (فارغ لغيرها).
+  TextColumn get cylinderAction => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class OpeningBalances extends Table {
+  TextColumn get id => text()();
+  TextColumn get itemId => text()();
+  TextColumn get itemCode => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  RealColumn get qty => real().withDefault(const Constant(0))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get setBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// v31: التفصيل كما أُدخل (الكمية بكل وحدة، والممتلئة والفارغة للأسطوانات) —
+  /// JSON من `OpeningBreakdown`؛ فارغٌ ⇒ الرصيد بوحدة الأساس وحدها.
+  TextColumn get breakdown => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v27: محضر إتلاف — رأسه هنا، وأسطره تسوياتٌ **سالبة** في [Adjustments]
+/// (`session_id` = معرّفه، والحالة حالته)، فتدخل الأرصدة ودفتر الحركة والجرد
+/// والمزامنة بالمسار القائم نفسه. المسودة (`DRAFT`) لا تمسّ الرصيد، والاعتماد
+/// (`COMPLETED`) يُخرج الكميات، والإلغاء (`CANCELLED`) يعيدها.
+class Destructions extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))(); // yyyy-MM-dd
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+
+  /// سبب الإتلاف (انتهاء صلاحية، تلف بالتخزين، عطب غير قابل للإصلاح…).
+  TextColumn get reason => text().withDefault(const Constant(''))();
+
+  /// طريقة الإتلاف (حرق، دفن، تكسير…).
+  TextColumn get method => text().withDefault(const Constant(''))();
+
+  /// مكان الإتلاف.
+  TextColumn get place => text().withDefault(const Constant(''))();
+
+  /// لجنة الإتلاف: JSON `[{name, rank, role}]` بترتيب التوقيع.
+  TextColumn get committee => text().withDefault(const Constant('[]'))();
+
+  /// رقم الأمر/البرقية التي أُجيز بها الإتلاف.
+  TextColumn get orderRef => text().withDefault(const Constant(''))();
+  TextColumn get status => text().withDefault(const Constant('DRAFT'))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get approvedBy => text().withDefault(const Constant(''))();
+  TextColumn get cancelReason => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// تسويات الجرد: فرق موجب أو سالب يدخل رصيد المستودع بعد اعتماد أمر الجرد.
+class Adjustments extends Table with MovementColumns {
+  TextColumn get sessionId => text().withDefault(const Constant(''))();
+  TextColumn get reason => text().withDefault(const Constant(''))();
+  TextColumn get approvedBy => text().withDefault(const Constant(''))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/movement_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/ration_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+/// v14: الجهات التي يُطلب منها — لا مستودعات ولا موردون.
+///
+/// المخزن الرئيسي لا يطلب من مستودعٍ آخر: يطلب من **جهة** في تسلسل الفرقة —
+/// ركن الإمداد أو رئيس الشعبة أو قائد الفرقة. وهذه ليست طرفًا مخزنيًّا، فلا
+/// رصيد لها ولا حركة عليها؛ ولذلك جدولٌ مستقل لا صفٌّ في [Warehouses].
+///
+/// ولأنها تُدار من الأدلة لا من الكود، تُضاف جهةٌ أو يُغيَّر مسمّاها بلا
+/// تحديثٍ للبرنامج — وتُزامَن كبقية الأدلة.
+class SupplyAuthorities extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+
+  /// المسمّى الوظيفي إن اختلف عن الاسم (مثل «ركن إمداد الفرقة»).
+  TextColumn get title => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  BoolColumn get active => boolean().withDefault(const Constant(true))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class RationOrders extends Table {
+  TextColumn get id => text()();
+  TextColumn get refNo => text().withDefault(const Constant(''))();
+  TextColumn get requestingWarehouse =>
+      text().withDefault(const Constant(''))();
+  TextColumn get supplyingWarehouse => text().withDefault(const Constant(''))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get requiredDate => text().withDefault(const Constant(''))();
+
+  /// DRAFT | PENDING | APPROVED | RECEIVED | REJECTED
+  TextColumn get status => text().withDefault(const Constant('DRAFT'))();
+  TextColumn get priority => text().withDefault(const Constant('NORMAL'))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get rejectReason => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  TextColumn get approvedBy => text().withDefault(const Constant(''))();
+  TextColumn get receivedBy => text().withDefault(const Constant(''))();
+
+  /// مرجع سند الاستلام الذي وُلّد عند استلام الطلبية — به يُربط الطلب بأثره
+  /// المخزني، فلا تبقى الطلبية ورقةً بلا حركة.
+  TextColumn get receiptRef => text().withDefault(const Constant(''))();
+
+  /// v14: نوع الطلبية — `MAIN` أو `BRANCH` (انظر `RationKind`).
+  ///
+  /// الافتراضي `BRANCH` لأن كل ما سبق هذا العمود كان بين مستودعين.
+  TextColumn get orderKind => text().withDefault(const Constant('BRANCH'))();
+
+  /// v14: الجهة المطلوب منها — لطلبية المخزن الرئيسي وحدها.
+  TextColumn get authorityId => text().withDefault(const Constant(''))();
+  TextColumn get authorityName => text().withDefault(const Constant(''))();
+
+  /// v14: المستند الذي نُفِّذت به الطلبية — سند التحويل للفرعي، وسند التوريد
+  /// للرئيسي. **الطلبية نفسها لا تحرّك مخزونًا**، وهذا الحقل هو كل صلتها به:
+  /// به تُطابَق لاحقًا ويُعرف ما وصل مما طُلب.
+  TextColumn get fulfillRef => text().withDefault(const Constant(''))();
+
+  /// `TRANSFER` | `RECEIPT`
+  TextColumn get fulfillKind => text().withDefault(const Constant(''))();
+  TextColumn get fulfillDate => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class RationOrderLines extends Table {
+  TextColumn get id => text()();
+  TextColumn get orderId => text()();
+  TextColumn get itemId => text().withDefault(const Constant(''))();
+  TextColumn get itemCode => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get factor => real().withDefault(const Constant(1))();
+  RealColumn get requestedQty => real().withDefault(const Constant(0))();
+  RealColumn get approvedQty => real().withDefault(const Constant(0))();
+  RealColumn get receivedQty => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// v10: سجل حساب المعسكر — شهرٌ واحد لمعسكر واحد وصنف واحد.
+///
+/// **رصيدان لا واحد**، وخلطهما أصل الغلط في هذا الباب:
+/// • **رصيد الاستحقاق** = المُرحَّل + المستحق − المُسلَّم. يُجيب: «هل أخذ
+///   المعسكر حقه؟». موجب ⇒ له عندنا، سالب ⇒ أخذ أكثر من حقه.
+/// • **رصيد المخزون** = المُرحَّل عينًا + المُسلَّم − المستهلك في المطبخ.
+///   يُجيب: «كم بقي في مخزن المعسكر الآن؟».
+///
+/// وحدةٌ أخذت كامل حقها وطبخته: رصيد استحقاقها صفر ومخزونها صفر. وأخرى أخذت
+/// حقها ولم تطبخه: استحقاقها صفر ومخزونها ممتلئ. الرقمان مختلفان ويُسأل عن
+/// كليهما — ولذلك عمودان للترحيل لا عمود.
+class CampLedgers extends Table {
+  TextColumn get id => text()();
+  TextColumn get campId => text()();
+  TextColumn get campName => text().withDefault(const Constant(''))();
+  TextColumn get itemId => text()();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  IntColumn get year => integer()();
+  IntColumn get month => integer()();
+
+  /// رصيد الاستحقاق المُرحَّل من الشهر السابق.
+  RealColumn get openingEntitled => real().withDefault(const Constant(0))();
+
+  /// رصيد المخزون العيني المُرحَّل.
+  RealColumn get openingStock => real().withDefault(const Constant(0))();
+
+  /// المستحق: المعدل اليومي للفرد × مجموع القوى اليومية.
+  RealColumn get entitlementTotal => real().withDefault(const Constant(0))();
+  RealColumn get transferredIn => real().withDefault(const Constant(0))();
+  RealColumn get issuedDirect => real().withDefault(const Constant(0))();
+  RealColumn get returnedQty => real().withDefault(const Constant(0))();
+  RealColumn get consumedKitchen => real().withDefault(const Constant(0))();
+
+  /// مجموع القوى اليومية وعدد أيامها — يُحفظان ليُقرأ التقرير بعد إغلاق الشهر
+  /// بلا إعادة حساب من جداول قد تتغيّر.
+  RealColumn get strengthSum => real().withDefault(const Constant(0))();
+  IntColumn get strengthDays => integer().withDefault(const Constant(0))();
+
+  /// OPEN | CLOSED
+  TextColumn get status => text().withDefault(const Constant('OPEN'))();
+  TextColumn get closedBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get closedAt => dateTime().nullable()();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// حدّا المخزون لصنف في معسكر — منهما يُحسب التنبيه قبل النفاد.
+/// v16: حدود مخزون الصنف في **مستودع**.
+///
+/// كانت الحدود معلّقةً بالمعسكرات، والمعسكر جهةٌ مستفيدة لا مكان تخزين:
+/// الرصيد الذي يُقارَن بالحد يقع في مستودع، ومن المستودع يُطلب التعويض.
+/// فربطُها بالمستودع يجعل السؤال والجواب في مكانٍ واحد.
+///
+/// **[minStock] و[maxStock] بوحدة الأساس**، وبها تُقارن الأرصدة مهما اختلفت
+/// وحدة الإدخال. و[unitName] و[factor] يحفظان ما أدخله المستخدم فعلًا، فيُعاد
+/// عرضه كما كتبه: من أدخل «٥ كراتين» يرى ٥ كراتين لا ١٢٠ حبة.
+class WarehouseStockLimits extends Table {
+  TextColumn get id => text()();
+  TextColumn get warehouseId => text()();
+  TextColumn get warehouseName => text().withDefault(const Constant(''))();
+  TextColumn get itemId => text()();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+
+  /// وحدة الإدخال ومعاملها إلى وحدة الأساس.
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get factor => real().withDefault(const Constant(1))();
+
+  /// بوحدة الأساس دائمًا.
+  RealColumn get minStock => real().withDefault(const Constant(0))();
+  RealColumn get maxStock => real().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class CampStockLimits extends Table {
+  TextColumn get id => text()();
+  TextColumn get campId => text()();
+  TextColumn get campName => text().withDefault(const Constant(''))();
+  TextColumn get itemId => text()();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  RealColumn get minStock => real().withDefault(const Constant(0))();
+  RealColumn get maxStock => real().withDefault(const Constant(0))();
+
+  /// كم يومًا قبل بلوغ الحد الأدنى يبدأ التنبيه.
+  IntColumn get alertDaysBefore => integer().withDefault(const Constant(2))();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+/// أرشيف تصفيات الشهر — سطر لكل شهر أُغلق.
+class MonthlySettlements extends Table {
+  TextColumn get id => text()();
+  IntColumn get year => integer()();
+  IntColumn get month => integer()();
+  TextColumn get settledBy => text().withDefault(const Constant(''))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  IntColumn get campsCount => integer().withDefault(const Constant(0))();
+  IntColumn get itemsCount => integer().withDefault(const Constant(0))();
+  RealColumn get totalCredit => real().withDefault(const Constant(0))();
+  RealColumn get totalDebit => real().withDefault(const Constant(0))();
+  DateTimeColumn get settledAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// v29: النطاق المُصفّى (`LedgerScope.settlementKey`) — `''` كل المعسكرات (كل
+  /// تصفيةٍ قبل v29)، وإلا `camp:<معرّف>` أو `unit:<معرّف>` أو `warehouse:<اسم>`.
+  /// والفريد (السنة، الشهر، النطاق): تصفيةٌ واحدة لكل نطاقٍ في الشهر.
+  TextColumn get scopeKey => text().withDefault(const Constant(''))();
+  TextColumn get scopeLabel => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/ration_tables.dart ====================
+
+// ==================== FILE: lib/data/db/tables/stocktake_tables.dart ====================
+import 'package:drift/drift.dart';
+
+
+class Stocktakes extends Table {
+  TextColumn get id => text()();
+  TextColumn get orderNo => text().withDefault(const Constant(''))();
+  TextColumn get type => text().withDefault(const Constant('FULL'))();
+  TextColumn get date => text().withDefault(const Constant(''))();
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+  TextColumn get categoryId => text().withDefault(const Constant(''))();
+  TextColumn get categoryName => text().withDefault(const Constant(''))(); // v4
+  TextColumn get committee => text().withDefault(const Constant(''))();
+  BoolColumn get freeze => boolean().withDefault(const Constant(true))();
+  TextColumn get status => text().withDefault(const Constant('COUNTING'))();
+  IntColumn get itemsCount => integer().withDefault(const Constant(0))();
+  TextColumn get notes => text().withDefault(const Constant(''))();
+  TextColumn get closedDate => text().withDefault(const Constant(''))();
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  // v4: إلغاء أمر الجرد وإحصاءات الإغلاق كما في stocktake-center.js
+  TextColumn get cancelReason => text().withDefault(const Constant(''))();
+  TextColumn get cancelledBy => text().withDefault(const Constant(''))();
+  TextColumn get closedBy => text().withDefault(const Constant(''))();
+  IntColumn get countedCount => integer().withDefault(const Constant(0))();
+  IntColumn get varianceCount => integer().withDefault(const Constant(0))();
+  IntColumn get adjustedCount => integer().withDefault(const Constant(0))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+
+class StocktakeLines extends Table {
+  TextColumn get id => text()();
+  TextColumn get sessionId => text()();
+  TextColumn get itemId => text()();
+  TextColumn get itemCode => text().withDefault(const Constant(''))();
+  TextColumn get itemName => text().withDefault(const Constant(''))();
+  TextColumn get unitName => text().withDefault(const Constant(''))();
+  RealColumn get systemQty => real().withDefault(const Constant(0))();
+  RealColumn get countedQty => real().nullable()();
+  TextColumn get counts =>
+      text().withDefault(const Constant('{}'))(); // JSON بالوحدات
+  RealColumn get variance => real().nullable()();
+  TextColumn get reason => text().withDefault(const Constant(''))();
+  TextColumn get decision => text().withDefault(const Constant('ADJUST'))();
+  TextColumn get status => text().withDefault(const Constant('PENDING'))();
+  BoolColumn get discovered => boolean().withDefault(const Constant(false))();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/tables/stocktake_tables.dart ====================
+
+// ==================== FILE: lib/data/db/app_database.dart ====================
+import 'package:drift/drift.dart';
+
+import '../../core/error_log.dart';
+import '../../core/security/device_activation.dart';
+import '../../core/security/owner_promotion.dart';
+import '../repos/audit_repo.dart';
+import '../repos/signatures_repo.dart';
+import '../sync/sync_marks.dart';
+import 'connection/connection.dart';
+import 'pre_migration_backup.dart';
+
+import 'archive_tables.dart';
+import 'cable_tables.dart';
+import 'linkage_tables.dart';
+
+export 'tables/core_tables.dart';
+export 'tables/movement_tables.dart';
+export 'tables/stocktake_tables.dart';
+export 'tables/asset_tables.dart';
+export 'tables/fuel_tables.dart';
+export 'tables/daily_tables.dart';
+export 'tables/ration_tables.dart';
+import 'tables/core_tables.dart';
+import 'tables/movement_tables.dart';
+import 'tables/stocktake_tables.dart';
+import 'tables/asset_tables.dart';
+import 'tables/fuel_tables.dart';
+import 'tables/daily_tables.dart';
+import 'tables/ration_tables.dart';
+
+part 'app_database.g.dart';
+
+/// مخطط قاعدة البيانات المحلية (SQLite عبر Drift):
+/// users, items, categories, warehouses, suppliers, units, facilities,
+/// receipts, issues, transfers, returns, openingBalances, strengths,
+/// kitchenLogs, entitlements, stocktakes, stocktakeLines, auditLogs, appSettings.
+/// كل جدول حركة يحفظ سطرًا لكل صنف مع بيانات السند.
+
+
+@DriftDatabase(tables: [
+  FuelWarehouses,
+  FuelUnits,
+  FuelSettingsRows,
+  FuelAllocations,
+  FuelIssues,
+  FuelSupplies,
+  FuelOpenings,
+  FuelTransfers,
+  FuelStocktakes,
+  FuelStocktakeLines,
+  SupplyAuthorities,
+  WarehouseStockLimits,
+  Users,
+  Categories,
+  Items,
+  Warehouses,
+  Suppliers,
+  BeneficiaryUnits,
+  Facilities,
+  Receipts,
+  Issues,
+  Transfers,
+  Returns,
+  OpeningBalances,
+  Strengths,
+  KitchenLogs,
+  Entitlements,
+  Stocktakes,
+  StocktakeLines,
+  Adjustments,
+  Destructions,
+  AuditLogs,
+  SensitiveReviews,
+  Assets,
+  AssetAssignments,
+  RationOrders,
+  RationOrderLines,
+  MealPlans,
+  MealPlanEntries,
+  MealHeadcounts,
+  MealDispatches,
+  MealDispatchLines,
+  CampLedgers,
+  CampStockLimits,
+  MonthlySettlements,
+  AppSettings,
+  ArchiveFiles,
+  LinkPersons,
+  LinkStatusLogs,
+  LinkTerms,
+  LinkFinCustodies,
+  LinkClearances,
+  LinkPurchaseContracts,
+  LinkCustodySheets,
+  LinkCustodySheetRows,
+  LinkArmaments,
+  LinkMoneyReceipts,
+  LinkFinanceLedger,
+  Cables,
+])
+class AppDatabase extends _$AppDatabase {
+  AppDatabase() : super(_open());
+  AppDatabase.forTesting(super.executor);
+
+  /// إصدار المخطط الحالي. ثابتٌ ساكن لتقرأه طبقة الاتصال (النسخة الاحتياطية قبل
+  /// الترحيل) قبل أن تُنشأ نسخةٌ من القاعدة.
+  static const int kSchemaVersion = 31;
+
+  @override
+  int get schemaVersion => kSchemaVersion;
+
+  /// الفهارس المخدومة فعليًا بالاستعلامات: البحث بالمرجع (فتح سند من سجل
+  /// المستندات)، وبالحالة (الأوامر المعلقة والمسودات)، وبالمستودع والصنف
+  /// (حساب الأرصدة)، وبالتاريخ (تقارير المدى).
+  ///
+  /// تُنشأ عند كل فتح بـ `IF NOT EXISTS` لا في ترقية بنسخة جديدة: العملية
+  /// بلا تكلفة إذا كان الفهرس موجودًا، وتشمل قواعد البيانات القديمة كلها.
+  Future<void> _createIndexes() async {
+    const movementTables = [
+      'receipts',
+      'issues',
+      'transfers',
+      'returns',
+      'adjustments'
+    ];
+    final statements = <String>[
+      for (final t in movementTables) ...[
+        'CREATE INDEX IF NOT EXISTS ix_${t}_ref ON $t (ref_no)',
+        'CREATE INDEX IF NOT EXISTS ix_${t}_status ON $t (status)',
+        'CREATE INDEX IF NOT EXISTS ix_${t}_wh_item ON $t (warehouse, item_id)',
+        'CREATE INDEX IF NOT EXISTS ix_${t}_date ON $t (date)',
+      ],
+      'CREATE INDEX IF NOT EXISTS ix_opening_wh_item ON opening_balances (warehouse, item_id)',
+      'CREATE INDEX IF NOT EXISTS ix_transfers_dest ON transfers (dest_warehouse)',
+      'CREATE INDEX IF NOT EXISTS ix_items_code ON items (code)',
+      'CREATE INDEX IF NOT EXISTS ix_items_barcode ON items (barcode)',
+      'CREATE INDEX IF NOT EXISTS ix_items_category ON items (category_id)',
+      'CREATE INDEX IF NOT EXISTS ix_audit_date ON audit_logs (log_date)',
+      'CREATE INDEX IF NOT EXISTS ix_audit_created ON audit_logs (created_at)',
+      'CREATE INDEX IF NOT EXISTS ix_stocktake_lines_session ON stocktake_lines (session_id)',
+      'CREATE INDEX IF NOT EXISTS ix_stocktakes_wh ON stocktakes (warehouse, status)',
+      'CREATE INDEX IF NOT EXISTS ix_strengths_date ON strengths (strength_date)',
+      'CREATE INDEX IF NOT EXISTS ix_kitchen_logs_date ON kitchen_logs (date)',
+      'CREATE INDEX IF NOT EXISTS ix_assets_type_status ON assets (asset_type, status)',
+      'CREATE INDEX IF NOT EXISTS ix_assets_wh ON assets (warehouse)',
+      'CREATE INDEX IF NOT EXISTS ix_asset_assign_asset ON asset_assignments (asset_id)',
+      'CREATE INDEX IF NOT EXISTS ix_ration_status ON ration_orders (status)',
+      'CREATE INDEX IF NOT EXISTS ix_ration_wh ON ration_orders (requesting_warehouse)',
+      'CREATE INDEX IF NOT EXISTS ix_ration_lines_order ON ration_order_lines (order_id)',
+      'CREATE INDEX IF NOT EXISTS ix_meal_plans_status ON meal_plans (status)',
+      'CREATE INDEX IF NOT EXISTS ix_meal_entries_plan ON meal_plan_entries (plan_id, entry_date)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_camp_ledger ON camp_ledgers (camp_id, item_id, year, month)',
+      'CREATE INDEX IF NOT EXISTS ix_camp_ledger_month ON camp_ledgers (year, month, status)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_camp_limit ON camp_stock_limits (camp_id, item_id)',
+      // v29: تصفيةٌ لكل نطاقٍ في الشهر (كان واحدةً للشهر كله).
+      'DROP INDEX IF EXISTS ux_settlement_month',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_scope ON monthly_settlements (year, month, scope_key)',
+      'CREATE INDEX IF NOT EXISTS ix_returns_unit ON returns (beneficiary_unit_id)',
+      'CREATE INDEX IF NOT EXISTS ix_ration_kind ON ration_orders (order_kind, status)',
+      'CREATE INDEX IF NOT EXISTS ix_ration_supply ON ration_orders (supplying_warehouse, status)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_wh_limit ON warehouse_stock_limits (warehouse_id, item_id)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_fuel_wh_name ON fuel_warehouses (name)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_fuel_unit_name ON fuel_units (name)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_issue_date ON fuel_issues (date)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_issue_alloc ON fuel_issues (allocation_id)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_issue_chassis ON fuel_issues (chassis_no)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_supply_date ON fuel_supplies (date)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_transfer_date ON fuel_transfers (date)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_alloc_unit ON fuel_allocations (unit_id, active)',
+      'CREATE INDEX IF NOT EXISTS ix_fuel_stline_doc ON fuel_stocktake_lines (stocktake_id)',
+      'CREATE INDEX IF NOT EXISTS ix_link_persons_status ON link_persons (status)',
+      'CREATE INDEX IF NOT EXISTS ix_link_status_person ON link_status_logs (person_id)',
+      'CREATE INDEX IF NOT EXISTS ix_link_custody_cleared ON link_fin_custodies (cleared)',
+      'CREATE INDEX IF NOT EXISTS ix_link_clear_ref ON link_clearances (kind, ref_id)',
+      'CREATE INDEX IF NOT EXISTS ix_link_contract_custody ON link_purchase_contracts (custody_id)',
+      'CREATE INDEX IF NOT EXISTS ix_link_sheet_custody ON link_custody_sheets (custody_id)',
+      'CREATE INDEX IF NOT EXISTS ix_link_ledger_party ON link_finance_ledger (party_name)',
+      'CREATE INDEX IF NOT EXISTS ix_link_contracts_status ON link_purchase_contracts (status)',
+      'CREATE INDEX IF NOT EXISTS ix_link_sheet_rows ON link_custody_sheet_rows (sheet_id, seq)',
+      'CREATE INDEX IF NOT EXISTS ix_link_arm_person ON link_armaments (person_id)',
+      'CREATE INDEX IF NOT EXISTS ix_archive_cat ON archive_files (category)',
+      'CREATE INDEX IF NOT EXISTS ix_archive_date ON archive_files (doc_date)',
+      'CREATE INDEX IF NOT EXISTS ix_archive_ref ON archive_files (doc_ref)',
+      'CREATE INDEX IF NOT EXISTS ix_archive_wh ON archive_files (warehouse)',
+      'CREATE INDEX IF NOT EXISTS ix_archive_op_ref ON archive_files (op_type, doc_ref)',
+      'CREATE INDEX IF NOT EXISTS ix_cables_date ON cables (cable_date)',
+      'CREATE INDEX IF NOT EXISTS ix_cables_dir ON cables (direction)',
+      'CREATE INDEX IF NOT EXISTS ix_cables_status ON cables (status)',
+      'CREATE INDEX IF NOT EXISTS ix_cables_class ON cables (classification)',
+      // v28: سجل صرف الوجبات — يُقرأ بالمطبخ والتاريخ (المرحَّل وما صُرف اليوم).
+      'CREATE INDEX IF NOT EXISTS ix_meal_dispatch_fac_date ON meal_dispatches (facility_id, date)',
+      'CREATE INDEX IF NOT EXISTS ix_meal_dispatch_lines_head ON meal_dispatch_lines (dispatch_id)',
+      'CREATE INDEX IF NOT EXISTS ix_meal_headcounts_fac_date ON meal_headcounts (facility_id, date)',
+    ];
+    for (final sql in statements) {
+      await customStatement(sql);
+    }
+  }
+
+  /// الجداول التي تحمل كميات الأصناف، وأعمدة الكمية في كل منها.
+  static const Map<String, List<String>> _quantityColumns = {
+    'receipts': ['qty', 'base_qty'],
+    'issues': ['qty', 'base_qty'],
+    'transfers': ['qty', 'base_qty'],
+    'returns': ['qty', 'base_qty'],
+    'adjustments': ['qty', 'base_qty'],
+    'opening_balances': ['qty'],
+  };
+
+  /// جداول الحركات التي يُمنع فيها السالب (التسويات مستثناة: فرق الجرد سالب بطبيعته).
+  static const List<String> _nonNegativeTables = ['receipts', 'issues', 'transfers', 'returns', 'opening_balances'];
+
+  /// شرط SQL: للصنف [itemIdSql] أي حركة مسجَّلة (يصلح بعد `WHERE`).
+  static String itemHasMovementsSql(String itemIdSql) => [
+        for (final t in _quantityColumns.keys) 'EXISTS (SELECT 1 FROM "$t" WHERE item_id = $itemIdSql)',
+      ].join(' OR ');
+
+  /// الكميات تُخزَّن بثلاث خانات عشرية بالضبط.
+  static const int quantityScale = 3;
+
+  /// حواجز سلامة الكميات في القاعدة نفسها، أيًّا كان المسار الذي كتب (واجهة أو
+  /// مزامنة أو استيراد):
+  ///
+  /// 1. **لا سالب**: كمية أو معامل تحويل سالب في الوارد والصرف والتحويل والمرتجع
+  ///    والرصيد الافتتاحي يُرفض.
+  /// 2. **تقريب إلى [quantityScale] خانات**: الأعمدة `REAL` فيراكم جمعها كسورًا
+  ///    عائمة (٠٫١+٠٫٢). أي قيمة تُكتب بأكثر من ثلاث خانات تُقرَّب فور كتابتها،
+  ///    فلا يدخل القاعدة إلا ما يمثّله الرقم العشري بدقة.
+  /// 3. **لا حذف لصنف له حركات**: تبقى سطور الحركات يتيمةً فتضيع أرصدتها.
+  ///
+  /// مشغّلات لا `CHECK` ولا `FOREIGN KEY`: إضافتهما لجدول قائم في SQLite تعني
+  /// إعادة بنائه، وهي تُسقط مشغّلات المزامنة والتوقيع المعلّقة عليه. والمشغّل يُنشأ
+  /// بـ `IF NOT EXISTS` عند كل فتح فيشمل القواعد القديمة بلا ترقية مخطط.
+  ///
+  /// ولا مفتاح أجنبي على `item_id` في الحركات عمدًا: الاستعادة من نسخة قديمة قد
+  /// تحمل حركاتٍ بأصناف سبق حذفها، ومنعها يفقد بياناتٍ لا تُستعاد. اليتامى القائمة
+  /// يكشفها فحص السلامة (`orphanMoves`) لا المنع.
+  Future<void> _createQuantityGuards() async {
+    for (final t in _nonNegativeTables) {
+      final cols = _quantityColumns[t]!;
+      final negative = [
+        for (final c in cols) 'NEW.$c < 0',
+        if (t != 'opening_balances') 'NEW.factor < 0',
+      ].join(' OR ');
+      for (final event in const ['INSERT', 'UPDATE']) {
+        await customStatement('''
+          CREATE TRIGGER IF NOT EXISTS tg_${t}_${event.toLowerCase()}_qty_guard
+          BEFORE $event ON "$t"
+          WHEN $negative
+          BEGIN
+            SELECT RAISE(ABORT, 'كمية أو معامل تحويل سالب في $t');
+          END
+        ''');
+      }
+    }
+
+    for (final entry in _quantityColumns.entries) {
+      final t = entry.key;
+      final needs = [for (final c in entry.value) 'NEW.$c <> ROUND(NEW.$c, $quantityScale)'].join(' OR ');
+      final set = [for (final c in entry.value) '$c = ROUND($c, $quantityScale)'].join(', ');
+      for (final event in const ['INSERT', 'UPDATE']) {
+        // الشرط يمنع التكرار: بعد التقريب لا يصدق، فلا يُعاد تنفيذ المشغّل.
+        await customStatement('''
+          CREATE TRIGGER IF NOT EXISTS tg_${t}_${event.toLowerCase()}_qty_round
+          AFTER $event ON "$t"
+          WHEN $needs
+          BEGIN
+            UPDATE "$t" SET $set WHERE rowid = NEW.rowid;
+          END
+        ''');
+      }
+    }
+
+    await customStatement('''
+      CREATE TRIGGER IF NOT EXISTS tg_items_delete_guard
+      BEFORE DELETE ON items
+      WHEN ${itemHasMovementsSql('OLD.id')}
+      BEGIN
+        SELECT RAISE(ABORT, 'لا يُحذف صنف له حركات');
+      END
+    ''');
+  }
+
+  /// أسماء أعمدة جدول قائم.
+  Future<Set<String>> _columnsOf(String table) async {
+    final rows = await customSelect('PRAGMA table_info("$table")').get();
+    return {for (final r in rows) r.data['name'] as String};
+  }
+
+  /// يضيف العمود إن لم يكن موجودًا.
+  ///
+  /// الترحيل لا بد أن يحتمل قاعدةً سبقت طابَعها: جهازٌ فتح نسخةً أحدث ثم
+  /// فُتحت عليه نسخةٌ أقدم يُخفَّض طابَعُه وتبقى أعمدته. فإذا رُقّي بعدها
+  /// أعاد الترحيل إضافةَ عمودٍ قائم، فتُرمى `duplicate column name` **أثناء
+  /// فتح القاعدة** — أي أن التطبيق لا يفتح أصلًا ولا يعرض خطأً مفهومًا،
+  /// ولا سبيل للمستخدم إلى إصلاحه من داخله.
+  ///
+  /// وهذا ليس فرضًا نظريًّا: وقع فعلًا عند تبادل نسختين في يوم واحد.
+  Future<void> _addCol(
+      Migrator m, TableInfo<Table, dynamic> t, GeneratedColumn c) async {
+    if ((await _columnsOf(t.actualTableName)).contains(c.name)) return;
+    await m.addColumn(t, c);
+  }
+
+  /// ينشئ الجدول إن لم يكن موجودًا — للسبب نفسه.
+  Future<void> _createIfMissing(Migrator m, TableInfo<Table, dynamic> t) async {
+    final rows = await customSelect(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      variables: [Variable<String>(t.actualTableName)],
+    ).get();
+    if (rows.isNotEmpty) return;
+    await m.createTable(t);
+  }
+
+  /// يضمن أن كل جدول وعمود يصفه المخطط موجودٌ فعلًا في القاعدة.
+  ///
+  /// بوابات `if (from < N)` تكفي قاعدةً تدرّجت في إصداراتها بالترتيب. لكن
+  /// قاعدةً فُتحت عليها نسختان مختلفتا المخطط يُخفَّض طابَعُها ثم يُرفع، فتمرّ
+  /// البوابةُ **وهي لم تُنفَّذ قط**: يصير الطابَع 15 وفي الجدول عمودٌ ناقص.
+  /// وقتها لا يسقط الفتح بل تسقط أول قراءة، فيبدو العطل في الشاشة.
+  ///
+  /// ولذلك لا يُعتمد على الطابَع وحده: يُقارَن المخطط بالواقع عند كل فتح.
+  /// ثمنُه استعلامٌ خفيف لكل جدول، وعائدُه أن انحرافًا كهذا يُصلَح نفسه بدل
+  /// أن يترك التطبيق لا يفتح.
+  Future<int> _ensureSchema() async {
+    final m = createMigrator();
+    var added = 0;
+    for (final table in allTables) {
+      await _createIfMissing(m, table);
+      final present = await _columnsOf(table.actualTableName);
+      for (final col in table.$columns) {
+        if (present.contains(col.name)) continue;
+        // عمودٌ بلا افتراضٍ ولا قبولٍ للفراغ لا يُضاف إلى جدولٍ فيه سطور:
+        // SQLite ترفضه، وإضافته قسرًا تفسد أكثر مما تصلح.
+        if (col.defaultValue == null && !col.$nullable) continue;
+        await m.addColumn(table, col);
+        added++;
+      }
+    }
+    return added;
+  }
+
+  /// ترقية المالك بعد الانتقال إلى v25: القاعدة نفسها التي تجري عند الدخول
+  /// ([OwnerPromotion.run])، تُستدعى هنا لتحدث عند أول فتحٍ بعد التحديث لا عند
+  /// أول دخول فقط. جهاز الفرع لا يُرقّي (يصله المالك بالمزامنة).
+  ///
+  /// لا تُفشل الفتح أبدًا: تعذّرها يُسجَّل، وتُعاد عند الدخول التالي.
+  Future<void> _promoteOwnerAfterUpgrade() async {
+    try {
+      // مسار الترقية من <25 يجري مرةً على قاعدةٍ سبقت التفعيل أصلًا، فيبقى
+      // شرطه القديم؛ ودخولُ المستخدم وتعيينُه يشترطان `mayAssignOwner` (M-15).
+      final branch = await DeviceActivation(this).isBranch();
+      await OwnerPromotion.run(this, isBranchDevice: branch);
+    } catch (err, stack) {
+      ErrorLogger.log('migration.v25.ownerPromotion', err, stack);
+    }
+  }
+
+  /// ترحيل العهد القديمة إلى النموذج المالي الجديد دون حذف شيء:
+  /// الحالة من `cleared`، والمبلغ من `value_amount`، والجهة المسؤولة تصير
+  /// «مستلِمًا» لعهدة مسلَّمة (العهد القديمة كانت تُسلَّم لجهات).
+  /// يُستدعى عند أول فتح بعد v24؛ عامٌّ ليُختبر.
+  Future<void> backfillFinance() async {
+    await customStatement("UPDATE link_fin_custodies SET status = 'cleared' WHERE cleared = 1");
+    await customStatement('UPDATE link_fin_custodies SET amount = value_amount WHERE amount = 0 AND value_amount > 0');
+    await customStatement(
+        "UPDATE link_fin_custodies SET kind = 'delivered', receiver_name = holder WHERE holder <> '' AND receiver_name = ''");
+  }
+
+  /// يملأ القيم الفارغة في أعمدةٍ لا تقبل الفراغ.
+  ///
+  /// قاعدةٌ تنقّلت بين نسختين مختلفتي المخطط قد تحمل `NULL` في عمودٍ يصفه
+  /// المخطط الحالي `NOT NULL`. وقتها لا يسقط الاستعلام بل **يسقط تحويل
+  /// السطر إلى كائن** عند أول قراءة — فيبدو العطل في الشاشة لا في القاعدة،
+  /// ويعجز المستخدم عن بلوغ أي زرّ لإصلاحه.
+  ///
+  /// والإصلاح يضع القيمة الافتراضية التي يصفها المخطط نفسه: فراغٌ للنص
+  /// وصفرٌ للرقم. ولا يضيع شيء — `NULL` هنا غيابُ قيمةٍ لا قيمةٌ ذات معنى.
+  Future<int> _repairNulls() async {
+    var fixed = 0;
+    for (final table in allTables) {
+      final name = table.actualTableName;
+      final present = await _columnsOf(name);
+      for (final col in table.$columns) {
+        if (col.$nullable || !present.contains(col.name)) continue;
+        final fallback = switch (col.type) {
+          DriftSqlType.string => "''",
+          DriftSqlType.bool => '0',
+          DriftSqlType.int || DriftSqlType.bigInt || DriftSqlType.double => '0',
+          _ => null,
+        };
+        if (fallback == null) continue;
+        await customStatement(
+          'UPDATE "$name" SET "${col.name}" = $fallback '
+          'WHERE "${col.name}" IS NULL',
+        );
+        fixed += await customSelect('SELECT changes() AS c')
+            .getSingle()
+            .then((r) => r.data['c'] as int);
+      }
+    }
+    return fixed;
+  }
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          // v2: حقول الموردين وسجل التدقيق.
+          if (from < 2) {
+            await _addCol(m, suppliers, suppliers.contact);
+            await _addCol(m, suppliers, suppliers.city);
+            await _addCol(m, beneficiaryUnits, beneficiaryUnits.category);
+            await _addCol(m, issues, issues.approvedBy);
+            await _addCol(m, issues, issues.rejectReason);
+            await _addCol(m, issues, issues.rejectedBy);
+            await _addCol(m, issues, issues.cylinderAction);
+            await _addCol(m, issues, issues.officerCount);
+            await _addCol(m, receipts, receipts.supervision);
+            await _addCol(m, receipts, receipts.audit);
+            await _addCol(m, receipts, receipts.cylinderAction);
+            for (final col in [
+              receipts.editedBy,
+              receipts.cancelReason,
+              receipts.cancelledBy,
+              receipts.prevStatus,
+            ]) {
+              await _addCol(m, receipts, col);
+            }
+            for (final col in [
+              issues.editedBy,
+              issues.cancelReason,
+              issues.cancelledBy,
+              issues.prevStatus,
+            ]) {
+              await _addCol(m, issues, col);
+            }
+            for (final col in [
+              transfers.editedBy,
+              transfers.cancelReason,
+              transfers.cancelledBy,
+              transfers.prevStatus,
+            ]) {
+              await _addCol(m, transfers, col);
+            }
+            for (final col in [
+              returns.editedBy,
+              returns.cancelReason,
+              returns.cancelledBy,
+              returns.prevStatus,
+            ]) {
+              await _addCol(m, returns, col);
+            }
+            for (final col in [
+              adjustments.editedBy,
+              adjustments.cancelReason,
+              adjustments.cancelledBy,
+              adjustments.prevStatus,
+            ]) {
+              await _addCol(m, adjustments, col);
+            }
+            for (final col in [
+              auditLogs.actorName,
+              auditLogs.actorRole,
+              auditLogs.refNo,
+              auditLogs.warehouse,
+              auditLogs.target,
+              auditLogs.status,
+              auditLogs.itemCount,
+              auditLogs.qty,
+            ]) {
+              await _addCol(m, auditLogs, col);
+            }
+          }
+          // v3: ملاحظة المقرر في شاشة نسب الاستهلاك.
+          if (from < 3) {
+            await _addCol(m, entitlements, entitlements.notes);
+          }
+          // v5: جدول مراجعة الأحداث الحساسة.
+          if (from < 5) {
+            await _createIfMissing(m, sensitiveReviews);
+          }
+          // v7: وحدة العرض الافتراضية في بطاقة الصنف.
+          if (from < 7) {
+            await _addCol(m, items, items.reportUnit);
+          }
+          // v6: ربط الوحدة بأكثر من منشأة (مطبخ وفرن معًا).
+          if (from < 6) {
+            await _addCol(m, beneficiaryUnits, beneficiaryUnits.facilityIds);
+            // نقل الارتباط المفرد القديم إلى القائمة حتى لا تنقطع الاشتراكات.
+            await customStatement(
+              "UPDATE beneficiary_units SET facility_ids = '[\"' || facility_id || '\"]' "
+              "WHERE facility_id <> '' AND (facility_ids = '[]' OR facility_ids IS NULL)",
+            );
+          }
+          // v4: حقول إلغاء أمر الجرد وإحصاءات إغلاقه.
+          if (from < 4) {
+            for (final col in [
+              stocktakes.categoryName,
+              stocktakes.cancelReason,
+              stocktakes.cancelledBy,
+              stocktakes.closedBy,
+              stocktakes.countedCount,
+              stocktakes.varianceCount,
+              stocktakes.adjustedCount,
+            ]) {
+              await _addCol(m, stocktakes, col);
+            }
+          }
+          // v8: الأصول الثابتة وعهدها، وطلبيات الإعاشة وسطورها.
+          if (from < 8) {
+            await _createIfMissing(m, assets);
+            await _createIfMissing(m, assetAssignments);
+            await _createIfMissing(m, rationOrders);
+            await _createIfMissing(m, rationOrderLines);
+          }
+          // v9: خطط الوجبات ومدخلاتها.
+          if (from < 9) {
+            await _createIfMissing(m, mealPlans);
+            await _createIfMissing(m, mealPlanEntries);
+          }
+          // v10: سجل حساب المعسكرات وحدود مخزونها وأرشيف التصفيات.
+          if (from < 10) {
+            await _addCol(m, warehouses, warehouses.isMain);
+            await _createIfMissing(m, campLedgers);
+            await _createIfMissing(m, campStockLimits);
+            await _createIfMissing(m, monthlySettlements);
+          }
+          // v11: ربط المرتجع بوحدته بالمعرّف لا بالاسم.
+          if (from < 11) {
+            await _addCol(m, returns, returns.beneficiaryUnitId);
+            await _addCol(m, returns, returns.beneficiaryUnitName);
+          }
+          // v12: صلاحية دفعات الوارد لتنبيهات قرب الانتهاء.
+          if (from < 12) {
+            await _addCol(m, receipts, receipts.expiryDate);
+          }
+          // v13: حالة الأسطوانات (ممتلئة/فارغة) في التحويلات والمرتجعات.
+          if (from < 13) {
+            await _addCol(m, transfers, transfers.cylinderAction);
+            await _addCol(m, returns, returns.cylinderAction);
+          }
+          // v14: نوع الطلبية وجهتها ومستند تنفيذها.
+          //
+          // بُني هذا الترحيل رقمًا 12 قبل أن يُدمج عمل الأسطوانات وصلاحية
+          // الدفعات، وكان الرقم 12 مأخوذًا فيهما. ورقمان مختلفان لإصدارٍ
+          // واحد يعني أن جهازًا ترقّى بأحدهما يتخطّى الآخر صامتًا — فيفتح
+          // النظامُ قاعدةً ينقصها جدول، ويسقط عند أول طلبية. فأُعيد ترقيمه
+          // هنا فوق ما استقر.
+          if (from < 14) {
+            await _createIfMissing(m, supplyAuthorities);
+            await _addCol(m, rationOrders, rationOrders.orderKind);
+            await _addCol(m, rationOrders, rationOrders.authorityId);
+            await _addCol(m, rationOrders, rationOrders.authorityName);
+            await _addCol(m, rationOrders, rationOrders.fulfillRef);
+            await _addCol(m, rationOrders, rationOrders.fulfillKind);
+            await _addCol(m, rationOrders, rationOrders.fulfillDate);
+            // الطلبيات المستلمة قبل هذا الإصدار وُلِّد لها سند استلام فعلًا،
+            // فيُنقل مرجعه إلى حقل التنفيذ حتى لا تبدو بلا أثر.
+            await customStatement(
+              "UPDATE ration_orders SET fulfill_ref = receipt_ref, "
+              "fulfill_kind = 'RECEIPT' WHERE receipt_ref <> ''",
+            );
+          }
+          // v16: كمية الأصل، وحدود المخزون بالمستودع لا بالمعسكر.
+          if (from < 16) {
+            await _addCol(m, assets, assets.quantity);
+            await _createIfMissing(m, warehouseStockLimits);
+          }
+          // v17: قسم المحروقات — جداوله وسعة المستودع منها.
+          if (from < 17) {
+            await _addCol(m, warehouses, warehouses.fuelCapacityLiters);
+            // النوع مذكور صراحةً: قائمةٌ من جداول مولَّدة مختلفة تُستنتج
+            // `List<Table>` فلا تقبلها `_createIfMissing`.
+            for (final t in <TableInfo<Table, dynamic>>[
+              fuelAllocations,
+              fuelIssues,
+              fuelSupplies,
+              fuelOpenings,
+              fuelTransfers,
+              fuelStocktakes,
+              fuelStocktakeLines,
+            ]) {
+              await _createIfMissing(m, t);
+            }
+          }
+          // v18: فصل قسم المحروقات — دليلا مستودعاته ووحداته وإعداداته.
+          if (from < 18) {
+            for (final t in <TableInfo<Table, dynamic>>[
+              fuelWarehouses,
+              fuelUnits,
+              fuelSettingsRows,
+            ]) {
+              await _createIfMissing(m, t);
+            }
+            // ما كان يستعمل دليل الإعاشة يُنسخ إلى دليله الجديد بمعرّفه
+            // نفسه: السندات تشير إلى **الاسم**، فلو أُنشئ معرّف جديد بقيت
+            // السندات معلّقة باسمٍ لا صفَّ له في الدليل.
+            await customStatement(
+              'INSERT OR IGNORE INTO fuel_warehouses '
+              '(id, code, name, manager, location, capacity_liters, active, notes) '
+              'SELECT id, code, name, manager, location, fuel_capacity_liters, 1, notes '
+              'FROM warehouses WHERE fuel_capacity_liters > 0 '
+              'OR name IN (SELECT warehouse FROM fuel_issues) '
+              'OR name IN (SELECT warehouse FROM fuel_supplies) '
+              'OR name IN (SELECT warehouse FROM fuel_openings) '
+              'OR name IN (SELECT from_warehouse FROM fuel_transfers) '
+              'OR name IN (SELECT to_warehouse FROM fuel_transfers) '
+              'OR name IN (SELECT warehouse FROM fuel_stocktakes)',
+            );
+            await customStatement(
+              'INSERT OR IGNORE INTO fuel_units (id, code, name, active) '
+              'SELECT id, code, name, 1 FROM beneficiary_units '
+              'WHERE id IN (SELECT unit_id FROM fuel_allocations)',
+            );
+          }
+          // v19: ترويسة البرقية الرسمية في الإعدادات لا في الكود.
+          if (from < 19) {
+            for (final c in <GeneratedColumn>[
+              fuelSettingsRows.parentOrg,
+              fuelSettingsRows.agencyTitle,
+              fuelSettingsRows.commandTitle,
+              fuelSettingsRows.branchTitle,
+              fuelSettingsRows.orgName,
+              fuelSettingsRows.sealLines,
+            ]) {
+              await _addCol(m, fuelSettingsRows, c);
+            }
+          }
+          // v20: عمل كل موقّعٍ في الإعدادات لا في الكود.
+          if (from < 20) {
+            for (final c in <GeneratedColumn>[
+              fuelSettingsRows.roleOfficer,
+              fuelSettingsRows.roleSupply,
+              fuelSettingsRows.roleChief,
+            ]) {
+              await _addCol(m, fuelSettingsRows, c);
+            }
+          }
+          // v21: الأرشيف الإلكتروني — جدول ملفاته الوصفية.
+          if (from < 21) {
+            await _createIfMissing(m, archiveFiles);
+          }
+          // v22: الارتباطات — القوة البشرية والمالية والتسليح.
+          if (from < 22) {
+            await _createIfMissing(m, linkPersons);
+            await _createIfMissing(m, linkStatusLogs);
+            await _createIfMissing(m, linkTerms);
+            await _createIfMissing(m, linkFinCustodies);
+            await _createIfMissing(m, linkClearances);
+            await _createIfMissing(m, linkPurchaseContracts);
+            await _createIfMissing(m, linkCustodySheets);
+            await _createIfMissing(m, linkCustodySheetRows);
+            await _createIfMissing(m, linkArmaments);
+          }
+          // v23: البرقيات.
+          if (from < 23) {
+            await _createIfMissing(m, cables);
+          }
+          // v24: النموذج المالي المتكامل — دفتر رصيد المالية (أعمدة العهد والإخلاء
+          // والعقد والمسير الجديدة يضيفها _ensureSchema بقيمها الافتراضية).
+          if (from < 24) {
+            await _createIfMissing(m, linkFinanceLedger);
+          }
+          // v25: حجب الأقسام وتوقيع المالك على حساب المستخدم. الإضافة مشروطة بغياب
+          // العمود: قاعدةٌ تنقّلت بين نسختين قد تحمله سلفًا، وإضافتُه ثانيةً ترمي
+          // `duplicate column name` أثناء الفتح فلا يفتح التطبيق.
+          if (from < 25) {
+            final userCols = await _columnsOf('users');
+            if (!userCols.contains('section_blocked')) await m.addColumn(users, users.sectionBlocked);
+            if (!userCols.contains('owner_sig')) await m.addColumn(users, users.ownerSig);
+          }
+          // v26: سقف تراكم استحقاق المحروقات وما شُطب منه بالتصفير (H-6).
+          if (from < 26) {
+            await _addCol(m, fuelSettingsRows, fuelSettingsRows.carryCapPeriods);
+            await _addCol(m, fuelAllocations, fuelAllocations.writtenOffLiters);
+          }
+          // v27: الأصول الثابتة أصنافٌ مخزنية، وعهدها لدى المطابخ والأفران، ومحضر الإتلاف.
+          if (from < 27) {
+            await _addCol(m, issues, issues.receiverName);
+            await _addCol(m, items, items.isAsset);
+            await _addCol(m, items, items.assetType);
+            await _addCol(m, items, items.lifespanMonths);
+            await _addCol(m, items, items.unitValue);
+            await _addCol(m, assets, assets.itemId);
+            await _addCol(m, assetAssignments, assetAssignments.facilityId);
+            await _addCol(m, assetAssignments, assetAssignments.facilityName);
+            await _createIfMissing(m, destructions);
+          }
+          // v28: صرف الوجبات الذكي — درجة الصنف وبديله في المقرر وسطر الخطة، وقوة
+          // الوجبات لكل مطبخ، وسجل صرف الوجبات وسطوره (المرحَّل).
+          if (from < 28) {
+            for (final col in [
+              entitlements.isCritical,
+              entitlements.substituteItemId,
+              entitlements.substituteItemName,
+              entitlements.substituteRatio,
+            ]) {
+              await _addCol(m, entitlements, col);
+            }
+            for (final col in [
+              mealPlanEntries.isCritical,
+              mealPlanEntries.substituteItemId,
+              mealPlanEntries.substituteItemName,
+              mealPlanEntries.substituteUnitName,
+              mealPlanEntries.substituteFactor,
+              mealPlanEntries.substituteQtyPerPerson,
+              mealPlanEntries.stdKey,
+            ]) {
+              await _addCol(m, mealPlanEntries, col);
+            }
+            await _createIfMissing(m, mealHeadcounts);
+            await _createIfMissing(m, mealDispatches);
+            await _createIfMissing(m, mealDispatchLines);
+          }
+          if (from < 29) {
+            // نطاق التصفية (ما قبله «كل المعسكرات» = '')، وربط القيد اليدوي بسند استلام.
+            await _addCol(m, monthlySettlements, monthlySettlements.scopeKey);
+            await _addCol(m, monthlySettlements, monthlySettlements.scopeLabel);
+            await _addCol(m, linkFinanceLedger, linkFinanceLedger.receiptId);
+          }
+          if (from < 30) {
+            // فرع البرقية (نطاق مدير مكتب الفرع). القائمة فارغة الفرع = للجميع.
+            await _addCol(m, cables, cables.branch);
+          }
+          if (from < 31) {
+            // تفصيل الرصيد الافتتاحي كما أُدخل (الوحدات، والممتلئة والفارغة للأسطوانات).
+            await _addCol(m, openingBalances, openingBalances.breakdown);
+          }
+          // v15: إصلاح ما خلّفه تنقّل القاعدة بين نسختين مختلفتي المخطط.
+          //
+          // يجري بعد كل ترقية لا في هذا الإصدار وحده: الانحراف قد يتكرر كلما
+          // فُتحت نسخة أقدم على قاعدة أحدث، وثمنُ الفحص لحظةٌ عند الترقية
+          // مقابل تطبيق لا يفتح.
+          await _repairNulls();
+        },
+        beforeOpen: (details) async {
+          await customStatement('PRAGMA foreign_keys = ON');
+          await customStatement('PRAGMA journal_mode = WAL');
+          // المخطط يُطابَق بالواقع قبل أي شيء: الفهارس والملء الرجعي أدناه
+          // تفترض أعمدةً موجودة، وهي قد لا تكون.
+          // العهد قبل v24 بلا عمود الحالة: يُلتقط ذلك قبل إضافة الأعمدة ليُرحَّل مرةً واحدة.
+          final custodyColsBefore = await _columnsOf('link_fin_custodies');
+          final needFinanceBackfill = custodyColsBefore.isNotEmpty && !custodyColsBefore.contains('status');
+          final healed = await _ensureSchema();
+          if (needFinanceBackfill) await backfillFinance();
+          if (healed > 0) await _repairNulls();
+          await _createIndexes();
+          await _createQuantityGuards();
+          await SyncMarks.install(this);
+          await SignaturesRepo.install(this);
+          // شواهد الحذف تنمو بلا حد لو تُركت: تُنظَّف القديمة عند كل تشغيل.
+          await SyncMarks(this).pruneTombstones();
+          // وكذلك سجل التدقيق العادي — وعالي الخطورة يبقى.
+          await AuditRepo(this).prune();
+          // نسخة ما قبل الترحيل: تسجيل إنشائها بعد نجاح الفتح، وحذف المنقضية.
+          await PreMigrationBackup.settle(this, schemaVersion: schemaVersion);
+          // ترقية المالك: مرةً واحدةً بعد ترقيةٍ إلى v25 (المدير المحلي الوحيد ← مالك).
+          final before = details.versionBefore;
+          if (details.hadUpgrade && before != null && before < 25) await _promoteOwnerAfterUpgrade();
+        },
+      );
+}
+
+
+QueryExecutor _open() => openConnection();
+// ==================== END FILE: lib/data/db/app_database.dart ====================
+
+// ==================== FILE: lib/data/db/linkage_tables.dart ====================
+import 'package:drift/drift.dart';
+
+/// جداول «الارتباطات» — أُضيفت في إصدار المخطط v22.
+///
+/// الارتباطات ثلاثة أبوابٍ مترابطة: **القوة البشرية** للإمداد والتموين
+/// (أفرادٌ ببياناتهم وحالاتهم المؤرخة)، **مالية الإمداد** (العهد والإخلاءات
+/// وعقود المشتريات)، **تسليح الإمداد**. والترابط كله بمعرّف الفرد
+/// ([LinkPersons.id]) مع **لقطة اسمٍ ورقمٍ عسكري** في كل سجلٍ مرتبط — فتبقى
+/// القائمة مقروءةً حتى لو حُذف الفرد أو تغيّر اسمه، والمعرّف هو صلة الفتح
+/// لملفه من المكانين.
+
+/// فردٌ في القوة البشرية للإمداد والتموين.
+class LinkPersons extends Table {
+  /// معرّف فريد — `Ids.next('lp')`.
+  TextColumn get id => text()();
+
+  /// الاسم الكامل.
+  TextColumn get fullName => text()();
+
+  /// الرقم العسكري — المعرّف المؤسسي للفرد في كل الارتباطات.
+  TextColumn get militaryNo => text().withDefault(const Constant(''))();
+
+  /// الرتبة (اختيارية).
+  TextColumn get rank => text().withDefault(const Constant(''))();
+
+  /// الهاتف الأساسي.
+  TextColumn get phone => text().withDefault(const Constant(''))();
+
+  /// هاتف آخر (اختياري).
+  TextColumn get phone2 => text().withDefault(const Constant(''))();
+
+  /// الصورة الشخصية — نسخةٌ داخل بيانات التطبيق باسم معرّف الفرد.
+  TextColumn get photoPath => text().withDefault(const Constant(''))();
+
+  /// الوحدة الفرعية: إمداد / محروقات / مياه (قابلة للتوسيع من الدليل).
+  TextColumn get subUnit => text().withDefault(const Constant(''))();
+
+  /// المعسكر التابع له — من دليل المستودعات (فهي المعسكرات في هذا النظام).
+  TextColumn get camp => text().withDefault(const Constant(''))();
+
+  /// القسم: مخزن / مطبخ / فرن / سائق / مكتب / مختص (قابل للإضافة).
+  TextColumn get section => text().withDefault(const Constant(''))();
+
+  /// العمل: معلم أرز / معلم مشكل / معلم شواية / معلم خباز / معلم عجان…
+  TextColumn get job => text().withDefault(const Constant(''))();
+
+  /// الحالة الحالية — مفاتيحها في [LinkStatus] بالمستودع.
+  TextColumn get status => text().withDefault(const Constant('present'))();
+
+  /// بداية الحالة (YYYY-MM-DD) — للحالات ذات المدى.
+  TextColumn get statusFrom => text().withDefault(const Constant(''))();
+
+  /// نهاية الحالة (YYYY-MM-DD) — فراغها يعني «مستمرة حتى إشعار».
+  TextColumn get statusTo => text().withDefault(const Constant(''))();
+
+  /// عدد أيام الحالة — يُحسب من التاريخين ويُحفظ ليُعرض بلا إعادة حساب.
+  IntColumn get statusDays => integer().withDefault(const Constant(0))();
+
+  /// ملاحظات حرة.
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// سجل الحالات — سطرٌ لكل تغيير حالةٍ أو عودة: به يُعرف تاريخُ الفرد
+/// (متى فرار ومتى عاد، كم يومَ إجازةً أخذ، وما الإجراء عند عودته).
+class LinkStatusLogs extends Table {
+  TextColumn get id => text()();
+
+  /// صلة الفرد.
+  TextColumn get personId => text()();
+
+  /// لقطة الاسم لحظة التغيير — يبقى السجل مفهومًا ولو غيّر الفرد اسمه لاحقًا.
+  TextColumn get personName => text().withDefault(const Constant(''))();
+
+  /// الحالة (مفتاح [LinkStatus]).
+  TextColumn get status => text()();
+
+  /// من تاريخ / إلى تاريخ.
+  TextColumn get fromDate => text().withDefault(const Constant(''))();
+  TextColumn get toDate => text().withDefault(const Constant(''))();
+
+  /// عدد الأيام المحسوبة.
+  IntColumn get days => integer().withDefault(const Constant(0))();
+
+  /// إجراء العودة: «مواصلة عمل» أو «مباشرة عمل» — يُسجَّل في سطر العودة.
+  TextColumn get returnAction => text().withDefault(const Constant(''))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get actor => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// دليل المسميات: الأقسام والأعمال والوحدات الفرعية — تُضاف إليه القيم
+/// الجديدة تلقائيًّا عند حفظ فردٍ بقيمةٍ لم تُسبق، ويُدار (حذف) من شاشته.
+class LinkTerms extends Table {
+  /// النوع: `section` (قسم) | `job` (عمل) | `subunit` (وحدة فرعية) | `holder` (جهة مسؤولة عن عهدة).
+  TextColumn get kind => text()();
+
+  /// المسمى نفسه.
+  TextColumn get name => text()();
+
+  @override
+  Set<Column> get primaryKey => {kind, name};
+}
+
+/// العهد — مالية الإمداد. العهدة تخصّ **جهةً مسؤولة** (قسم/مطبخ/مستودع/مكتب…)
+/// لا فردًا من القوة البشرية، وتُغلق بإخلاءٍ مسجَّل في [LinkClearances].
+class LinkFinCustodies extends Table {
+  TextColumn get id => text()();
+
+  /// رقم العهدة الرسمي.
+  TextColumn get custodyNo => text().withDefault(const Constant(''))();
+
+  /// الجهة المسؤولة عن العهدة (نص حر مع اقتراحات من دليل المسميات).
+  TextColumn get holder => text().withDefault(const Constant(''))();
+
+  /// بيان العهدة.
+  TextColumn get title => text()();
+
+  TextColumn get serialNo => text().withDefault(const Constant(''))();
+
+  RealColumn get qty => real().withDefault(const Constant(1))();
+  TextColumn get unit => text().withDefault(const Constant(''))();
+
+  /// القيمة المالية للعهدة.
+  RealColumn get valueAmount => real().withDefault(const Constant(0))();
+
+  TextColumn get custodyDate => text().withDefault(const Constant(''))();
+
+  /// آخر أجل للإخلاء.
+  TextColumn get dueDate => text().withDefault(const Constant(''))();
+
+  /// ─── النموذج المالي الجديد (v24). الحقول القديمة أعلاه تبقى اختيارية. ───
+  ///
+  /// نوع العهدة: `received` مستلمة (عليّ للمالية) | `delivered` مسلَّمة (على غيري لي).
+  TextColumn get kind => text().withDefault(const Constant('received'))();
+
+  /// مبلغ العهدة بعملتها الأصلية، ولا تحويل تلقائيًّا.
+  RealColumn get amount => real().withDefault(const Constant(0))();
+
+  /// `sar` سعودي | `yer` يمني.
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+
+  /// سعر الصرف (يمني لكل سعودي) — مع العملة اليمنية فقط.
+  RealColumn get exchangeRate => real().withDefault(const Constant(0))();
+
+  /// المُسلِّم والمستلم (نص حر مع اقتراحات).
+  TextColumn get giverName => text().withDefault(const Constant(''))();
+  TextColumn get receiverName => text().withDefault(const Constant(''))();
+
+  /// `open` قيد الإخلاء | `cleared` تم الإخلاء | `canceled` ملغاة.
+  /// ([cleared] أدناه يبقى مرآةً له للتوافق مع الشاشات والتصدير القديمين.)
+  TextColumn get status => text().withDefault(const Constant('open'))();
+
+  /// نتيجة الإخلاء: فارغ (لم تُخلَّ) | `matched` مطابق | `surplus` فائض | `deficit` عجز.
+  TextColumn get outcome => text().withDefault(const Constant(''))();
+  RealColumn get outcomeAmount => real().withDefault(const Constant(0))();
+
+  /// رقم مستند الاستلام الأصلي (من المالية).
+  TextColumn get sourceDocNo => text().withDefault(const Constant(''))();
+
+  /// مركز التكلفة (إن كانت لمشروع).
+  TextColumn get costCenter => text().withDefault(const Constant(''))();
+
+  /// مرفقات العهدة JSON: `[{"name","path","size","sha256"}]`.
+  TextColumn get attachmentsJson => text().withDefault(const Constant('[]'))();
+
+  /// تُضبط عند تسجيل إخلاءٍ للعهدة وتُصفَّر عند حذفه.
+  BoolColumn get cleared => boolean().withDefault(const Constant(false))();
+  TextColumn get clearedDate => text().withDefault(const Constant(''))();
+  TextColumn get clearanceNotes => text().withDefault(const Constant(''))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// الإخلاءات — إغلاقٌ ماليٌّ لعهدةٍ أو عقد (أو إخلاءٌ حر)، بتاريخه وبيانه.
+class LinkClearances extends Table {
+  TextColumn get id => text()();
+
+  /// رقم الإخلاء.
+  TextColumn get clearanceNo => text().withDefault(const Constant(''))();
+
+  /// `custody` عهدة | `contract` عقد | `other` حر.
+  TextColumn get kind => text().withDefault(const Constant('custody'))();
+
+  /// معرّف العهدة أو العقد المُخلى (فارغ للإخلاء الحر).
+  TextColumn get refId => text().withDefault(const Constant(''))();
+
+  /// لقطة بيان المرجع — تبقى مقروءة ولو حُذف المرجع.
+  TextColumn get refTitle => text().withDefault(const Constant(''))();
+
+  /// الجهة المُخلى طرفها (المسؤول عن العهدة / المورد).
+  TextColumn get partyName => text().withDefault(const Constant(''))();
+
+  /// المبلغ المسوّى.
+  RealColumn get amount => real().withDefault(const Constant(0))();
+
+  TextColumn get clearanceDate => text().withDefault(const Constant(''))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  /// ─── إخلاء العهدة المالي (v24) ───
+  /// رقم العهدة المخلاة (لقطة) وعملتها.
+  TextColumn get custodyNo => text().withDefault(const Constant(''))();
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+
+  /// المبلغ المخصص للعهدة، والمصروف (مجموع المسيرات)، بعملة العهدة.
+  RealColumn get grantedAmount => real().withDefault(const Constant(0))();
+  RealColumn get spentAmount => real().withDefault(const Constant(0))();
+
+  /// `matched` مطابق | `surplus` فائض | `deficit` عجز — وقيمتا الفائض والعجز.
+  TextColumn get diffType => text().withDefault(const Constant(''))();
+  RealColumn get surplusAmount => real().withDefault(const Constant(0))();
+  RealColumn get deficitAmount => real().withDefault(const Constant(0))();
+
+  /// الطرف المقابل في صياغة الفرق (المالية أو المستلم).
+  TextColumn get counterpartyName => text().withDefault(const Constant(''))();
+
+  /// حالة المعاملة: `draft` مسودة | `sent` مُرسل | `approved` مُعتمد.
+  TextColumn get workflow => text().withDefault(const Constant('approved'))();
+
+  /// رقم صك الإخلاء ومستنده من الشعبة المالية، واسم المُخلِّي، وتاريخ المراجعة.
+  TextColumn get docNo => text().withDefault(const Constant(''))();
+  TextColumn get clearerName => text().withDefault(const Constant(''))();
+  TextColumn get reviewDate => text().withDefault(const Constant(''))();
+  TextColumn get adminNotes => text().withDefault(const Constant(''))();
+
+  /// صورة/PDF الإخلاء المالي.
+  TextColumn get attachName => text().withDefault(const Constant(''))();
+  TextColumn get attachPath => text().withDefault(const Constant(''))();
+  TextColumn get attachSha256 => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// عقد شراء — «قائمة الكمية المستهلكة» بفواتير التاجر. الأصناف نصٌّ حرّ
+/// ([itemsJson]) لا صلة له بأصناف النظام لأن مسمياتها عند التجار تختلف.
+class LinkPurchaseContracts extends Table {
+  TextColumn get id => text()();
+
+  TextColumn get contractNo => text().withDefault(const Constant(''))();
+
+  /// التصنيف: «مواد غذائية» أو «بهارات» أو أي مسمى.
+  TextColumn get title => text()();
+
+  /// اسم المحل أو التاجر.
+  TextColumn get supplier => text().withDefault(const Constant(''))();
+
+  /// عملة الفاتورة: `sar` سعودي | `yer` يمني.
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+
+  /// سعر الصرف (ريال يمني لكل ريال سعودي) — يُستعمل عند العملة اليمنية فقط.
+  RealColumn get exchangeRate => real().withDefault(const Constant(0))();
+
+  /// «قائمة الكمية المستهلكة بتاريخ» — يُدخل يدويًا حسب تاريخ الفاتورة.
+  TextColumn get listDate => text().withDefault(const Constant(''))();
+
+  /// العهدة المرتبطة (اختيارية، لا تُطبع). عقد واحد = عهدة واحدة على الأكثر.
+  TextColumn get custodyId => text().withDefault(const Constant(''))();
+
+  /// رقم الفاتورة (على مستوى العقد): تأخذه أسطر الأصناف افتراضيًّا، ويُربط به
+  /// مسير العهدة فتُسحب بيانات العقد إلى السطر.
+  TextColumn get invoiceNo => text().withDefault(const Constant(''))();
+
+  /// أسطر الأصناف JSON: `[{"name","unit","qty","price","total","invoiceNo","date","note"}]`.
+  TextColumn get itemsJson => text().withDefault(const Constant('[]'))();
+
+  /// إجمالي القائمة بعملة الفاتورة (محسوب عند الحفظ).
+  RealColumn get amount => real().withDefault(const Constant(0))();
+
+  /// تاريخ انتهاء اختياري — للتنبيه عند التأخر.
+  TextColumn get endDate => text().withDefault(const Constant(''))();
+
+  TextColumn get status => text().withDefault(const Constant('open'))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// مسير عهدة — كشف حسابٍ لعهدةٍ تشغيلية (العهدة والمنصرف والمرتجع والمتبقي)
+/// بتنسيق ملف Excel المعتمد. أسطره في [LinkCustodySheetRows].
+class LinkCustodySheets extends Table {
+  TextColumn get id => text()();
+
+  /// رقم العهدة التشغيلية: «2» أو «2 ورقم 3».
+  TextColumn get sheetNo => text().withDefault(const Constant(''))();
+
+  /// عنوان المسير للتعريف به في القائمة.
+  TextColumn get title => text().withDefault(const Constant(''))();
+
+  /// العهدة التي يخصّها المسير (فارغ للمسيرات القديمة)، وعملتها، واسم صاحبها.
+  TextColumn get custodyId => text().withDefault(const Constant(''))();
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+  TextColumn get holderName => text().withDefault(const Constant(''))();
+
+  /// سعر الصرف الافتراضي للأسطر الجديدة.
+  RealColumn get defaultRate => real().withDefault(const Constant(410))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// سطر في مسير العهدة. الأعمدة بترتيب ملف Excel.
+class LinkCustodySheetRows extends Table {
+  TextColumn get id => text()();
+
+  TextColumn get sheetId => text()();
+
+  /// ترتيب السطر في المسير.
+  IntColumn get seq => integer().withDefault(const Constant(0))();
+
+  /// التاريخ (YYYY-MM-DD) — يدوي.
+  TextColumn get date => text().withDefault(const Constant(''))();
+
+  /// مبلغ العهدة (سعودي).
+  RealColumn get grantSar => real().withDefault(const Constant(0))();
+
+  /// مبلغ العهدة اليمني (للعهد اليمنية؛ العمود الظاهر يقرأ سعوديًّا أو يمنيًّا بحسب العملة).
+  RealColumn get grantYer => real().withDefault(const Constant(0))();
+
+  /// المرتجع.
+  RealColumn get returnSar => real().withDefault(const Constant(0))();
+  RealColumn get returnYer => real().withDefault(const Constant(0))();
+
+  /// المبلغ المنصرف — إدخال اليمني يحسب السعودي = اليمني ÷ سعر الصرف.
+  RealColumn get spentSar => real().withDefault(const Constant(0))();
+  RealColumn get spentYer => real().withDefault(const Constant(0))();
+
+  RealColumn get rate => real().withDefault(const Constant(410))();
+
+  /// الاسم (المستلم أو الأجير…).
+  TextColumn get person => text().withDefault(const Constant(''))();
+
+  /// البيان.
+  TextColumn get statement => text().withDefault(const Constant(''))();
+
+  /// الفئة (أصول ثابتة، صيانة، أجور…).
+  TextColumn get category => text().withDefault(const Constant(''))();
+
+  /// رقم القيد.
+  TextColumn get entryNo => text().withDefault(const Constant(''))();
+
+  /// رقم الفاتورة — تكراره يُلوَّن.
+  TextColumn get invoiceNo => text().withDefault(const Constant(''))();
+
+  /// اسم المحل.
+  TextColumn get shop => text().withDefault(const Constant(''))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// سلاحٌ سُلّم لفردٍ من تسليح الإمداد — يُردَّع بتاريخه.
+class LinkArmaments extends Table {
+  TextColumn get id => text()();
+
+  /// الارتباط بالفرد — صلةٌ ولقطة.
+  TextColumn get personId => text().withDefault(const Constant(''))();
+  TextColumn get personName => text().withDefault(const Constant(''))();
+  TextColumn get personMilitaryNo => text().withDefault(const Constant(''))();
+
+  /// نوع السلاح ورقمه المسلسل.
+  TextColumn get weaponType => text().withDefault(const Constant(''))();
+  TextColumn get serialNo => text().withDefault(const Constant(''))();
+
+  /// الكمية (سلاحٌ واحد غالبًا).
+  IntColumn get qty => integer().withDefault(const Constant(1))();
+
+  /// عدد القرون (مخازن الذخيرة) المسلَّمة مع القطعة ونوعها: صيني أو روسي أو نصٌّ حر.
+  IntColumn get magazines => integer().withDefault(const Constant(0))();
+  TextColumn get magazineType => text().withDefault(const Constant(''))();
+
+  /// عدد الذخيرة المستلمة (طلقات).
+  IntColumn get ammoQty => integer().withDefault(const Constant(0))();
+
+  /// تاريخ التسليم.
+  TextColumn get assignedDate => text().withDefault(const Constant(''))();
+
+  /// هل رُدِّع؟ وتاريخه.
+  BoolColumn get returned => boolean().withDefault(const Constant(false))();
+  TextColumn get returnedDate => text().withDefault(const Constant(''))();
+
+  /// حالة السلاح عند التسليم.
+  TextColumn get condition => text().withDefault(const Constant(''))();
+
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// «استلام مبلغ مالي» — سندٌ يُطبع بنموذج الجهة (سندٌ واحدٌ في الصفحة).
+/// كل الحقول اختيارية: ما تُرك فارغًا يُطبع نقاطًا ليُملأ بخط اليد.
+class LinkMoneyReceipts extends Table {
+  TextColumn get id => text()();
+
+  /// «استلمت أنا / …» و«بصفتي …».
+  TextColumn get receiverName => text().withDefault(const Constant(''))();
+  TextColumn get capacity => text().withDefault(const Constant(''))();
+
+  /// المبلغ رقمًا وعملته؛ كتابتُه بالحروف تُشتق منه عند العرض والطباعة.
+  RealColumn get amount => real().withDefault(const Constant(0))();
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+
+  /// تاريخ السند (ISO) — فارغ ⇒ يُطبع فراغًا.
+  TextColumn get receiptDate => text().withDefault(const Constant(''))();
+
+  /// «وذلك مقابل …».
+  TextColumn get purpose => text().withDefault(const Constant(''))();
+
+  /// طريقة التسليم: `cash` | `transfer` | فارغ، ورقم الحوالة.
+  TextColumn get method => text().withDefault(const Constant(''))();
+  TextColumn get transferNo => text().withDefault(const Constant(''))();
+
+  /// بيانات المسلِّم (اسمه) — واسم المستلم هو [receiverName].
+  TextColumn get delivererName => text().withDefault(const Constant(''))();
+
+  /// «المرفقات» في الترويسة.
+  TextColumn get attachments => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// دفتر «رصيد المالية» — قيودٌ تُضاف ولا تُعدَّل. الرصيد مجموعها، وإلغاء
+/// إخلاءٍ يعكسه بقيدٍ مضاد فيبقى الأثر قابلًا للتدقيق.
+class LinkFinanceLedger extends Table {
+  TextColumn get id => text()();
+
+  /// صاحب العهدة (اسم من قائمة الأفراد أو نص حر).
+  TextColumn get partyName => text()();
+
+  TextColumn get custodyId => text().withDefault(const Constant(''))();
+  TextColumn get clearanceId => text().withDefault(const Constant(''))();
+
+  /// نوع القيد: `received` عهدة مستلمة (−) | `delivered` عهدة مسلَّمة (+) |
+  /// `surplus` فائض (+) | `deficit` عجز (−) | `reversal` عكس قيد.
+  TextColumn get entryKind => text()();
+
+  /// القيمة الموقَّعة بعملتها: الموجب دائن، والسالب مدين.
+  RealColumn get delta => real().withDefault(const Constant(0))();
+  TextColumn get currency => text().withDefault(const Constant('sar'))();
+
+  TextColumn get entryDate => text().withDefault(const Constant(''))();
+  TextColumn get note => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  /// v29: سند الاستلام المالي المربوط بالقيد اليدوي (اختياري — فارغ بلا ربط).
+  TextColumn get receiptId => text().withDefault(const Constant(''))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/linkage_tables.dart ====================
+
+// ==================== FILE: lib/data/db/archive_tables.dart ====================
+import 'package:drift/drift.dart';
+
+/// جداول الأرشيف الإلكتروني — أُضيفت في إصدار المخطط v21.
+///
+/// **الملف نفسه لا يُخزَّن في القاعدة**: القاعدة تحفظ بياناته الوصفية وحدها،
+/// ويليق الملف في مجلد الأرشيف التطبيقي (انظر [ArchiveRepo]) بنسخةٍ لا يلمسها
+/// المستخدم، مع بصمة SHA-256 تكشف أيّ عبثٍ لاحق.
+///
+/// الوسوم قائمة JSON (`["سنوي","تعاقد"]`) — تُقرأ وتُكتب عبر [ArchiveRepo]
+/// فلا تفتح أي شاشة ترميز JSON بنفسها.
+
+/// ملفٌ مؤرشف: سندٌ ممحوح، عقدٌ ممسوح ضوئيًّا، كشفٌ مصوَّر…
+class ArchiveFiles extends Table {
+  /// معرّف فريد — `Ids.next('ar')`.
+  TextColumn get id => text()();
+
+  /// مساحة العمل المالكة للملف: `supply` أو `fuel` — تمهيدًا لتعصيب
+  /// أرشيف كل قسمٍ على أهله.
+  TextColumn get space => text().withDefault(const Constant('supply'))();
+
+  /// عنوان المستند كما يظهر في القائمة (لا اسم الملف).
+  TextColumn get title => text()();
+
+  /// التصنيف (عقود، كشوفات، مراسلات…) — نصٌّ حرّ يقترح عليه الموجود.
+  TextColumn get category => text().withDefault(const Constant('عام'))();
+
+  /// وسوم البحث — قائمة JSON نصية.
+  TextColumn get tags => text().withDefault(const Constant('[]'))();
+
+  /// رقم السند المرتبط في سجل المستندات، إن وُجد — يفتح العرضُ من الأرشيف
+  /// طريقه إلى السند نفسه.
+  TextColumn get docRef => text().withDefault(const Constant(''))();
+
+  /// المستودع المتعلق — يُقيَّد بنطاق صلاحيات المستخدم.
+  TextColumn get warehouse => text().withDefault(const Constant(''))();
+
+  /// تاريخ المستند الوثائقي (YYYY-MM-DD) — قد يسبق تاريخ الأرشفة سنوات.
+  TextColumn get docDate => text().withDefault(const Constant(''))();
+
+  /// الاسم الأصلي للملف كما وُلد على الجهاز.
+  TextColumn get fileName => text()();
+
+  /// المسار المطلق للنسخة المخزَّنة داخل مجلد الأرشيف.
+  TextColumn get storedPath => text()();
+
+  /// نوع MIME — لاختيار المعاينة (صورة/PDF/أخرى).
+  TextColumn get mime => text().withDefault(const Constant(''))();
+
+  /// حجم الملف بالبايت.
+  IntColumn get sizeBytes => integer()();
+
+  /// بصمة SHA-256 لمحتوى الملف الأصلي — تُحسب لحظة الأرشفة.
+  TextColumn get sha256 => text().withDefault(const Constant(''))();
+
+  /// مصدر الأرشفة: `manual` (يدوي من الشاشة) أو `auto` (تلقائي عند الطباعة
+  /// بعد تفعيل العملية من إعدادات الأرشفة التلقائية).
+  TextColumn get source => text().withDefault(const Constant('manual'))();
+
+  /// نوع العملية في الأرشفة التلقائية — receipt / issue / transfer / return /
+  /// rationOrder / stocktake / report — فارغٌ في الأرشفة اليدوية.
+  TextColumn get opType => text().withDefault(const Constant(''))();
+
+  /// ملاحظات حرة.
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  /// تثبيت في أعلى القائمة.
+  BoolColumn get pinned => boolean().withDefault(const Constant(false))();
+
+  /// من أرشفه (بريد حسابه) — فارغٌ في التلقائي فيُعرض «تلقائي».
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/archive_tables.dart ====================
+
+// ==================== FILE: lib/data/db/cable_tables.dart ====================
+import 'package:drift/drift.dart';
+
+/// جداول «البرقيات» — أُضيفت في إصدار المخطط v23.
+///
+/// برقية رسمية (واردة أو صادرة) بتصنيف ودرجة أولوية وحالة معالجة،
+/// مع مرفق PDF اختياري يُخزَّن في مجلد `cables/` داخل بيانات التطبيق.
+
+/// برقية رسمية بنموذج «برقية صادرة/واردة» المعتمد: الحقول المتغيرة تُكتب
+/// بالإدخال اليدوي، وجسم البرقية نصٌّ حرّ.
+class Cables extends Table {
+  /// معرّف فريد — `Ids.next('cb')`.
+  TextColumn get id => text()();
+
+  /// الاتجاه: `in` واردة | `out` صادرة.
+  TextColumn get direction => text().withDefault(const Constant('in'))();
+
+  /// رقم البرقية الرسمي.
+  TextColumn get cableNo => text().withDefault(const Constant(''))();
+
+  /// تاريخ البرقية (YYYY-MM-DD).
+  TextColumn get cableDate => text().withDefault(const Constant(''))();
+
+  /// الموضوع.
+  TextColumn get subject => text()();
+
+  /// نص البرقية / الملخص.
+  TextColumn get body => text().withDefault(const Constant(''))();
+
+  /// الجهة المرسلة.
+  TextColumn get fromParty => text().withDefault(const Constant(''))();
+
+  /// الجهة المستلمة.
+  TextColumn get toParty => text().withDefault(const Constant(''))();
+
+  /// v30: فرع الجهاز الذي أنشأها (من رمز تفعيله) — به يرى مدير مكتب الفرع
+  /// برقيات فرعه وحده (`CableRepo(ownBranchOnly:)`). **قابلٌ للفراغ** عمدًا:
+  /// المزامنة تقرأ البرقية بـ`Cable.fromJson`، وجهازٌ أقدم لا يرسله؛ والفارغ
+  /// (برقيةٌ أقدم من v30) يراها الجميع إذ لا يُعرف فرعها.
+  TextColumn get branch => text().nullable()();
+
+  /// التصنيف: `normal` عادي | `secret` سري | `top` سري للغاية.
+  TextColumn get classification => text().withDefault(const Constant('normal'))();
+
+  /// الأولوية: `normal` عادي | `urgent` عاجل | `immediate` عاجل جدًا.
+  TextColumn get priority => text().withDefault(const Constant('normal'))();
+
+  /// الحالة: `new` جديد | `processing` قيد المعالجة | `replied` تم الرد | `archived` مؤرشف.
+  TextColumn get status => text().withDefault(const Constant('new'))();
+
+  /// ساعة إنشاء البرقية (HH:mm).
+  TextColumn get cableTime => text().withDefault(const Constant(''))();
+
+  /// نسخة إلى — أكثر من سطر، سطرٌ لكل جهة.
+  TextColumn get ccParty => text().withDefault(const Constant(''))();
+
+  /// جدول المرسَل إليهم (م / الاسم / الوحدة / ملاحظة) مُرمَّزًا JSON:
+  /// `[{"name":"","unit":"","note":""}]` — الصفوف متغيرة العدد.
+  TextColumn get recipientsJson => text().withDefault(const Constant('[]'))();
+
+  /// ─── قسم «لاستعمال المركز / المكتب» (كله إدخالٌ يدوي) ───
+  /// محرر البرقية.
+  TextColumn get editorName => text().withDefault(const Constant(''))();
+  TextColumn get editorRank => text().withDefault(const Constant(''))();
+  TextColumn get editorJob => text().withDefault(const Constant(''))();
+
+  /// توقيع الموقِّع أسفل الجسم (اسم ورتبة وتوقيع قائد الوحدة) — سطرٌ لكل بيان.
+  TextColumn get signerText => text().withDefault(const Constant(''))();
+
+  /// تسلسل / نرس.
+  TextColumn get serialNo => text().withDefault(const Constant(''))();
+
+  /// وسيلة الإرسال.
+  TextColumn get sendMethod => text().withDefault(const Constant(''))();
+
+  /// وقت الإرسال والتاريخ.
+  TextColumn get sendDateTime => text().withDefault(const Constant(''))();
+
+  /// المختص.
+  TextColumn get specialist => text().withDefault(const Constant(''))();
+
+  /// الاستقبال: اسم المأمور ووقت الاستلام.
+  TextColumn get receiverName => text().withDefault(const Constant(''))();
+  TextColumn get receiveTime => text().withDefault(const Constant(''))();
+
+  /// رقم برقية الرد (إن وُجد).
+  TextColumn get replyToNo => text().withDefault(const Constant(''))();
+
+  /// ─── مرفق PDF ───
+  /// الاسم الأصلي للملف كما اختاره المستخدم.
+  TextColumn get attachName => text().withDefault(const Constant(''))();
+
+  /// المسار المطلق للنسخة المخزَّنة داخل مجلد cables/.
+  TextColumn get attachPath => text().withDefault(const Constant(''))();
+
+  /// حجم المرفق بالبايت.
+  IntColumn get attachSize => integer().withDefault(const Constant(0))();
+
+  /// بصمة SHA-256 لمحتوى المرفق.
+  TextColumn get attachSha256 => text().withDefault(const Constant(''))();
+
+  /// ملاحظات.
+  TextColumn get notes => text().withDefault(const Constant(''))();
+
+  TextColumn get createdBy => text().withDefault(const Constant(''))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+// ==================== END FILE: lib/data/db/cable_tables.dart ====================
+
+// ==================== FILE: lib/data/repos/repo_guard.dart ====================
+import '../../domain/access_control.dart';
+
+/// مَن يكتب الآن — تنشره `AuthService` عند الدخول والخروج واستعادة الجلسة.
+class RepoActor {
+  const RepoActor({
+    required this.role,
+    required this.permissions,
+    required this.scope,
+    this.sectionBlocked,
+  });
+
+  final String role;
+  final PermissionMap permissions;
+
+  /// نطاق المستودعات، `null` = الكل.
+  final List<String>? scope;
+  final String? sectionBlocked;
+
+  bool get isAdmin => UserRole.isAdmin(role);
+  bool get isOwner => UserRole.isOwner(role);
+}
+
+/// حارس الصلاحيات **في طبقة البيانات** (2026-10-26).
+///
+/// كانت الشاشات وحدها تفحص الصلاحية ونطاق المستودع قبل أن تنادي المستودع؛
+/// فشاشةٌ جديدة تنسى الفحص، أو مسارٌ ثانٍ إلى الدالة نفسها، يكتب حركةً مخزنية
+/// لمن لا يملكها أو في مستودعٍ خارج نطاقه. الآن كل دالةٍ تحرّك المخزون (سندات
+/// الإمداد والمحروقات، وتعديل السندات وإلغاؤها، والأرصدة الافتتاحية) تسأل هنا.
+///
+/// **القاعدة مطابقةٌ لما تفحصه الشاشات، لا أشدّ منها** — فلا يُرفض اليوم ما كان
+/// يُقبل: إجراءٌ كتابيٌّ واحدٌ على الأقل على الصفحة ([AccessControl.canManage]،
+/// والإجراء الدقيق تفحصه الشاشة)، والقسم غير محجوب، والمستودع في النطاق.
+///
+/// **بلا جلسة** ([current] = `null`): استيراد المزامنة، والاختبارات، والخدمات
+/// الداخلية — يُسمح، كما في `UsersRepo._requireActor`. والمدير والمالك بلا قيد.
+class RepoGuard {
+  const RepoGuard._();
+
+  static RepoActor? current;
+
+  /// رسالة الرفض، أو `null` إن جاز. [warehouses] مستودعات الإمداد التي تمسّها
+  /// الكتابة؛ [fuelWarehouses] خزّانات المحروقات مع دليلها كاملًا (النطاق فيها
+  /// اختياري — [AccessControl.canUseFuelWarehouse]).
+  static String? check(
+    String page, {
+    Iterable<String> warehouses = const [],
+    Iterable<String> fuelWarehouses = const [],
+    Iterable<String> fuelDirectory = const [],
+  }) {
+    final a = current;
+    if (a == null || a.isAdmin) return null;
+    final allowed = AccessControl.can(
+          isAdmin: false,
+          isOwner: a.isOwner,
+          permissions: a.permissions,
+          page: page,
+          sectionBlocked: a.sectionBlocked,
+        ) &&
+        AccessControl.canManage(isAdmin: false, permissions: a.permissions, page: page);
+    if (!allowed) return '✖ لا تملك صلاحية الكتابة على «$page»';
+    for (final w in warehouses) {
+      if (!AccessControl.canUseWarehouse(isAdmin: false, scope: a.scope, warehouse: w)) {
+        return '✖ المستودع «$w» خارج نطاق صلاحياتك — تواصل مع مدير النظام';
+      }
+    }
+    for (final w in fuelWarehouses) {
+      if (!AccessControl.canUseFuelWarehouse(
+          isAdmin: false, scope: a.scope, fuelWarehouses: fuelDirectory, warehouse: w)) {
+        return '✖ الخزّان «$w» خارج نطاق صلاحياتك — تواصل مع مدير النظام';
+      }
+    }
+    return null;
+  }
+}
+
+/// رفضٌ من [RepoGuard] لدالةٍ لا تعيد نتيجةً تحمل الخطأ.
+class RepoDenied implements Exception {
+  const RepoDenied(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+// ==================== END FILE: lib/data/repos/repo_guard.dart ====================
+
+// ==================== FILE: lib/data/repos/doc_numbering.dart ====================
+import 'package:drift/drift.dart';
+
+import '../../core/security/device_activation.dart';
+import '../db/app_database.dart';
+
+/// ترقيم السندات: «و-K7QX-000001» = البادئة ثم رمز الجهاز ثم تسلسل الجهاز.
+///
+/// **رمز الجهاز**: كان كل جهاز يبدأ من «و-000001»، فيحمل سندان مختلفان في فرعين
+/// الرقم نفسه بعد المزامنة. الرمز أول أربعة أحرف من معرّف الجهاز الثابت
+/// ([DeviceActivation.deviceId])، فلا يتصادم فرعان.
+///
+/// **ستة أحرف لا أربعة** (البند L-1، 2026-10-11): أربعة من أبجدية ٣٢ حرفًا مليون
+/// احتمال، فتصادمُ جهازين في وحدةٍ كبيرة غير مستبعد — وأثره دمجُ سندين مختلفين
+/// برقمٍ واحد ثم إلغاؤهما معًا بالمرجع. ستة تجعله مليارًا، والاقتران يرفض جهازين
+/// يشتركان في الرمز ([codeOf]). العدّاد نفسه يستمر، فلا ينقطع التسلسل.
+///
+/// **العدّاد المخزَّن**: كان الرقم التالي يُحسب بقراءة كل مراجع الجدول في كل
+/// فتح لشاشة. العدّاد الآن في جدول محلي `doc_counters` — **خارج المزامنة عمدًا**:
+/// لو زُومن لكتب جهازٌ عدّادَه فوق عدّاد جهاز آخر فرجع تسلسله إلى الوراء.
+///
+/// [peek] يعرض الرقم التالي دون أن يستهلكه (تفتح الشاشة وتُغلق بلا فجوة في
+/// التسلسل)، و[claim] يثبّته عند الحفظ الفعلي داخل معاملة الحفظ.
+class DocNumbering {
+  DocNumbering(this.db);
+
+  final AppDatabase db;
+
+  static const String _table = 'doc_counters';
+  static const int _width = 6;
+
+  String? _code;
+
+  /// طول رمز الجهاز في المراجع.
+  static const int codeLength = 6;
+
+  /// رمز جهازٍ بمعرّفه — يقارن به الاقتران رمزي الجهازين.
+  static String codeOf(String deviceId) =>
+      (deviceId.length > codeLength ? deviceId.substring(0, codeLength) : deviceId).toUpperCase();
+
+  /// رمز هذا الجهاز في المراجع.
+  Future<String> deviceCode() async => _code ??= codeOf(await DeviceActivation(db).deviceId());
+
+  /// رأس المرجع: البادئة ثم أول [code] أحرف من رمز الجهاز.
+  Future<String> _head(String prefix, int code) async {
+    final full = await deviceCode();
+    return '$prefix${full.length > code ? full.substring(0, code) : full}-';
+  }
+
+  /// الرقم التالي لجدول وبادئة، دون حجزه.
+  ///
+  /// [seed] لجدولٍ مراجعُه في غير عمود `ref_no` أو بصيغةٍ قديمة لا تنتهي بأرقام
+  /// (البرقيات `00024-ص`، العهد `عهدة-00001`): أعلى رقمٍ قديم يبدأ منه العدّاد
+  /// عند أول استعمال، فلا يبدو التسلسل وكأنه بدأ من جديد.
+  ///
+  /// [code] و[width] لمرجعٍ أقصر من صيغة السندات (البرقيات: ثلاثة أحرف وأربع
+  /// خانات — `ص-E4V-0025`). العدّاد واحدٌ للجدول والبادئة أيًّا كان الطول، فتغيير
+  /// الصيغة لا يقطع التسلسل؛ وما جاوز [width] من الأرقام يطول ولا يلتفّ.
+  Future<String> peek(String table, String prefix,
+      {Future<int> Function()? seed, int code = codeLength, int width = _width}) async {
+    final head = await _head(prefix, code);
+    final n = await _counter(table, prefix, seed);
+    return '$head${(n + 1).toString().padLeft(width, '0')}';
+  }
+
+  /// تثبيت مرجع حُفظ به سند: يتقدّم العدّاد إليه إن كان بصيغة هذا الجهاز.
+  /// المرجع اليدوي أو الوارد من جهاز آخر لا يمس العدّاد.
+  Future<void> claim(String table, String prefix, String ref,
+      {Future<int> Function()? seed, int code = codeLength}) async {
+    final head = await _head(prefix, code);
+    if (!ref.startsWith(head)) return;
+    final n = int.tryParse(ref.substring(head.length));
+    if (n == null) return;
+    final current = await _counter(table, prefix, seed);
+    if (n > current) await _store(table, prefix, n);
+  }
+
+  Future<int> _counter(String table, String prefix, [Future<int> Function()? seedOf]) async {
+    await _ensureTable();
+    final key = _key(table, prefix);
+    final row = await db
+        .customSelect('SELECT value FROM $_table WHERE key = ?', variables: [Variable.withString(key)])
+        .getSingleOrNull();
+    if (row != null) return row.read<int>('value');
+    // أول استخدام على هذا الجهاز: يُكمل من أعلى رقم موجود في الجدول (بالصيغة
+    // القديمة أو الجديدة) حتى لا يبدو التسلسل وكأنه بدأ من جديد. قراءة واحدة فقط.
+    final seed = seedOf != null ? await seedOf() : await _maxExisting(table);
+    await _store(table, prefix, seed);
+    return seed;
+  }
+
+  Future<int> _maxExisting(String table) async {
+    final rows = await db.customSelect('SELECT DISTINCT ref_no AS r FROM $table').get();
+    var max = 0;
+    final trailing = RegExp(r'(\d+)$');
+    for (final row in rows) {
+      final m = trailing.firstMatch((row.data['r'] ?? '').toString());
+      final n = m == null ? 0 : int.tryParse(m.group(1)!) ?? 0;
+      if (n > max) max = n;
+    }
+    return max;
+  }
+
+  Future<void> _store(String table, String prefix, int value) => db.customStatement(
+        'INSERT INTO $_table (key, value) VALUES (?, ?) '
+        'ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+        [_key(table, prefix), value],
+      );
+
+  static String _key(String table, String prefix) => '$table|$prefix';
+
+  bool _ready = false;
+  Future<void> _ensureTable() async {
+    if (_ready) return;
+    await db.customStatement(
+      'CREATE TABLE IF NOT EXISTS $_table (key TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL)',
+    );
+    _ready = true;
+  }
+}
+// ==================== END FILE: lib/data/repos/doc_numbering.dart ====================
+
+// ==================== FILE: lib/data/repos/audit_repo.dart ====================
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import '../../core/ids.dart';
+import '../db/app_database.dart';
+import '../../core/error_log.dart';
+
+/// سجل التدقيق: أثر لا يُحذف للأحداث الحساسة (تعديل سند، إلغاؤه، اعتماد جرد،
+/// تغيير صلاحيات، إنشاء مستخدم، محاولات دخول فاشلة).
+class AuditRepo {
+  AuditRepo(this.db);
+
+  final AppDatabase db;
+
+  static const String riskNormal = 'normal';
+  static const String riskHigh = 'high';
+
+  /// كل ما سوى [riskNormal] أثرُ مساءلة لا يُقلَّم. التطبيق يكتب `sensitive` (اعتماد
+  /// صرف، تحويل…) و`critical` إلى جانب `high`؛ والشرط القديم `!= high` كان يقلّم
+  /// الاثنين بعد سنتين فتضيع سندات الصرف المعتمدة.
+  static const List<String> protectedRisks = ['high', 'sensitive', 'critical'];
+
+  /// المدة التي تُحفَظ بها الأحداث **العادية** قبل التقليم.
+  ///
+  /// عالية الخطورة (high/sensitive/critical) لا تُحذف أبدًا مهما طال العمر: تغييرُ صلاحية وإلغاءُ سند
+  /// واعتمادُ جرد هي أثرُ المساءلة وسببُ وجود الجدول أصلًا. أما العادية فتُكتب
+  /// بمعدّل مئاتٍ في اليوم، وتُزامَن إلى كل جهاز، فتصير بعد سنوات أكبرَ جداول
+  /// النظام وأثقلَ ما يُنقل — بلا من يقرؤها. وسنتان أطولُ من أي مراجعة دورية.
+  static const Duration normalTtl = Duration(days: 730);
+
+  /// حدّ الحذف في التشغيلة الواحدة.
+  ///
+  /// كل حذفٍ يولّد شاهدًا في `sync_marks` يُنقل إلى النظراء، فحذف عشرات
+  /// الألوف دفعةً واحدة يُثقل أول مزامنة بعده. التقليم يتوزّع على إقلاعات.
+  static const int pruneBatch = 2000;
+
+  /// يحذف دفعةً من الأحداث العادية التي تجاوزت [normalTtl]، ويعيد عددها.
+  Future<int> prune({DateTime? now}) async {
+    final cutoff = (now ?? DateTime.now()).subtract(normalTtl);
+    final stale = await (db.select(db.auditLogs)
+          ..where((t) =>
+              t.risk.isIn(protectedRisks).not() &
+              t.createdAt.isSmallerThanValue(cutoff))
+          ..orderBy([(t) => OrderingTerm.asc(t.createdAt)])
+          ..limit(pruneBatch))
+        .get();
+    if (stale.isEmpty) return 0;
+    final ids = [for (final r in stale) r.id];
+    await (db.delete(db.auditLogs)..where((t) => t.id.isIn(ids))).go();
+    return ids.length;
+  }
+
+  Future<void> log({
+    required String action,
+    required String summary,
+    String entityType = '',
+    Map<String, dynamic> details = const {},
+    String risk = riskNormal,
+    String actorEmail = '',
+  }) async {
+    final now = DateTime.now();
+    await db.into(db.auditLogs).insert(AuditLogsCompanion.insert(
+          id: Ids.next('aud'),
+          action: action,
+          entityType: Value(entityType),
+          summary: Value(summary),
+          details: Value(jsonEncode(details)),
+          risk: Value(risk),
+          actorEmail: Value(actorEmail),
+          logDate: Value(
+            '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}',
+          ),
+        ));
+  }
+
+  /// كتابة حدثٍ في سجل التدقيق — الحقول تُستخرج من details.
+  Future<void> write(
+    String action,
+    String entityType,
+    String summary, {
+    Map<String, dynamic> details = const {},
+    User? actor,
+    String actorEmail = '',
+  }) async {
+    try {
+      num n(Object? v) => v is num ? v : (num.tryParse('${v ?? ''}') ?? 0);
+      final qty = n(details['totalBaseQty']) != 0 ? n(details['totalBaseQty']) : n(details['qty']);
+      await db.into(db.auditLogs).insert(AuditLogsCompanion.insert(
+            id: Ids.next('aud'),
+            action: action,
+            entityType: Value(entityType),
+            summary: Value(summary),
+            risk: Value('${details['risk'] ?? 'normal'}'),
+            refNo: Value('${details['refNo'] ?? ''}'),
+            warehouse: Value('${details['warehouse'] ?? ''}'),
+            target: Value('${details['target'] ?? ''}'),
+            status: Value('${details['status'] ?? ''}'),
+            itemCount: Value(n(details['itemCount']).toInt()),
+            qty: Value(qty.toDouble()),
+            actorEmail: Value(actor?.email ?? actorEmail),
+            actorName: Value(actor != null
+                ? (actor.name.isNotEmpty ? actor.name : actor.email)
+                : actorEmail),
+            actorRole: Value(actor?.role ?? 'user'),
+            logDate: Value(DateTime.now().toIso8601String().substring(0, 10)),
+            details: Value(jsonEncode(details)),
+          ));
+    } catch (err, stack) {
+      ErrorLogger.critical('audit.write', err, stack: stack, userMessage: 'تعذّر تسجيل حدثٍ في سجل التدقيق');
+    }
+  }
+
+  /// كل السجلات بلا تقليم ولا حد — لشاشات التحليل (تقرأ الكل وتفلتر بنفسها).
+  Future<List<AuditLog>> allLogs() => db.select(db.auditLogs).get();
+
+  /// سجلات أُنشئت بعد [since] — لنافذة النشاط الأخير.
+  Future<List<AuditLog>> logsSince(DateTime since) =>
+      (db.select(db.auditLogs)..where((t) => t.createdAt.isBiggerOrEqualValue(since))).get();
+
+  /// سجلات مستويات خطورة محددة فقط (بلا حساسية لحالة الأحرف) — للوحات الرقابة.
+  Future<List<AuditLog>> logsByRisk(Iterable<String> risks) =>
+      (db.select(db.auditLogs)..where((t) => t.risk.lower().isIn(risks.map((r) => r.toLowerCase())))).get();
+
+  Future<List<SensitiveReview>> allSensitiveReviews() => db.select(db.sensitiveReviews).get();
+
+  /// وسم تغييرٍ حسّاس بأنه روجع (معرّف المراجعة = معرّف السجل).
+  Future<void> markSensitiveReviewed({required String logId, required String reviewedBy, required String note}) =>
+      db.into(db.sensitiveReviews).insertOnConflictUpdate(SensitiveReviewsCompanion.insert(
+            id: logId,
+            logId: logId,
+            reviewedBy: Value(reviewedBy),
+            note: Value(note),
+          ));
+
+  Future<List<AuditLog>> recent({int limit = 300, String risk = '', String query = ''}) async {
+    final rows = await (db.select(db.auditLogs)
+          ..orderBy([(t) => OrderingTerm.desc(t.createdAt)])
+          ..limit(limit))
+        .get();
+    final q = query.trim().toLowerCase();
+    return rows.where((r) {
+      if (risk.isNotEmpty && r.risk != risk) return false;
+      if (q.isEmpty) return true;
+      return r.summary.toLowerCase().contains(q) ||
+          r.action.toLowerCase().contains(q) ||
+          r.actorEmail.toLowerCase().contains(q);
+    }).toList();
+  }
+}
+// ==================== END FILE: lib/data/repos/audit_repo.dart ====================
+
+// ==================== FILE: lib/data/repos/settings_repo.dart ====================
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import '../../core/error_log.dart';
+import '../../core/ui/imd_fonts.dart';
+import '../../core/ui/imd_numbers.dart';
+import '../db/app_database.dart';
+import '../../domain/daily_movement_form.dart';
+import '../../domain/esign_policy.dart';
+import '../../domain/print_layout.dart';
+import '../../domain/voucher_copies.dart';
+
+/// هوية التطبيق والجهة: الاسم والشعار وأسطر الترويسة والسمة.
+class AppIdentity {
+  const AppIdentity({
+    this.name = 'نظام الإمداد والتموين',
+    this.logoBase64 = '',
+    this.logoSize = 140,
+    this.themePref = 'auto',
+    this.fontFamily = ImdFonts.defaultFamily,
+    this.orgLine1 = '',
+    this.orgLine2 = '',
+    this.orgLine3 = '',
+    this.orgLine4 = '',
+    this.showExpiry = true,
+  });
+
+  final String name;
+
+  /// الشعار مخزَّنًا Base64 (بلا بادئة data:) — يعمل دون إنترنت.
+  final String logoBase64;
+  final double logoSize;
+
+  /// light | dark | auto
+  final String themePref;
+
+  /// خط الواجهة المختار (انظر [ImdFonts]).
+  final String fontFamily;
+  final String orgLine1;
+  final String orgLine2;
+  final String orgLine3;
+  final String orgLine4;
+
+  /// هل يظهر حقل «تاريخ الانتهاء» في جداول إدخال الأصناف؟
+  ///
+  /// **مخزنٌ بلا موادّ تنتهي لا يحتاجه**، وعمودٌ لا يُملأ يضيّق على ما
+  /// يُملأ. وهو عرضٌ لا حفظ: إخفاؤه لا يمسّ تواريخ سُجّلت.
+  final bool showExpiry;
+
+  List<String> get orgLines =>
+      [orgLine1, orgLine2, orgLine3, orgLine4].where((l) => l.trim().isNotEmpty).toList();
+
+  AppIdentity copyWith({
+    String? name,
+    String? logoBase64,
+    double? logoSize,
+    String? themePref,
+    String? fontFamily,
+    String? orgLine1,
+    String? orgLine2,
+    String? orgLine3,
+    String? orgLine4,
+    bool? showExpiry,
+  }) =>
+      AppIdentity(
+        name: name ?? this.name,
+        logoBase64: logoBase64 ?? this.logoBase64,
+        logoSize: logoSize ?? this.logoSize,
+        themePref: themePref ?? this.themePref,
+        fontFamily: fontFamily ?? this.fontFamily,
+        orgLine1: orgLine1 ?? this.orgLine1,
+        orgLine2: orgLine2 ?? this.orgLine2,
+        orgLine3: orgLine3 ?? this.orgLine3,
+        orgLine4: orgLine4 ?? this.orgLine4,
+        showExpiry: showExpiry ?? this.showExpiry,
+      );
+
+  factory AppIdentity.fromMap(Map<String, dynamic> m) => AppIdentity(
+        name: '${m['name'] ?? 'نظام الإمداد والتموين'}',
+        logoBase64: '${m['logoBase64'] ?? ''}',
+        fontFamily: ImdFonts.normalize('${m['fontFamily'] ?? ''}'),
+        logoSize: (m['logoSize'] is num) ? (m['logoSize'] as num).toDouble() : 140,
+        themePref: '${m['themePref'] ?? 'auto'}',
+        orgLine1: '${m['orgLine1'] ?? ''}',
+        orgLine2: '${m['orgLine2'] ?? ''}',
+        orgLine3: '${m['orgLine3'] ?? ''}',
+        orgLine4: '${m['orgLine4'] ?? ''}',
+        showExpiry: m['showExpiry'] != false,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'name': name,
+        'logoBase64': logoBase64,
+        'logoSize': logoSize,
+        'themePref': themePref,
+        'fontFamily': fontFamily,
+        'orgLine1': orgLine1,
+        'orgLine2': orgLine2,
+        'orgLine3': orgLine3,
+        'orgLine4': orgLine4,
+        'showExpiry': showExpiry,
+      };
+}
+
+/// الإعدادات العامة المحفوظة بصيغة JSON (هوية الجهة، تخطيط الطباعة، النماذج).
+class SettingsRepo {
+  SettingsRepo(this.db);
+
+  final AppDatabase db;
+
+  /// مفاتيح خاصة بهذا الجهاز لا تغادره بالمزامنة أبدًا: رمز تفعيله ومعرّفه (وعلى
+  /// جهاز الإدارة مفتاح المالك الخاص)، وسجلّ الأجهزة المُصدَر لها، وختوم الإلغاء
+  /// (تسافر بقناتها الخاصة `deviceRevocations`). كان التصدير يحملها كلها.
+  static const Set<String> localOnlyKeys = {
+    'device', 'devices', 'revocations', 'ocr',
+    // قفل الدخول والجلسة: حالةُ هذا الجهاز وحده، ولا يجوز أن يسافر أو يُستورد.
+    'authSession', 'authLocks',
+    // إعدادات أمان الجهاز: مهلة القفل التلقائي.
+    'security',
+    // جدولة النسخ الاحتياطي: مجلد الجهاز وآخر تشغيلة.
+    'backupSchedule',
+    // تنبيه «انتقلت الصلاحيات الخاصة للمالك»: هل رآه كلُّ مدير على هذا الجهاز؟
+    'sysNotice',
+    // مسودة الصرف المستعادة تلقائيًا لكل مستخدم: بيانات سند غير مُعتمد، تبقى في
+    // القاعدة المشفّرة لا في SharedPreferences (ملفٌّ نصيٌّ مقروء).
+    'issueRecovery',
+    // ورق طباعة السندات وآخر نسخٍ اختيرت (`VoucherPrintPrefs.settingsKey`): الطابعة
+    // الحرارية موصولةٌ بهذا الجهاز، وورقُ جهاز الفرع ليس ورقَ جهاز الإدارة.
+    'voucherPrint',
+    // إعدادات المزامنة وسجلّ الثقة (`SyncTrust.settingsKey`). **سرٌّ وحالةٌ معًا:**
+    //
+    // • سرٌّ: كل جهاز موثوق محفوظ هنا بمفتاحه الدائم hex (`TrustedPeer.toMap`).
+    //   لو سافر الصفّ لحمل الفرعُ مفاتيحَ كل أجهزة الوحدة، فوقّع بمفتاح جهازٍ
+    //   آخر وانتحله انتحالًا كاملًا — وانهار عزل الثقة الذي بُنيت عليه
+    //   المزامنة كلها. والنسخة الاحتياطية بلا كلمة مرور تكتبها JSON صريحًا.
+    //
+    // • حالةٌ محلية: علامات الماء (`pulledUpTo`/`pushedUpTo`) مقيسةٌ بساعة هذا
+    //   الجهاز ولكل قرينٍ على حدة. والاستيراد يستبدل قيمة المفتاح **كاملةً**،
+    //   فجهازٌ له عدة أقران (الإدارة) كان يفقد علاماتِ بقيتهم عند كل سحبة —
+    //   وعلامةٌ تقفز للأمام تعني سجلاتٍ لا تُزامَن أبدًا — بل يفقد أسطرهم من
+    //   `peers` فتتوقف مزامنتهم بصمت، ويرث `accepted` القرينِ فيثق بمن لم
+    //   يقترن به.
+    //
+    // مكتوبٌ حرفًا لا `SyncTrust.settingsKey`: ذاك الملف يستورد هذا، فالإشارة
+    // إليه تُحدث حلقة استيراد. يربطهما اختبارٌ بدلها (`sync_trust_local_test`).
+    'sync',
+    // مفاتيح التوقيع الإلكتروني (`ESign`): المفتاح **الخاص** للقائد hex في `priv`.
+    // كان يخرج مع كل حمولة مزامنة وكل نسخة احتياطية (وJSON صريحًا بلا كلمة مرور)،
+    // فمن بلغه زوّر توقيع القائد على السندات المطبوعة. المفتاح العام وحده يُنشر
+    // (يُطبع مع الرمز ويُتحقق به)، والخاص لا يغادر جهاز الموقِّع.
+    'esign',
+    // التصفية الشهرية التلقائية (`CampLedgerRepo`): لا رجعة فيها. لو انتشر
+    // تفعيلها لصفّى كلُّ جهازٍ الشهرَ بنفسه بمعرّفٍ مختلف، فيصطدم الفهرس الفريد
+    // `ux_settlement_month` عند الدمج وتسقط معاملة المزامنة كلها في كل دورة.
+    'campLedger',
+    // الأرشفة التلقائية (`kArchiveAutoKey`): الأرشيف وملفاته على قرص كل جهاز
+    // وخارج المزامنة، فتفعيلُه قرارُ ذلك الجهاز لا قرارٌ يُفرض على أقراص الفروع.
+    'archive.auto',
+    // ملف استرداد مفتاح القاعدة (`KeyEscrow`): متى حُفظ آخره على **هذا** الجهاز —
+    // لكل جهازٍ مفتاحه، فلا معنى لتاريخ جهازٍ آخر هنا.
+    'keyEscrow',
+  
+    // هوية TLS للمزامنة: مفتاحٌ خاص لا يغادر الجهاز.
+    'tls',
+  };
+
+  static const String issueRecoveryKey = 'issueRecovery';
+
+  /// مسودة الصرف المحفوظة تلقائيًا للمستخدم [userId]، أو `null`.
+  Future<Map<String, dynamic>?> readIssueRecovery(String userId) async {
+    final v = (await read(issueRecoveryKey))[userId];
+    return v is Map ? Map<String, dynamic>.from(v) : null;
+  }
+
+  Future<void> writeIssueRecovery(String userId, Map<String, dynamic> snapshot) async {
+    final all = await read(issueRecoveryKey);
+    all[userId] = snapshot;
+    await write(issueRecoveryKey, all);
+  }
+
+  Future<void> clearIssueRecovery(String userId) async {
+    final all = await read(issueRecoveryKey);
+    if (all.remove(userId) == null) return;
+    await write(issueRecoveryKey, all);
+  }
+
+  static const String printLayoutKey = 'printLayout';
+  static const String orgKey = 'org';
+
+  Future<Map<String, dynamic>> read(String key) async {
+    final rows = await (db.select(db.appSettings)..where((t) => t.key.equals(key))).get();
+    if (rows.isEmpty) return {};
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(rows.first.value);
+    } on FormatException catch (err, stack) {
+      // قيمةٌ تالفة لا تُسقط مستدعيها (والهوية تُقرأ قبل ظهور الواجهة): تُعامل
+      // كأنها غائبة، ويبقى الخطأ مسجَّلًا.
+      ErrorLogger.critical('settings.read.$key', err, stack: stack);
+      return {};
+    }
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : {};
+  }
+
+  Future<void> write(String key, Map<String, dynamic> value) =>
+      db.into(db.appSettings).insertOnConflictUpdate(AppSettingsCompanion.insert(
+            key: key,
+            value: Value(jsonEncode(value)),
+            updatedAt: Value(DateTime.now()),
+          ));
+
+  /// قراءةٌ فتعديلٌ فكتابة **في معاملةٍ واحدة** (M-25).
+  ///
+  /// `read` ثم `write` منفصلين كانا يُضيّعان تحديثًا عند التسابق: خادم المزامنة
+  /// يمنح ثقةً (`POST /trust`) ودورةٌ جارية تحفظ علامات قرين — كلٌّ يقرأ الخريطة
+  /// قبل كتابة الآخر فيكتب فوقها. معاملات Drift متسلسلة على الاتصال، فما داخلها
+  /// لا يتخلّله غيره. [change] يعدّل الخريطة في مكانها؛ ويعيد ما يشاء للمستدعي.
+  Future<T> update<T>(String key, T Function(Map<String, dynamic> map) change) =>
+      db.transaction(() async {
+        final map = await read(key);
+        final before = jsonEncode(map);
+        final out = change(map);
+        // بلا تغييرٍ لا كتابة: الكتابة تُطلق محفِّز العلامة فتعدّ تغييرًا يُزامَن.
+        if (jsonEncode(map) != before) await write(key, map);
+        return out;
+      });
+
+  /// تخطيطات النماذج المُفردة: `{ "<مفتاح النموذج>": {<تخطيط>} }`.
+  ///
+  /// مفتاحٌ **مزامَن** كالتخطيط العام: صورةُ السند معيارُ الجهة كلها لا تفضيلَ
+  /// جهاز. ومفتاحٌ مستقلٌّ عن `printLayout` حتى يبقى الافتراضي العام مقروءًا
+  /// بإصدارٍ أقدم كما هو — لا يرى النماذج المُفردة فيطبع بالعام، وهو سلوك
+  /// الإصدار السابق بعينه.
+  static const String printFormsKey = 'printForms';
+
+  /// تخطيط النموذج [formKey]، أو التخطيط العام إن لم يُفرد النموذج بتصميم.
+  ///
+  /// [formKey] فارغ (أو `null`) ⇒ التخطيط العام. ومفتاحٌ غير معروف يتبع العام
+  /// كذلك: الفهرس قد ينقص مفتاحًا حُذف، فلا تتوقف الطباعة لأجله.
+  Future<PrintLayout> printLayoutFor(String? formKey) async {
+    if (formKey == null || formKey.isEmpty) return printLayout();
+    final own = (await read(printFormsKey))[formKey];
+    if (own is! Map || own[formDeletedKey] == true) return printLayout();
+    return PrintLayout.fromMap(Map<String, dynamic>.from(own));
+  }
+
+  Future<PrintLayout> printLayout() async {
+    final map = await read(printLayoutKey);
+    return map.isEmpty ? PrintLayout.defaults : PrintLayout.fromMap(map);
+  }
+
+  Future<void> savePrintLayout(PrintLayout layout) => write(printLayoutKey, layout.toMap());
+
+  /// ختم كل نموذجٍ مُفرد داخل `printForms` — به يُدمج نموذجًا نموذجًا (M-25).
+  ///
+  /// الإعداد المزامَن كان يُحسم **بمفتاحه كله**: جهازان يُفرد كلٌّ منهما نموذجًا
+  /// مختلفًا، فيمحو الأحدثُ تصميمَ الآخر. الآن يحمل كل نموذجٍ ختمه، ويأخذ الدمجُ
+  /// الأحدثَ لكلٍّ على حدة (`LegacyImporter._mergePrintForms`).
+  static const String formStampKey = '_at';
+
+  /// شاهد حذف نموذجٍ أُعيد إلى العام — حتى لا يعود من جهازٍ لم يعرف بحذفه.
+  static const String formDeletedKey = '_deleted';
+
+  /// يُفرد النموذج [formKey] بتخطيطٍ خاص.
+  Future<void> savePrintLayoutFor(String formKey, PrintLayout layout) => update(printFormsKey, (all) {
+        all[formKey] = {...layout.toMap(), formStampKey: DateTime.now().millisecondsSinceEpoch};
+      });
+
+  /// يُعيد النموذج إلى التخطيط العام (يحذف إفراده بشاهدٍ مختوم).
+  Future<void> clearPrintLayoutFor(String formKey) async {
+    final all = await read(printFormsKey);
+    final own = all[formKey];
+    if (own is! Map || own[formDeletedKey] == true) return;
+    await update(printFormsKey, (all) {
+      all[formKey] = {formDeletedKey: true, formStampKey: DateTime.now().millisecondsSinceEpoch};
+    });
+  }
+
+  /// مفاتيح النماذج المُفردة بتصميمٍ خاص — لوسمها في منتقي المصمم.
+  Future<Set<String>> customizedPrintForms() async => (await read(printFormsKey))
+      .entries
+      .where((e) => e.value is Map && (e.value as Map)[formDeletedKey] != true)
+      .map((e) => e.key)
+      .toSet();
+
+  /// دمج نسختين من `printForms` نموذجًا نموذجًا: الأحدث ختمًا لكلٍّ يفوز
+  /// (نموذجٌ بلا ختم من إصدارٍ أقدم ختمُه صفر). نتيجةٌ واحدة أيًّا كان الترتيب،
+  /// فيلتقي الجهازان من أول دورة.
+  static Map<String, dynamic> mergePrintForms(Map<String, dynamic> local, Map<String, dynamic> incoming) {
+    int at(Object? v) => v is Map ? ((v[formStampKey] as num?)?.toInt() ?? 0) : -1;
+    final out = Map<String, dynamic>.from(local);
+    incoming.forEach((k, v) {
+      if (v is! Map) return;
+      final mine = out[k];
+      final a = at(v);
+      final b = at(mine);
+      if (a > b || (a == b && jsonEncode(v).compareTo(jsonEncode(mine)) > 0)) out[k] = v;
+    });
+    return out;
+  }
+
+  /// `loadAppConfig()` — هوية التطبيق والجهة.
+  Future<AppIdentity> identity() async {
+    final map = await read(orgKey);
+    return map.isEmpty ? const AppIdentity() : AppIdentity.fromMap(map);
+  }
+
+  Future<void> saveIdentity(AppIdentity id) => write(orgKey, id.toMap());
+
+  static const String numbersKey = ImdNumbers.key;
+
+  /// تفضيلات تنسيق الأرقام — تُزامَن: صورةُ الرقم في السند معيارُ الجهة كلّها.
+  Future<ImdNumberPrefs> numbers() async {
+    final map = await read(numbersKey);
+    return map.isEmpty ? const ImdNumberPrefs() : ImdNumberPrefs.fromMap(map);
+  }
+
+  /// يحفظ التفضيل **ويُفعّله في الجلسة** — فلا يُحفظ شيءٌ ويُعرض غيره.
+  Future<void> saveNumbers(ImdNumberPrefs p) async {
+    await write(numbersKey, p.toMap());
+    ImdNumbers.apply(p);
+  }
+
+  /// وضع التوقيع الإلكتروني للسندات (H-5) — تلقائي افتراضيًّا كما كان، لكن على
+  /// المحفوظ وحده.
+  Future<ESignMode> esignMode() async => ESignPolicy.parse((await read(ESignPolicy.settingsKey))['mode']);
+
+  /// ورق طباعة السندات وآخر نسخٍ اختيرت على هذا الجهاز (محليٌّ لا يُزامَن).
+  Future<VoucherPrintPrefs> voucherPrintPrefs() async =>
+      VoucherPrintPrefs.fromMap(await read(VoucherPrintPrefs.settingsKey));
+
+  Future<void> saveVoucherPrintPrefs(VoucherPrintPrefs p) =>
+      write(VoucherPrintPrefs.settingsKey, p.toMap());
+
+  /// متغيّرات نموذج «تقرير الحركة اليومية بالمخزن»: بيانات البرقية والتواقيع.
+  /// مفتاحٌ **مزامَن**: التواقيع معيارُ الجهة كلها لا تفضيلُ جهاز.
+  static const String dailyFormKey = 'dailyForm';
+
+  Future<DailyFormVars> dailyFormVars() async =>
+      DailyFormVars.fromMap(await read(dailyFormKey));
+
+  Future<void> saveDailyFormVars(DailyFormVars v) => write(dailyFormKey, v.toMap());
+
+  /// يحفظ الوضع ويُبقي قائمة المستندات كما هي (كان يكتب الخريطة كلها فيمحوها).
+  Future<void> saveEsignMode(ESignMode mode) =>
+      update<void>(ESignPolicy.settingsKey, (m) => m['mode'] = mode.name);
+
+  /// المستندات التي يُطبع عليها توقيع القائد (لم يُضبط قط ⇒ كلها؛ قائمةٌ فارغة ⇒ لا شيء).
+  Future<Set<String>> esignPrintOn() async =>
+      ESignPolicy.parsePrintOn((await read(ESignPolicy.settingsKey))['printOn']);
+
+  Future<void> saveEsignPrintOn(Set<String> docs) => update<void>(
+        ESignPolicy.settingsKey,
+        (m) => m['printOn'] = [
+          for (final k in ESignPolicy.printableDocs.keys)
+            if (docs.contains(k)) k,
+        ],
+      );
+
+  /// يقرأ التفضيل المحفوظ ويُفعّله — يُنادى مرةً عند الإقلاع.
+  Future<void> loadNumbers() async => ImdNumbers.apply(await numbers());
+}
+// ==================== END FILE: lib/data/repos/settings_repo.dart ====================
+
+// ==================== FILE: lib/data/repos/report_numbering.dart ====================
+import 'package:drift/drift.dart';
+
+import '../db/app_database.dart';
+import 'doc_numbering.dart';
+
+/// ترقيم التقارير الرسمية (تقرير الحركة اليومية بأشكاله الثلاثة — قرار المالك
+/// 2026-10-25): رمز الجهاز ثم تسلسله (`E4VUQ8-000012`)، يُطبع في سطر الذيل بجوار
+/// رقم الصفحة.
+///
+/// **رقمٌ ثابت للتقرير:** تقرير اليوم نفسه للمخزن نفسه وبالشكل نفسه يحمل الرقم
+/// نفسه كلما أُعيدت طباعته؛ ويأخذ تقرير يومٍ أو مخزنٍ أو شكلٍ آخر الرقم التالي.
+/// الربط في جدول محلي `report_numbers` **خارج المزامنة** كعدّاد السندات
+/// (`doc_counters`): رمز الجهاز يمنع تصادم رقمين بين جهازين.
+class ReportNumbering {
+  ReportNumbering(this.db);
+
+  final AppDatabase db;
+
+  static const String _table = 'report_numbers';
+
+  /// عدّاد التقارير في `doc_counters` (البادئة فارغة ⇒ الرقم يبدأ برمز الجهاز).
+  static const String _counter = 'daily_reports';
+
+  /// مفتاح التقرير: الشكل والمخزن (أو `*` لجميع المخازن) واليوم.
+  static String keyOf({required String shape, required String warehouse, required String day}) =>
+      '$shape|${warehouse.trim().isEmpty ? '*' : warehouse.trim()}|$day';
+
+  /// رقم التقرير [key] — يُحجز عند أول طلب ويُعاد كما هو بعده.
+  Future<String> numberFor(String key) => db.transaction(() async {
+        await db.customStatement(
+          'CREATE TABLE IF NOT EXISTS $_table (key TEXT NOT NULL PRIMARY KEY, number TEXT NOT NULL)',
+        );
+        final row = await db
+            .customSelect('SELECT number FROM $_table WHERE key = ?', variables: [Variable.withString(key)])
+            .getSingleOrNull();
+        if (row != null) return row.read<String>('number');
+        final numbering = DocNumbering(db);
+        Future<int> seed() async => 0;
+        final next = await numbering.peek(_counter, '', seed: seed);
+        await numbering.claim(_counter, '', next, seed: seed);
+        await db.customStatement('INSERT INTO $_table (key, number) VALUES (?, ?)', [key, next]);
+        return next;
+      });
+}
+// ==================== END FILE: lib/data/repos/report_numbering.dart ====================

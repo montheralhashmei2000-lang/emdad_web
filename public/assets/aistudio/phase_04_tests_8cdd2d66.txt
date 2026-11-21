@@ -1,0 +1,807 @@
+// المرحلة 4 — تعريف الجداول وطبقة الحفظ الأساسية — الاختبارات (المواصفة الواجبة التحويل إلى Vitest)
+// عدد الملفات: 6
+// فهرس الملفات:
+//   - test/repo_guard_test.dart (177 سطر)
+//   - test/doc_numbering_test.dart (106 سطر)
+//   - test/report_numbering_test.dart (35 سطر)
+//   - test/audit_prune_test.dart (104 سطر)
+//   - test/migration_idempotent_test.dart (192 سطر)
+//   - test/delete_permission_test.dart (171 سطر)
+
+
+// ==================== FILE: test/repo_guard_test.dart ====================
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/db/pre_migration_backup.dart';
+import 'package:imdad/data/repos/cable_repo.dart';
+import 'package:imdad/data/repos/catalog_repo.dart';
+import 'package:imdad/data/repos/fuel_repo.dart';
+import 'package:imdad/data/repos/movements_repo.dart';
+import 'package:imdad/data/repos/repo_guard.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/domain/cable_clearance.dart';
+import 'package:imdad/domain/password_policy.dart';
+import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart' as sql;
+
+/// الدفعة الثالثة من 2026-10-26: حارس طبقة البيانات، وفرع البرقية (v30)،
+/// وسياسة قوة كلمة المرور.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('RepoGuard — الصلاحية في طبقة البيانات', () {
+    late AppDatabase db;
+    late MovementsRepo moves;
+    const main = 'المخزن الرئيسي';
+    const camp = 'مخزن المعسكر';
+    const rice = DocLineInput(itemId: 'rice', itemCode: 'RICE', itemName: 'أرز', unitName: 'كيس', factor: 1, qty: 5);
+
+    Future<SaveResult> receive(String wh) =>
+        moves.saveReceipt(warehouse: wh, supplier: 'المورد', date: '2026-10-01', lines: const [rice], invoiceNo: 'F1');
+
+    setUp(() async {
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      moves = MovementsRepo(db);
+      final catalog = CatalogRepo(db);
+      await catalog.quickAddWarehouse(main);
+      await catalog.quickAddWarehouse(camp);
+      await catalog.saveItem(id: 'rice', code: 'RICE', name: 'أرز', baseUnit: 'كيس');
+    });
+    tearDown(() async {
+      RepoGuard.current = null;
+      await db.close();
+    });
+
+    RepoActor user(PermissionMap perms, {List<String>? scope}) =>
+        RepoActor(role: UserRole.user, permissions: perms, scope: scope);
+
+    test('بلا جلسة (مزامنة، خدمات داخلية) يمرّ', () async {
+      expect((await receive(main)).ok, isTrue);
+    });
+
+    test('مطّلعٌ بلا كتابة يُرفض ولو تجاوز الشاشة', () async {
+      RepoGuard.current = user(AccessControl.permissionsForRoles(['viewer']));
+      final r = await receive(main);
+      expect(r.ok, isFalse);
+      expect(r.error, contains('لا تملك صلاحية'));
+      expect(await db.select(db.receipts).get(), isEmpty);
+    });
+
+    test('مستودعٌ خارج النطاق يُرفض، وداخله يمرّ', () async {
+      RepoGuard.current = user(AccessControl.permissionsForRoles(['main_storekeeper']), scope: const [camp]);
+      expect((await receive(main)).error, contains('خارج نطاق'));
+      expect((await receive(camp)).ok, isTrue);
+    });
+
+    test('التحويل: المصدر في النطاق يكفي، والوجهة قد تكون خارجه', () async {
+      expect((await receive(camp)).ok, isTrue);
+      RepoGuard.current = user(AccessControl.permissionsForRoles(['sub_storekeeper']), scope: const [camp]);
+      final ok = await moves.saveTransfer(
+          fromWarehouse: camp, toWarehouse: main, date: '2026-10-02', lines: const [rice]);
+      expect(ok.ok, isTrue, reason: ok.error);
+      final out = await moves.saveTransfer(
+          fromWarehouse: main, toWarehouse: camp, date: '2026-10-02', lines: const [rice]);
+      expect(out.ok, isFalse);
+    });
+
+    test('المدير بلا قيد', () async {
+      RepoGuard.current = const RepoActor(role: UserRole.admin, permissions: {}, scope: null);
+      expect((await receive(main)).ok, isTrue);
+    });
+
+    test('المحروقات: خزّانٌ خارج نطاقٍ يذكر خزّانًا يُرفض', () async {
+      final fuel = FuelRepo(db);
+      await fuel.saveWarehouse(name: 'خزان الفرقة');
+      await fuel.saveWarehouse(name: 'خزان المعسكر');
+      RepoGuard.current = user(AccessControl.permissionsForRoles(['fuel_camp_keeper']), scope: const ['خزان المعسكر']);
+      final r = await fuel.saveSupply(
+          date: '2026-10-01', fuelType: 'diesel', warehouse: 'خزان الفرقة', quantityLiters: 100);
+      expect(r.ok, isFalse);
+      expect(r.error, contains('خارج نطاق'));
+    });
+  });
+
+  group('فرع البرقية (v30)', () {
+    late AppDatabase db;
+    setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+    tearDown(() => db.close());
+
+    test('تُختم بفرع الجهاز، ومدير مكتب الفرع يرى فرعه والبرقيات بلا فرع', () async {
+      final branchA = CableRepo(db, deviceBranch: 'اللواء الأول');
+      await branchA.insert(CablesCompanion.insert(id: 'a', subject: 'من الأول'));
+      await CableRepo(db, deviceBranch: 'اللواء الثاني').insert(CablesCompanion.insert(id: 'b', subject: 'من الثاني'));
+      await db.into(db.cables).insert(CablesCompanion.insert(id: 'old', subject: 'قديمة بلا فرع'));
+
+      expect((await db.select(db.cables).get()).firstWhere((c) => c.id == 'a').branch, 'اللواء الأول');
+      final own = CableRepo(db, ownBranchOnly: true, deviceBranch: 'اللواء الأول');
+      expect({for (final c in await own.list()) c.id}, {'a', 'old'});
+      expect(await own.byId('b'), isNull);
+      final all = CableRepo(db, deviceBranch: 'اللواء الأول');
+      expect((await all.list()).length, 3);
+    });
+
+    test('جهازٌ بلا فرعٍ معروف لا يحجب شيئًا', () async {
+      await CableRepo(db, deviceBranch: 'اللواء الثاني').insert(CablesCompanion.insert(id: 'b', subject: 'x'));
+      expect(await CableRepo(db, ownBranchOnly: true, deviceBranch: '').list(), hasLength(1));
+    });
+
+    test('منح «كل الفروع» وحده لا يُسقط اطّلاع البرقيات العادية', () {
+      final allowed = CableClearance.allowed(role: UserRole.user, permissions: const {
+        'cables': {'view': true},
+        'cables.view.allBranches': {'view': true},
+      });
+      expect(allowed, contains(CableClearance.normal));
+    });
+  });
+
+  group('ترحيل v30', () {
+    late Directory dir;
+    late File file;
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('imdad_v30');
+      file = File(p.join(dir.path, 'imdad.sqlite'));
+      PreMigrationBackup.directoryProvider = () async => dir;
+    });
+    tearDown(() {
+      try {
+        dir.deleteSync(recursive: true);
+      } on FileSystemException {
+        // يبقى مقفلًا أحيانًا على ويندوز.
+      }
+    });
+
+    test('من v29: عمود الفرع يُضاف فارغًا والبرقية القائمة باقية', () async {
+      final seed = AppDatabase.forTesting(NativeDatabase(file));
+      await seed.into(seed.cables).insert(CablesCompanion.insert(id: 'c1', subject: 'قائمة', cableNo: const Value('و-1')));
+      await seed.close();
+      final raw = sql.sqlite3.open(file.path);
+      raw.execute('ALTER TABLE cables DROP COLUMN branch');
+      raw.execute('PRAGMA user_version = 29');
+      raw.close();
+
+      final db = AppDatabase.forTesting(
+          NativeDatabase(file, setup: (r) => PreMigrationBackup.createIfNeeded(r, file)));
+      final c = await db.select(db.cables).getSingle();
+      expect((c.id, c.cableNo, c.branch), ('c1', 'و-1', null));
+      await db.close();
+    });
+  });
+
+  group('سياسة كلمة المرور', () {
+    test('يُرفض الضعيف', () {
+      for (final pw in ['12345678', 'aaaaaaaa', 'abcdefgh', 'password', 'Password1', 'قصير1', 'abababab', '87654321']) {
+        expect(PasswordPolicy.ok(pw), isFalse, reason: pw);
+      }
+      expect(PasswordPolicy.ok('ahmed.ali-2026', username: 'ahmed.ali'), isFalse, reason: 'يحوي اسم الدخول');
+    });
+
+    test('يُقبل المعقول، والعربية حروف', () {
+      for (final pw in ['Test@12345', 'safe-pass-1', 'correct-horse', 'كلمة سر قوية', 'مخزن2026الرئيسي']) {
+        expect(PasswordPolicy.ok(pw), isTrue, reason: pw);
+      }
+    });
+  });
+}
+// ==================== END FILE: test/repo_guard_test.dart ====================
+
+// ==================== FILE: test/doc_numbering_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/catalog_repo.dart';
+import 'package:imdad/data/repos/doc_numbering.dart';
+import 'package:imdad/data/repos/movements_repo.dart';
+import 'package:imdad/data/repos/stocktake_repo.dart';
+
+/// ترقيم السندات برمز الجهاز وعدّاد مخزَّن.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  late MovementsRepo mv;
+  late String rice;
+
+  setUp(() async {
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    mv = MovementsRepo(db);
+    final catalog = CatalogRepo(db);
+    await catalog.saveWarehouse(code: 'W1', name: 'الرئيسي');
+    rice = await catalog.saveItem(
+      code: 'R1',
+      name: 'أرز',
+      baseUnit: 'كجم',
+      units: const [ItemUnit(name: 'كجم', factor: 1, isBase: true)],
+    );
+  });
+
+  tearDown(() => db.close());
+
+  Future<String> receive({String refNo = ''}) async {
+    final r = await mv.saveReceipt(
+      warehouse: 'الرئيسي',
+      supplier: 'المورد',
+      date: '2026-09-20',
+      refNo: refNo,
+      lines: [DocLineInput(itemId: rice, itemCode: 'R1', itemName: 'أرز', unitName: 'كجم', factor: 1, qty: 1)],
+    );
+    expect(r.ok, isTrue, reason: r.error);
+    return r.refNo;
+  }
+
+  test('المرجع يحمل رمز الجهاز ويبدأ من 1', () async {
+    final code = await DocNumbering(db).deviceCode();
+    expect(code, matches(RegExp(r'^[2-9A-Z]{6}$')), reason: 'ستة أحرف (L-1)');
+    expect(await mv.nextRef('receipts', 'و-'), 'و-$code-000001');
+  });
+
+  test('عرض الرقم لا يستهلكه، والحفظ يثبّته', () async {
+    final code = await DocNumbering(db).deviceCode();
+    final shown = await mv.nextRef('receipts', 'و-');
+    expect(await mv.nextRef('receipts', 'و-'), shown, reason: 'فتح الشاشة وإغلاقها لا يترك فجوة');
+
+    expect(await receive(refNo: shown), shown);
+    expect(await mv.nextRef('receipts', 'و-'), 'و-$code-000002');
+    expect(await receive(), 'و-$code-000002', reason: 'الحفظ بلا مرجع يأخذ التالي');
+    expect(await mv.nextRef('receipts', 'و-'), 'و-$code-000003');
+  });
+
+  test('التسلسل مستقل لكل نوع سند', () async {
+    final code = await DocNumbering(db).deviceCode();
+    await receive();
+    await receive();
+    expect(await mv.nextRef('issues', 'ص-'), 'ص-$code-000001');
+  });
+
+  test('سندات جهاز آخر لا تحرّك عدّاد هذا الجهاز', () async {
+    final code = await DocNumbering(db).deviceCode();
+    final other = code == 'ZZZZ' ? 'YYYY' : 'ZZZZ';
+    await receive(); // يبذر العدّاد ويثبت 1
+    await receive(refNo: 'و-$other-000500'); // وصل بالمزامنة أو أُدخل يدويًا
+    expect(await mv.nextRef('receipts', 'و-'), 'و-$code-000002');
+  });
+
+  test('جهاز فيه سندات بالصيغة القديمة يُكمل من أعلى رقم فيها', () async {
+    await db.into(db.receipts).insert(ReceiptsCompanion.insert(id: 'old-1', refNo: const Value('و-000041')));
+    final code = await DocNumbering(db).deviceCode();
+    expect(await mv.nextRef('receipts', 'و-'), 'و-$code-000042');
+  });
+
+  test('العدّاد خارج المزامنة: لا يُسجَّل له أثر في sync_marks', () async {
+    await receive();
+    final marks = await db
+        .customSelect("SELECT COUNT(*) AS c FROM sync_marks WHERE entity = 'doc_counters'")
+        .getSingle();
+    expect(marks.read<int>('c'), 0);
+  });
+
+  test('أوامر الجرد تحمل رمز الجهاز وتُكمل من الصيغة القديمة', () async {
+    final year = DateTime.now().year;
+    await db.into(db.stocktakes).insert(StocktakesCompanion.insert(
+          id: 'st-old',
+          orderNo: Value('STK-$year-007'),
+          status: const Value('CLOSED'),
+          warehouse: const Value('الرئيسي'),
+        ));
+    final code = await DocNumbering(db).deviceCode();
+    final id = await StocktakeRepo(db).createOrder(warehouse: 'الرئيسي', date: '2026-09-20');
+    final order = await (db.select(db.stocktakes)..where((t) => t.id.equals(id))).getSingle();
+    expect(order.orderNo, 'STK-$year-$code-008');
+  });
+}
+// ==================== END FILE: test/doc_numbering_test.dart ====================
+
+// ==================== FILE: test/report_numbering_test.dart ====================
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/print/document_pdf.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/report_numbering.dart';
+
+/// ترقيم تقارير الحركة اليومية الرسمية (2026-10-25): رمز الجهاز ثم التسلسل، ورقمٌ
+/// ثابت للتقرير نفسه (الشكل والمخزن واليوم) عند إعادة طباعته.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  test('رقمٌ ثابت للتقرير نفسه، وتالٍ لغيره، ويبدأ برمز الجهاز', () async {
+    final r = ReportNumbering(db);
+    final k1 = ReportNumbering.keyOf(shape: 'sectionedLedger', warehouse: 'الرئيسي', day: '2026-10-25');
+    final first = await r.numberFor(k1);
+    expect(await r.numberFor(k1), first, reason: 'إعادة الطباعة بالرقم نفسه');
+    final other = await r.numberFor(ReportNumbering.keyOf(shape: 'sectionedLedger', warehouse: '', day: '2026-10-25'));
+    expect(other, isNot(first));
+    expect(RegExp(r'^[A-Z0-9]+-\d{6}$').hasMatch(first), isTrue, reason: first);
+    expect(int.parse(other.split('-').last), int.parse(first.split('-').last) + 1);
+  });
+
+  test('الرقم في سطر الذيل بجوار رقم الصفحة', () {
+    final line =
+        DocumentPdf.footerLine(at: DateTime(2026, 10, 25, 9), by: 'أحمد', page: 1, pages: 2, number: 'ABC123-000007');
+    expect(line, contains('صفحة'));
+    expect(line.replaceAll('‎', ''), endsWith('رقم: ABC123-000007'));
+    expect(DocumentPdf.footerLine(at: DateTime(2026, 10, 25, 9), by: '', page: 1, pages: 1), isNot(contains('رقم:')));
+  });
+}
+// ==================== END FILE: test/report_numbering_test.dart ====================
+
+// ==================== FILE: test/audit_prune_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/ids.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/audit_repo.dart';
+
+/// تقليم سجل التدقيق.
+///
+/// الخط الفاصل: العادي يُقلَّم، وعاليُ الخطورة **لا يُمسّ مهما طال عمره** —
+/// هو أثرُ المساءلة وسببُ وجود الجدول.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  Future<void> entry(String risk, DateTime at) =>
+      db.into(db.auditLogs).insert(AuditLogsCompanion.insert(
+            id: Ids.next('aud'),
+            action: 'test',
+            risk: Value(risk),
+            createdAt: Value(at),
+          ));
+
+  final now = DateTime(2026, 9, 25);
+  DateTime ago(int days) => now.subtract(Duration(days: days));
+
+  Future<int> count() async => (await db.select(db.auditLogs).get()).length;
+
+  test('الحدث العادي القديم يُقلَّم', () async {
+    await entry(AuditRepo.riskNormal, ago(800));
+    expect(await AuditRepo(db).prune(now: now), 1);
+    expect(await count(), 0);
+  });
+
+  test('الحدث العادي الحديث يبقى', () async {
+    await entry(AuditRepo.riskNormal, ago(400));
+    expect(await AuditRepo(db).prune(now: now), 0);
+    expect(await count(), 1);
+  });
+
+  test('الحدث عالي الخطورة لا يُحذف مهما قدُم', () async {
+    await entry(AuditRepo.riskHigh, ago(5000));
+    expect(await AuditRepo(db).prune(now: now), 0,
+        reason: 'تغيير الصلاحيات وإلغاء السندات أثرٌ دائم');
+    expect(await count(), 1);
+  });
+
+  test('sensitive و critical لا يُقلَّمان كذلك (سندات الصرف المعتمدة)', () async {
+    await entry('sensitive', ago(5000));
+    await entry('critical', ago(5000));
+    expect(await AuditRepo(db).prune(now: now), 0);
+    expect(await count(), 2);
+  });
+
+  test('التقليم يقف عند حدّ الدفعة فيتوزّع على إقلاعات', () async {
+    await db.batch((b) {
+      for (var i = 0; i < AuditRepo.pruneBatch + 50; i++) {
+        b.insert(
+          db.auditLogs,
+          AuditLogsCompanion.insert(
+            id: Ids.next('aud'),
+            action: 'test',
+            createdAt: Value(ago(900 + i)),
+          ),
+        );
+      }
+    });
+    expect(await AuditRepo(db).prune(now: now), AuditRepo.pruneBatch);
+    expect(await count(), 50);
+    expect(await AuditRepo(db).prune(now: now), 50);
+    expect(await count(), 0);
+  });
+
+  test('الأقدم يُحذف أولًا', () async {
+    await entry(AuditRepo.riskNormal, ago(2000));
+    await entry(AuditRepo.riskNormal, ago(750));
+    final repo = AuditRepo(db);
+    // دفعةٌ بحجم واحد عبر تقليمين متتاليين: الأقدم يخرج في الأول.
+    await repo.prune(now: now);
+    expect(await count(), 0, reason: 'كلاهما تجاوز المدة');
+
+    await entry(AuditRepo.riskNormal, ago(2000));
+    await entry(AuditRepo.riskNormal, ago(100));
+    await repo.prune(now: now);
+    final left = await db.select(db.auditLogs).get();
+    expect(left, hasLength(1));
+    expect(left.single.createdAt.isAfter(ago(200)), isTrue,
+        reason: 'الباقي هو الحديث');
+  });
+
+  test('الحذف يترك شاهدًا فينتقل إلى النظراء', () async {
+    await entry(AuditRepo.riskNormal, ago(900));
+    await AuditRepo(db).prune(now: now);
+    final marks = await db.customSelect(
+      "SELECT COUNT(*) c FROM sync_marks WHERE entity='audit_logs' AND deleted_at IS NOT NULL",
+    ).getSingle();
+    expect(marks.data['c'], 1,
+        reason: 'بلا شاهدٍ يعود السطر المحذوف من أول مزامنة');
+  });
+}
+// ==================== END FILE: test/audit_prune_test.dart ====================
+
+// ==================== FILE: test/migration_idempotent_test.dart ====================
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/data/db/app_database.dart';
+
+/// الترحيل يحتمل قاعدةً سبقت طابَعها.
+///
+/// جهازٌ فُتحت عليه نسخةٌ أحدث ثم نسخةٌ أقدم يُخفَّض طابَع قاعدته وتبقى
+/// أعمدتُها. فإن رُقّي بعدها أعاد الترحيل إضافةَ عمودٍ قائم، فتُرمى
+/// `duplicate column name` **أثناء فتح القاعدة** — فلا يفتح التطبيق أصلًا،
+/// ولا يعرض خطأً مفهومًا، ولا سبيل للمستخدم إلى إصلاحه من داخله.
+///
+/// وقع هذا فعلًا عند تبادل نسختين في يوم واحد، فهذه الاختبارات تحرسه.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late Directory dir;
+  late File file;
+
+  setUp(() async {
+    dir = await Directory.systemTemp.createTemp('imdad_mig_idem');
+    file = File('${dir.path}/db.sqlite');
+  });
+
+  tearDown(() async {
+    if (await dir.exists()) {
+      try {
+        await dir.delete(recursive: true);
+      } on FileSystemException {
+        // يبقى مقفلًا أحيانًا على ويندوز — لا يعني فشلًا.
+      }
+    }
+  });
+
+  /// يفتح القاعدة ويغلقها، فتجري الترحيلات.
+  Future<void> open(Future<void> Function(AppDatabase db)? probe) async {
+    final db = AppDatabase.forTesting(NativeDatabase(file));
+    await db.customSelect('SELECT 1').get();
+    if (probe != null) await probe(db);
+    await db.close();
+  }
+
+  test('طابَعٌ مخفَّض على قاعدة كاملة لا يُسقط الفتح', () async {
+    // قاعدة بأحدث مخطط: كل الأعمدة والجداول موجودة.
+    await open(null);
+
+    // ثم يُخفَّض طابَعها كما يفعل فتحُ نسخةٍ أقدم من التطبيق.
+    final down = AppDatabase.forTesting(NativeDatabase(file));
+    await down.customStatement('PRAGMA user_version = 8');
+    await down.close();
+
+    // إعادة الفتح تُرقّيها من 8 — وكل عمود تحاول إضافته موجود سلفًا.
+    await expectLater(open(null), completes,
+        reason: 'الترحيل أسقط الفتح على قاعدة أعمدتها قائمة');
+  });
+
+  test('الترقية بعد الطابَع المخفَّض تحفظ البيانات', () async {
+    await open((db) async {
+      await db.into(db.warehouses).insert(
+          WarehousesCompanion.insert(id: 'wh1', name: 'الرئيسي'));
+      await db.into(db.supplyAuthorities).insert(
+          SupplyAuthoritiesCompanion.insert(id: 'a1', name: 'ركن الإمداد'));
+    });
+
+    final down = AppDatabase.forTesting(NativeDatabase(file));
+    await down.customStatement('PRAGMA user_version = 10');
+    await down.close();
+
+    await open((db) async {
+      expect((await db.select(db.warehouses).get()).single.name, 'الرئيسي');
+      expect((await db.select(db.supplyAuthorities).get()).single.name,
+          'ركن الإمداد');
+    });
+  });
+
+  test('الطابَع يعود إلى أحدث إصدار بعد الترقية', () async {
+    await open(null);
+    final down = AppDatabase.forTesting(NativeDatabase(file));
+    await down.customStatement('PRAGMA user_version = 3');
+    await down.close();
+
+    await open((db) async {
+      final row =
+          await db.customSelect('PRAGMA user_version').getSingle();
+      expect(row.data.values.first, db.schemaVersion);
+    });
+  });
+
+  test('جدولٌ محذوف يُعاد إنشاؤه عند الترقية', () async {
+    await open(null);
+
+    final down = AppDatabase.forTesting(NativeDatabase(file));
+    await down.customStatement('DROP TABLE supply_authorities');
+    await down.customStatement('PRAGMA user_version = 13');
+    await down.close();
+
+    await open((db) async {
+      await db.into(db.supplyAuthorities).insert(
+          SupplyAuthoritiesCompanion.insert(id: 'a2', name: 'قائد الفرقة'));
+      expect((await db.select(db.supplyAuthorities).get()), hasLength(1));
+    });
+  });
+
+  test('NULL في عمودٍ لا يقبله يُصلَح فلا تسقط القراءة', () async {
+    await open((db) async {
+      await db.into(db.receipts).insert(ReceiptsCompanion.insert(
+            id: 'r1',
+            refNo: const Value('و-000001'),
+            baseQty: const Value(4),
+          ));
+    });
+
+    // تنقّلُ القاعدة بين نسختين يترك العمود بلا قيد NOT NULL وفيه NULL —
+    // وهو ما وُجد فعلًا في قاعدة ميدانية تبادلت نسختين في يوم.
+    final broken = AppDatabase.forTesting(NativeDatabase(file));
+    await broken.customStatement('ALTER TABLE receipts DROP COLUMN expiry_date');
+    await broken.customStatement('ALTER TABLE receipts ADD COLUMN expiry_date TEXT');
+    await broken.customStatement('PRAGMA user_version = 13');
+    await broken.close();
+
+    await open((db) async {
+      final r = (await db.select(db.receipts).get()).single;
+      expect(r.expiryDate, isEmpty, reason: 'القراءة كانت تسقط قبل الإصلاح');
+      expect(r.refNo, 'و-000001', reason: 'الإصلاح مسّ ما لا يخصّه');
+      expect(r.baseQty, 4);
+    });
+  });
+
+  test('عمودٌ فات بوابته يُستدرك عند الفتح — لا الطابَع وحده يحكم', () async {
+    // هذه هي العطلة التي أوقفت التطبيق فعلًا: الطابَع 15 وبوابة v12 مرّت
+    // دون أن تُنفَّذ قط، فبقي العمود مفقودًا وسقطت أول قراءة للسندات.
+    await open((db) async {
+      await db.into(db.receipts).insert(ReceiptsCompanion.insert(
+            id: 'r1',
+            refNo: const Value('و-000001'),
+            baseQty: const Value(4),
+          ));
+    });
+
+    final broken = AppDatabase.forTesting(NativeDatabase(file));
+    await broken.customStatement('ALTER TABLE receipts DROP COLUMN expiry_date');
+    // الطابَع يبقى أحدث إصدار: كل بوابات الترحيل ستُتخطّى.
+    await broken.close();
+
+    await open((db) async {
+      final r = (await db.select(db.receipts).get()).single;
+      expect(r.expiryDate, isEmpty, reason: 'العمود المفقود لم يُستدرك');
+      expect(r.refNo, 'و-000001');
+      expect(r.baseQty, 4, reason: 'الاستدراك مسّ بيانات قائمة');
+    });
+  });
+
+  test('جدولٌ مفقود يُستدرك عند الفتح ولو كان الطابَع أحدث', () async {
+    await open(null);
+    final broken = AppDatabase.forTesting(NativeDatabase(file));
+    await broken.customStatement('DROP TABLE supply_authorities');
+    await broken.close();
+
+    await open((db) async {
+      await db.into(db.supplyAuthorities).insert(
+          SupplyAuthoritiesCompanion.insert(id: 'a9', name: 'رئيس الشعبة'));
+      expect(await db.select(db.supplyAuthorities).get(), hasLength(1));
+    });
+  });
+
+  test('عمودٌ واحد ناقص يُضاف والباقي لا يُمسّ', () async {
+    await open((db) async {
+      await db.into(db.rationOrders).insert(RationOrdersCompanion.insert(
+            id: 'o1',
+            refNo: const Value('ط-000001'),
+            requestingWarehouse: const Value('الفرع'),
+          ));
+    });
+
+    final down = AppDatabase.forTesting(NativeDatabase(file));
+    await down.customStatement('DROP INDEX IF EXISTS ix_ration_kind');
+    await down.customStatement(
+        'ALTER TABLE ration_orders DROP COLUMN fulfill_kind');
+    await down.customStatement('PRAGMA user_version = 13');
+    await down.close();
+
+    await open((db) async {
+      final o = (await db.select(db.rationOrders).get()).single;
+      expect(o.refNo, 'ط-000001', reason: 'السطر القائم تغيّر أثناء الترحيل');
+      expect(o.fulfillKind, isEmpty);
+      expect(o.orderKind, 'BRANCH');
+    });
+  });
+}
+// ==================== END FILE: test/migration_idempotent_test.dart ====================
+
+// ==================== FILE: test/delete_permission_test.dart ====================
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/perm.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/core/ui/imd_widgets.dart' show ImdIconButton, ImdButton;
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/catalog_repo.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/features/catalog/items_screen.dart';
+import 'package:imdad/features/catalog/kitchens_screen.dart';
+import 'package:imdad/features/catalog/suppliers_screen.dart';
+import 'package:imdad/main.dart' show ImdTheme;
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// زرُّ الحذف يتبع صلاحية الحذف وحدها — لا «قابليةَ الكتابة».
+///
+/// [Perm.writable] يصدق بأيِّ إجراءٍ من الأربعة (إضافة/تعديل/حذف/اعتماد). وكانت
+/// شاشات الكتالوج والتشغيل اليومي والمحروقات تُظهر زرَّ الحذف به، وبعضُ دوالِّ
+/// الحذف بلا حارسٍ داخلي. وقالب «أمين مخزن» يمنح الأصناف والموردين والوحدات
+/// والمطابخ والأصول **إضافةً وتعديلًا بلا حذف** صراحةً (انظر وصفَ القالب في
+/// `AccessControl.roles`) — فكان أمينُ المخزن يرى الزرَّ ويحذف ما لا يملك حذفه.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  AppDatabase? db;
+  late AuthService auth;
+
+  tearDown(() async {
+    await db?.close();
+    db = null;
+  });
+
+  /// يُسجِّل مستخدمًا بقوالب [roleIds] ويُدخله.
+  Future<void> loginAs(WidgetTester tester, List<String> roleIds) async {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    auth = AuthService(db!);
+    await tester.runAsync(() async {
+      await UsersRepo(db!).createUser(
+        username: 'keeper',
+        password: 'Test@12345',
+        name: 'أمين',
+        permissions: AccessControl.permissionsForRoles(roleIds),
+      );
+      await auth.login('keeper', 'Test@12345');
+    });
+  }
+
+  Future<void> seed() async {
+    final repo = CatalogRepo(db!);
+    await repo.saveCategory(name: 'بقوليات');
+    await repo.saveItem(code: 'I1', name: 'أرز', categoryName: 'بقوليات');
+    await repo.saveSupplier(name: 'مورد');
+    await repo.saveFacility(name: 'مطبخ أ', fType: 'KITCHEN');
+  }
+
+  Future<void> show(WidgetTester tester, Widget screen) async {
+    tester.view.physicalSize = const Size(1500, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        Provider<AppDatabase>.value(value: db!),
+        Provider<AuthService>.value(value: auth),
+        ChangeNotifierProvider<ImdTheme>.value(value: ImdTheme(ThemeMode.light)),
+      ],
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        locale: const Locale('ar'),
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(body: SingleChildScrollView(child: screen)),
+        ),
+      ),
+    ));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    }
+  }
+
+  Finder trash() => find.byWidgetPredicate((w) =>
+      (w is ImdIconButton && w.icon == 'trash') ||
+      (w is ImdButton && w.icon == 'trash'));
+
+  group('قالب أمين المخزن: تعديلٌ بلا حذف', () {
+    test('القالب نفسه يمنح التعديل ويمنع الحذف في الكتالوج', () async {
+      final perms = AccessControl.permissionsForRoles(['storekeeper']);
+      for (final page in ['items', 'suppliers', 'units', 'kitchens', 'assets']) {
+        expect(AccessControl.can(isAdmin: false, permissions: perms, page: page, action: PermAction.edit), isTrue,
+            reason: '$page: القالب يمنح التعديل');
+        expect(AccessControl.can(isAdmin: false, permissions: perms, page: page, action: PermAction.delete), isFalse,
+            reason: '$page: القالب لا يمنح الحذف');
+      }
+    });
+
+    testWidgets('الأصناف: لا زرَّ حذفٍ لمن لا يملك الحذف', (tester) async {
+      await loginAs(tester, ['storekeeper']);
+      await tester.runAsync(seed);
+      expect(Perm(auth).writable('items'), isTrue, reason: 'يملك التعديل فهو «قابل للكتابة»');
+      expect(Perm(auth).canDelete('items'), isFalse);
+      await show(tester, const ItemsScreen());
+      expect(trash(), findsNothing, reason: 'زرُّ الحذف ظهر لمن لا يملك الحذف');
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('الموردون: لا زرَّ حذف', (tester) async {
+      await loginAs(tester, ['storekeeper']);
+      await tester.runAsync(seed);
+      await show(tester, const SuppliersScreen());
+      expect(trash(), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('المطابخ: لا زرَّ حذف', (tester) async {
+      await loginAs(tester, ['storekeeper']);
+      await tester.runAsync(seed);
+      await show(tester, const KitchensScreen());
+      expect(trash(), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('من يملك الحذف يراه', () {
+    testWidgets('الأصناف: المدير يرى زرَّ الحذف', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      auth = AuthService(db!);
+      await tester.runAsync(() async {
+        await auth.createAdmin(username: 'admin', password: 'Test@12345');
+        await auth.login('admin', 'Test@12345');
+        await seed();
+      });
+      expect(Perm(auth).canDelete('items'), isTrue);
+      await show(tester, const ItemsScreen());
+      expect(trash(), findsWidgets, reason: 'المدير يملك كل الإجراءات');
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('حارسٌ داخليٌّ لا يُكتفى بإخفاء الزر', () {
+    test('Perm.canDelete لا يتأثر بالإضافة أو التعديل أو الاعتماد', () async {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      auth = AuthService(db!);
+      await UsersRepo(db!).createUser(
+        username: 'partial',
+        password: 'Test@12345',
+        name: 'جزئي',
+        permissions: {
+          'items': {
+            PermAction.view: true,
+            PermAction.create: true,
+            PermAction.edit: true,
+            PermAction.approve: true,
+          },
+        },
+      );
+      await auth.login('partial', 'Test@12345');
+      final perm = Perm(auth);
+      expect(perm.writable('items'), isTrue);
+      expect(perm.canDelete('items'), isFalse,
+          reason: 'ثلاثة إجراءاتٍ لا تصنع إذنَ حذف');
+    });
+  });
+}
+// ==================== END FILE: test/delete_permission_test.dart ====================

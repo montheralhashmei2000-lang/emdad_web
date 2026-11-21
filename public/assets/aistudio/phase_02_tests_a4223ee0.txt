@@ -1,0 +1,424 @@
+// المرحلة 2 — مكونات الواجهة (الأزرار والحقول والنوافذ والتخطيط) — الاختبارات (المواصفة الواجبة التحويل إلى Vitest)
+// عدد الملفات: 5
+// فهرس الملفات:
+//   - test/field_row_height_test.dart (55 سطر)
+//   - test/chip_overflow_test.dart (70 سطر)
+//   - test/icon_button_label_test.dart (108 سطر)
+//   - test/screen_actions_test.dart (57 سطر)
+//   - test/imd_key_scroll_test.dart (115 سطر)
+
+
+// ==================== FILE: test/field_row_height_test.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FontLoader, rootBundle;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/core/ui/imd_form.dart';
+import 'package:imdad/core/ui/imd_widgets.dart';
+
+/// حقل النص والمنتقي في صفٍّ واحد بارتفاعٍ واحد — كان المنتقي يقصر عن الحقل
+/// بكسلين في كل مقاس خط (حقل النص يفرض «دعامة» الخط على سطره ونص المنتقي لا)،
+/// فيعلو أحدهما الآخر في صفوف مصمم النماذج والإعدادات.
+void main() {
+  // خط التطبيق الحقيقي: مقاييس خط Ahem في الاختبارات لا تُظهر الفرق.
+  setUpAll(() async {
+    final loader = FontLoader('IBMPlexSansArabic');
+    for (final w in ['Regular', 'Medium', 'SemiBold', 'Bold']) {
+      loader.addFont(rootBundle.load('assets/fonts/IBMPlexSansArabic-$w.ttf'));
+    }
+    await loader.load();
+  });
+
+  for (final scale in [1.0, 1.3, 2.0]) {
+    testWidgets('الحقل والمنتقي بارتفاعٍ واحد عند تكبير الخط ×$scale', (tester) async {
+      final ctl = TextEditingController(text: 'الجمهورية اليمنية');
+      addTearDown(ctl.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light(),
+        home: MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+          child: Directionality(
+            textDirection: TextDirection.rtl,
+            child: Scaffold(
+              body: Column(children: [
+                SizedBox(width: 300, child: ImdFld(key: const Key('field'), controller: ctl)),
+                SizedBox(
+                  width: 300,
+                  child: ImdSelect<int>(
+                      key: const Key('select'), items: const [(1, 'يمين')], value: 1, onChanged: (_) {}),
+                ),
+                SizedBox(
+                  width: 300,
+                  child: ImdSelect<int>(
+                      key: const Key('empty'), hint: 'اختر', items: const [(1, 'يمين')], value: null, onChanged: (_) {}),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ));
+      final field = tester.getSize(find.byKey(const Key('field'))).height;
+      expect(tester.getSize(find.byKey(const Key('select'))).height, field);
+      expect(tester.getSize(find.byKey(const Key('empty'))).height, field, reason: 'المنتقي الفارغ بتلميحه');
+    });
+  }
+}
+// ==================== END FILE: test/field_row_height_test.dart ====================
+
+// ==================== FILE: test/chip_overflow_test.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/core/ui/imd_widgets.dart';
+
+/// الشارة لا ترسم نفسها خارج أبيها.
+///
+/// [ImdChip] يلفّ نصه بـ`IntrinsicWidth` كي لا يضغطه عمودُ جدولٍ إلى ما دون
+/// عرض نصه. لكن حين يضيق أبوه فعلًا — شارةٌ طويلة في صندوقٍ ثابت العرض —
+/// كان الصفّ الداخلي يفيض بفارق العرض بالضبط، فيُرسم النص فوق ما بجواره
+/// ويظهر شريط الفيض المخطّط في وضع التطوير.
+///
+/// وهذا ما كان يُفيض شاشة الإعدادات ٣٦ بكسل في قسم «نظرة عامة»: شارة
+/// «ما زال هناك تحسين مطلوب» داخل عمودٍ عرضه ٢٦٠.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  Widget host(Widget child) => MaterialApp(
+        theme: AppTheme.light(),
+        locale: const Locale('ar'),
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(body: Center(child: child)),
+        ),
+      );
+
+  testWidgets('شارة أطول من أبيها تُقصّ ولا تفيض', (tester) async {
+    await tester.pumpWidget(host(const SizedBox(
+      width: 120,
+      child: ImdChip('نصٌّ طويل جدًّا لا يتّسع له هذا الصندوق الضيّق أبدًا'),
+    )));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull,
+        reason: 'الشارة رسمت نفسها خارج أبيها');
+
+    final box = tester.getSize(find.byType(ImdChip));
+    expect(box.width, lessThanOrEqualTo(120),
+        reason: 'عرض الشارة تجاوز ما أُعطيت');
+  });
+
+  testWidgets('شارة تتّسع تبقى بعرض نصها كاملًا', (tester) async {
+    // هذا ما يحرسه IntrinsicWidth أصلًا: ألّا يضغطها عمودُ جدول دون نصها.
+    await tester.pumpWidget(host(const SizedBox(
+      width: 400,
+      child: Align(alignment: Alignment.centerRight, child: ImdChip('قصير')),
+    )));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    final box = tester.getSize(find.byType(ImdChip));
+    expect(box.width, lessThan(200),
+        reason: 'الشارة القصيرة تمدّدت لعرض أبيها بدل عرض نصها');
+    expect(box.width, greaterThan(20));
+  });
+
+  testWidgets('شارة بأيقونة ونص طويل تُقصّ ولا تفيض', (tester) async {
+    await tester.pumpWidget(host(const SizedBox(
+      width: 100,
+      child: ImdChip('تحذير طويل يحتاج مساحة أكبر بكثير', icon: 'alert'),
+    )));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  // تغطية شاشة الإعدادات نفسها في `ration_transfer_pull_test.dart`: هناك
+  // تُفتح الشاشة ويُتحقَّق من خلوّها من الفيض. ولا تُكرَّر هنا لأن
+  // `pumpAndSettle` عليها لا يستقرّ في هذا الملف — وهو عطلٌ ثانٍ مستقلّ عن
+  // الفيض، ظهر قبل هذا الإصلاح وبقي بعده.
+}
+// ==================== END FILE: test/chip_overflow_test.dart ====================
+
+// ==================== FILE: test/icon_button_label_test.dart ====================
+import 'dart:io';
+
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/core/ui/imd_widgets.dart';
+
+/// زرُّ الأيقونة يحمل اسمًا منطوقًا ومرئيًّا.
+///
+/// `ImdIconButton` يُرسَم بـ`label: ''` — فالأيقونة وحدها، و[tooltip] اسمُه
+/// الوحيد. وكان الوسيط يُستقبَل ويُهمَل في البناء: لا تلميحةَ على سطح المكتب،
+/// ولا شيءَ ينطقه قارئُ الشاشة، في ١١٤ موضعًا من الشاشات.
+void main() {
+  Widget wrap(Widget child) => MaterialApp(
+        theme: AppTheme.light(),
+        locale: const Locale('ar'),
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(body: Center(child: child)),
+        ),
+      );
+
+  testWidgets('التلميحة تصل إلى الشجرة فتُنطق وتُعرض', (tester) async {
+    // تُفعَّل الدلالات **قبل** البناء: شجرتُها لا تُبنى بأثرٍ رجعي.
+    final handle = tester.ensureSemantics();
+
+    await tester.pumpWidget(wrap(
+      ImdIconButton(icon: 'printer', tooltip: 'طباعة', onPressed: () {}),
+    ));
+
+    final tip = tester.widget<Tooltip>(find.byType(Tooltip));
+    expect(tip.message, 'طباعة');
+
+    // ودلالةُ الاسم: ما يجده قارئ الشاشة. `Tooltip` وحده لا يكفي — الرسالة
+    // تلحق بالطبقة العائمة حين تظهر، فلزم `Semantics` صريحًا على الزر.
+    expect(find.bySemanticsLabel('طباعة'), findsOneWidget,
+        reason: 'قارئ الشاشة لا يجد اسمًا لزرٍّ بأيقونةٍ وحدها');
+    handle.dispose();
+  });
+
+  testWidgets('تلميحةٌ غائبة أو فارغة لا تُضيف عقدةً فارغة', (tester) async {
+    await tester.pumpWidget(wrap(ImdIconButton(icon: 'printer', onPressed: () {})));
+    expect(find.byType(Tooltip), findsNothing);
+
+    await tester.pumpWidget(wrap(
+      ImdIconButton(icon: 'printer', tooltip: '   ', onPressed: () {}),
+    ));
+    expect(find.byType(Tooltip), findsNothing, reason: 'مسافاتٌ ليست اسمًا');
+  });
+
+  testWidgets('الزر يبقى عاملًا مع التلميحة', (tester) async {
+    var taps = 0;
+    await tester.pumpWidget(wrap(
+      ImdIconButton(icon: 'printer', tooltip: 'طباعة', onPressed: () => taps++),
+    ));
+    await tester.tap(find.byType(ImdIconButton));
+    await tester.pump();
+    expect(taps, 1);
+  });
+
+  testWidgets('التلميحة تظهر عند الوقوف بالمؤشّر', (tester) async {
+    await tester.pumpWidget(wrap(
+      ImdIconButton(icon: 'printer', tooltip: 'طباعة', onPressed: () {}),
+    ));
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: Offset.zero);
+    addTearDown(gesture.removePointer);
+    await gesture.moveTo(tester.getCenter(find.byType(ImdIconButton)));
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.text('طباعة'), findsOneWidget);
+  });
+
+  /// حارسُ مواضع الاستعمال، لا حارسُ المكوّن.
+  ///
+  /// الاختبارات أعلاه تُثبت أن [ImdIconButton] يُوصل التلميحة إذا أُعطيها. وكان
+  /// ٢١ موضعًا في الشاشات لا يُعطيها أصلًا: زرُّ تعديلٍ وحذفٍ وإضافةٍ وتحديثٍ
+  /// وإغلاقٍ وجرسُ تنبيهاتٍ وزرُّ قائمةٍ وزرُّ بحث — أيقوناتٌ عارية لا ينطق
+  /// قارئُ الشاشة لها اسمًا، ولا يرى مستخدمُ سطح المكتب تلميحة.
+  ///
+  /// وقائمةُ استثناءاتٍ هنا تتبوّأ، كما في `design_rules_test`: فلا استثناء —
+  /// زرُّ أيقونةٍ بلا اسمٍ خطأٌ حيث كان.
+  test('كل زرِّ أيقونةٍ في الشِّفرة يحمل اسمًا', () {
+    final files = [
+      for (final e in Directory('lib').listSync(recursive: true))
+        if (e is File && e.path.endsWith('.dart') && !e.path.endsWith('.g.dart')) e,
+    ];
+    final call = RegExp(r'(?<![A-Za-z])(ImdIconButton|IconButton)\s*\(');
+    final bad = <String>[];
+    for (final f in files) {
+      final rel = f.path.replaceAll(String.fromCharCode(92), '/');
+      final lines = f.readAsLinesSync();
+      for (var i = 0; i < lines.length; i++) {
+        if (!call.hasMatch(lines[i])) continue;
+        if (lines[i].contains('class ') || lines[i].trimLeft().startsWith('//')) continue;
+        // التلميحة قد تأتي على سطرٍ تالٍ داخل نفس الاستدعاء.
+        final window = lines.sublist(i, i + 9 > lines.length ? lines.length : i + 9).join('\n');
+        if (!window.contains('tooltip')) bad.add('$rel:${i + 1}');
+      }
+    }
+    expect(bad, isEmpty,
+        reason: 'زرُّ أيقونةٍ بلا tooltip: لا اسمَ لقارئ الشاشة ولا تلميحةَ للمؤشّر:\n'
+            '${bad.join('\n')}');
+  });
+}
+// ==================== END FILE: test/icon_button_label_test.dart ====================
+
+// ==================== FILE: test/screen_actions_test.dart ====================
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/ui/imd_page_tabs.dart';
+import 'package:imdad/core/ui/imd_screen_actions.dart';
+import 'package:imdad/core/ui/imd_status_bar.dart';
+
+/// CLAUDE.md §8 البند 24: Ctrl+S كان يعمل في ١١ شاشة فقط، ويملكه آخرُ صفحةٍ فُتحت
+/// لا الظاهرة (الصفحات تبقى حيّةً تبويبات). الآن خانةٌ لكل صفحة والجذر يقرأ خانة
+/// الظاهرة، وكل شاشةٍ لها حفظ تسجّله.
+void main() {
+  test('الجذر يقرأ خانة الصفحة الظاهرة، وما سجّله هو حين لا خانة', () {
+    final root = ImdScreenActions();
+    var hits = '';
+    root.register(onSave: () => hits += 'root');
+    final a = ImdScreenActions()..register(onSave: () => hits += 'a');
+    final b = ImdScreenActions()..register(onSave: () => hits += 'b');
+
+    root.onSave!();
+    root.delegate = a;
+    root.onSave!();
+    root.delegate = b;
+    root.onSave!();
+    expect(hits, 'rootab');
+  });
+
+  testWidgets('الشاشة داخل ImdPageHost تسجّل في خانة صفحتها لا في الجذر', (tester) async {
+    final slot = ImdScreenActions();
+    var saved = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: ImdPageHost(
+        active: true,
+        sink: ImdRecordSink(),
+        actions: slot,
+        child: Builder(builder: (context) {
+          ImdScreenActions.maybeOf(context)?.register(onSave: () => saved++);
+          return const SizedBox();
+        }),
+      ),
+    ));
+    slot.onSave!();
+    expect(saved, 1);
+  });
+
+  test('كل شاشةٍ لها حفظ تسجّل Ctrl+S', () {
+    final missing = <String>[];
+    for (final f in Directory('lib/features').listSync(recursive: true).whereType<File>()) {
+      if (!f.path.endsWith('_screen.dart')) continue;
+      final src = f.readAsStringSync();
+      final saves = RegExp(r'Future<void> _save\w*\(\)').hasMatch(src);
+      if (saves && !src.contains('ImdScreenActions')) missing.add(f.path.replaceAll(r'\', '/'));
+    }
+    expect(missing, isEmpty, reason: 'شاشةٌ تحفظ ولا تسجّل اختصار الحفظ:\n${missing.join('\n')}');
+  });
+}
+// ==================== END FILE: test/screen_actions_test.dart ====================
+
+// ==================== FILE: test/imd_key_scroll_test.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/core/ui/imd_key_scroll.dart';
+import 'package:imdad/core/ui/imd_widgets.dart';
+
+/// التمرير بلوحة المفاتيح بعد النقر (2026-10-23).
+void main() {
+  Widget app(Widget child) => MaterialApp(
+        theme: AppTheme.light(),
+        home: ImdKeyScroll(child: Directionality(textDirection: TextDirection.rtl, child: Scaffold(body: child))),
+      );
+
+  Widget list(ScrollController c, {String prefix = 'سطر'}) => ListView.builder(
+        controller: c,
+        itemCount: 200,
+        itemBuilder: (_, i) => SizedBox(height: 40, child: Text('$prefix $i')),
+      );
+
+  testWidgets('نقرةٌ ثم ↓ و Page Down و End و Home', (tester) async {
+    final c = ScrollController();
+    await tester.pumpWidget(app(list(c)));
+    await tester.tap(find.text('سطر 3'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    expect(c.offset, closeTo(ImdKeyScroll.lineStep, .5));
+
+    final before = c.offset;
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pumpAndSettle();
+    expect(c.offset - before, greaterThan(300), reason: 'صفحةٌ أكبر من سطر');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.end);
+    await tester.pumpAndSettle();
+    expect(c.offset, c.position.maxScrollExtent);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    expect(c.offset, lessThan(c.position.maxScrollExtent));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.home);
+    await tester.pumpAndSettle();
+    expect(c.offset, 0);
+  });
+
+  testWidgets('في حقل كتابة تبقى الأسهم للمؤشر', (tester) async {
+    final c = ScrollController();
+    await tester.pumpWidget(app(Column(children: [
+      const TextField(),
+      Expanded(child: list(c)),
+    ])));
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pumpAndSettle();
+    expect(c.offset, 0);
+  });
+
+  testWidgets('المنطقة الأعمق تحت النقرة أولًا، فإذا بلغت حدّها تحرّكت الحاوية', (tester) async {
+    final outer = ScrollController();
+    final inner = ScrollController();
+    await tester.pumpWidget(app(SingleChildScrollView(
+      controller: outer,
+      child: Column(children: [
+        SizedBox(height: 200, child: list(inner, prefix: 'داخلي')),
+        for (var i = 0; i < 60; i++) SizedBox(height: 40, child: Text('خارجي $i')),
+      ]),
+    )));
+    await tester.tap(find.text('داخلي 1'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    expect(inner.offset, greaterThan(0));
+    expect(outer.offset, 0);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.end);
+    await tester.pumpAndSettle();
+    expect(inner.offset, inner.position.maxScrollExtent);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    expect(outer.offset, greaterThan(0), reason: 'الداخلية بلغت آخرها فتحرّكت الحاوية');
+  });
+
+  testWidgets('Ctrl مع الأسهم ليس تمريرًا (اختصارات الشاشة)', (tester) async {
+    final c = ScrollController();
+    await tester.pumpWidget(app(list(c)));
+    await tester.tap(find.text('سطر 3'));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(c.offset, 0);
+  });
+
+  testWidgets('حوارٌ بجسمٍ لا يُمرَّر (scrollBody: false) لا يلفّ محتواه بتمريرٍ ثانٍ', (tester) async {
+    await tester.pumpWidget(app(Builder(
+      builder: (context) => TextButton(
+        onPressed: () => showImdModal<void>(
+          context,
+          title: 'معاينة',
+          scrollBody: false,
+          builder: (_) => const ColoredBox(color: Colors.white, child: SizedBox.expand(child: Text('المحتوى'))),
+        ),
+        child: const Text('افتح'),
+      ),
+    )));
+    await tester.tap(find.text('افتح'));
+    await tester.pumpAndSettle();
+    expect(find.ancestor(of: find.text('المحتوى'), matching: find.byType(SingleChildScrollView)), findsNothing);
+    // المحتوى يملأ الحوار (٩٠٪ من الارتفاع ناقص العنوان).
+    expect(tester.getSize(find.text('المحتوى')).height, greaterThan(300));
+    expect(tester.takeException(), isNull);
+  });
+}
+// ==================== END FILE: test/imd_key_scroll_test.dart ====================

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Perm } from '../../core/security/perm';
 import { kMenuDoors, menuDoorAllows, selfReferencingDoors } from '../menu_doors';
 
 /// أبواب القائمة وصلاحياتها.
@@ -18,9 +19,16 @@ describe('menu_doors_test', () => {
       }
     });
 
-    // MISSING: lib/core/security/perm.dart
-    it.skip('كل تبويبةٍ صلاحيةٌ معروفة', () => {
-      // يعتمد على Perm.labels من lib/core/security/perm.dart (المرحلة 5).
+    it('كل تبويبةٍ صلاحيةٌ معروفة', () => {
+      for (const [, tabs] of Object.entries(kMenuDoors)) {
+        for (const tab of tabs) {
+          // التبويبة صلاحيةٌ معرَّفة، أو بابٌ آخر بتبويباته.
+          const ok =
+            Object.prototype.hasOwnProperty.call(Perm.labels, tab) ||
+            Object.prototype.hasOwnProperty.call(kMenuDoors, tab);
+          expect(ok).toBe(true);
+        }
+      }
     });
 
     it('لا تبويبةَ تتكرر في بابين', () => {

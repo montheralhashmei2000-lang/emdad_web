@@ -139,3 +139,32 @@
   --imd-table-head: #1C1A17;
   --imd-table-row-line: #2B2824;
 }
+
+@keyframes imd-shimmer-rtl {
+  0% {
+    background-position: 0% 0%;
+  }
+  100% {
+    background-position: 100% 0%;
+  }
+}
+
+@keyframes imd-shimmer-ltr {
+  0% {
+    background-position: 100% 0%;
+  }
+  100% {
+    background-position: 0% 0%;
+  }
+}
+
+.imd-shimmer-rtl {
+  background-size: 300% 100%;
+  animation: imd-shimmer-rtl 1.5s infinite linear;
+}
+
+.imd-shimmer-ltr {
+  background-size: 300% 100%;
+  animation: imd-shimmer-ltr 1.5s infinite linear;
+}
+

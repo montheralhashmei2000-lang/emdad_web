@@ -1,0 +1,240 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SharedPreferences } from '../../core/security/shared_prefs';
+import { AppDatabase, UsersCompanion } from '../../data/db/app_database';
+import { NativeDatabase, Value } from '../../data/db/sqlite_driver';
+import type { AuditLog, User } from '../../data/db/tables/core_tables';
+import { ArgumentError, UsersRepo } from '../../data/repos/users_repo';
+import { AccessControl, UserRole } from '../access_control';
+import { SectionBlock } from '../section_block';
+
+/// حجب الأقسام (v25): النموذج، التطبيق fail-closed، المستودع والتوقيع، والقشرة.
+describe('section_block_test', () => {
+  describe('SectionBlock — النموذج', () => {
+    it('انتماء الصفحات: المحروقات والإمداد والأقسام الإدارية والمحايدة', () => {
+      expect(SectionBlock.sectionOf('fuelMoves')).toBe(SectionBlock.fuel);
+      expect(SectionBlock.sectionOf('fuelDashboard')).toBe(SectionBlock.fuel);
+      expect(SectionBlock.sectionOf('items')).toBe(SectionBlock.supply);
+      expect(SectionBlock.sectionOf('reportMoves')).toBe(SectionBlock.supply);
+      expect(SectionBlock.sectionOf('usersAccess')).toBe(SectionBlock.adminUsers);
+      expect(SectionBlock.sectionOf('lanSync')).toBe(SectionBlock.adminSync);
+      expect(SectionBlock.sectionOf('deviceActivation')).toBe(SectionBlock.adminDevices);
+      expect(SectionBlock.sectionOf('branding')).toBe(SectionBlock.adminSettings);
+      expect(SectionBlock.sectionOf('supplyAudit')).toBe(SectionBlock.adminAudit);
+      expect(SectionBlock.sectionOf('auditTrail')).toBe(SectionBlock.adminAudit);
+      expect(SectionBlock.sectionOf('dash')).toBeNull();
+      expect(SectionBlock.sectionOf('settings')).toBeNull();
+    });
+
+    it('أقسام الإعدادات الداخلية تتبع الحجب كما حدّدتَ', () => {
+      expect(SectionBlock.settingsSections['company']).toBe(SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['forms']).toBe(SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['verify']).toBe(SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['backup']).toBe(SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['users']).toBe(SectionBlock.adminUsers);
+      expect(SectionBlock.settingsSections['sync']).toBe(SectionBlock.adminSync);
+      expect(SectionBlock.settingsSections['devices']).toBe(SectionBlock.adminDevices);
+      expect(
+        Object.prototype.hasOwnProperty.call(SectionBlock.settingsSections, 'general'),
+      ).toBe(false);
+    });
+
+    it('القراءة: فارغ = لا حجب، والتالف يحجب الكل (فشل مغلق)، والمجهول يُهمل', () => {
+      expect(SectionBlock.parse('').size).toBe(0);
+      expect(SectionBlock.parse('[]').size).toBe(0);
+      expect(SectionBlock.parse(null).size).toBe(0);
+      expect(SectionBlock.parse('["fuel","bogus"]')).toEqual(
+        new Set([SectionBlock.fuel]),
+      );
+      expect(SectionBlock.parse('{not json')).toEqual(new Set(SectionBlock.all));
+      expect(SectionBlock.parse('{"a":1}')).toEqual(new Set(SectionBlock.all));
+    });
+
+    it('الترميز حتميّ ومرتّب بلا تكرار (التوقيع يُحسب على نصّه)', () => {
+      expect(SectionBlock.encode(['fuel', 'supply', 'fuel'])).toBe(
+        '["supply","fuel"]',
+      );
+      expect(SectionBlock.encode(new Set(['fuel', 'supply']))).toBe(
+        SectionBlock.encode(['supply', 'fuel']),
+      );
+      expect(SectionBlock.encode(['nope'])).toBe('[]');
+    });
+
+    it('المالك لا يُحجب عنه شيء حتى لو خُزِّن له حجب', () => {
+      for (const page of ['fuelMoves', 'items', 'usersAccess']) {
+        expect(
+          SectionBlock.blocksPage({
+            role: 'owner',
+            blockedJson: '["supply","fuel","admin.users"]',
+            page,
+          }),
+        ).toBe(false);
+      }
+      expect(
+        SectionBlock.blocksSection({
+          role: 'owner',
+          blockedJson: '["fuel"]',
+          section: 'fuel',
+        }),
+      ).toBe(false);
+      expect(
+        SectionBlock.blocksPage({
+          role: 'admin',
+          blockedJson: '["fuel"]',
+          page: 'fuelMoves',
+        }),
+      ).toBe(true);
+    });
+
+    it('AccessControl.can: المدير المحجوب عن قسمٍ لا يدخله، وغير المحجوب يدخل', () => {
+      const can = (
+        page: string,
+        { owner = false, blocked = null }: { owner?: boolean; blocked?: string | null } = {},
+      ) =>
+        AccessControl.can({
+          isAdmin: true,
+          isOwner: owner,
+          permissions: {},
+          page,
+          sectionBlocked: blocked,
+        });
+      expect(can('fuelMoves')).toBe(true);
+      expect(can('fuelMoves', { blocked: '["fuel"]' })).toBe(false);
+      expect(can('items', { blocked: '["fuel"]' })).toBe(true);
+      expect(can('fuelMoves', { owner: true, blocked: '["fuel"]' })).toBe(true);
+    });
+  });
+
+  describe('المستودع والتوقيع', () => {
+    let db: AppDatabase;
+    let repo: UsersRepo;
+
+    beforeEach(async () => {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      repo = new UsersRepo(db);
+      await db.into(db.users).insert(
+        UsersCompanion.insert({
+          id: 'o1',
+          username: 'boss',
+          role: Value.of('owner'),
+        }),
+      );
+      await db.into(db.users).insert(
+        UsersCompanion.insert({
+          id: 'a1',
+          username: 'adm',
+          role: Value.of('admin'),
+        }),
+      );
+      await db.into(db.users).insert(
+        UsersCompanion.insert({
+          id: 'u1',
+          username: 'ali',
+        }),
+      );
+    });
+
+    afterEach(async () => {
+      await db.close();
+    });
+
+    const user = (id: string): Promise<User> =>
+      db
+        .select(db.users)
+        .where((t) => t.id.equals(id))
+        .getSingle();
+
+    const audits = (action: string): Promise<AuditLog[]> =>
+      db
+        .select(db.auditLogs)
+        .where((t) => t.action.equals(action))
+        .get();
+
+    it('المالك وحده يحجب: المدير والمستخدم يُرفضان', async () => {
+      for (const role of [UserRole.admin, UserRole.user]) {
+        await expect(
+          repo.setSectionBlocked({
+            id: 'u1',
+            blocked: new Set([SectionBlock.fuel]),
+            actorRole: role,
+          }),
+        ).rejects.toThrow(ArgumentError);
+      }
+      expect((await user('u1')).sectionBlocked).toBe('[]');
+    });
+
+    it('لا يُحجب عن المالك شيء', async () => {
+      await expect(
+        repo.setSectionBlocked({
+          id: 'o1',
+          blocked: new Set([SectionBlock.fuel]),
+          actorRole: UserRole.owner,
+        }),
+      ).rejects.toThrow(ArgumentError);
+      expect((await user('o1')).sectionBlocked).toBe('[]');
+    });
+
+    // MISSING: lib/core/security/esign.dart
+    // MISSING: lib/core/security/device_activation.dart
+    it.skip('إضافة الحجب بلا توقيع وتُدقَّق بخطورة عالية', () => {
+      // يعتمد على ESign وDeviceActivation (مرحلة لاحقة).
+    });
+
+    it('بلا تغيير ⇒ لا كتابة ولا تدقيق', async () => {
+      const r = await repo.setSectionBlocked({
+        id: 'u1',
+        blocked: new Set(),
+        actorRole: UserRole.owner,
+      });
+      expect(r.changed).toBe(false);
+      expect(await audits('user.section_blocked.changed')).toEqual([]);
+    });
+
+    // MISSING: lib/core/security/esign.dart
+    // MISSING: lib/core/security/device_activation.dart
+    // MISSING: lib/core/security/owner_signature.dart
+    it.skip('فكّ الحجب مع مفتاح المالك: يُوقَّع ويُتحقَّق منه بالمفتاح العام ويُدقَّق sys.sign.used', () => {
+      // يعتمد على ESign وDeviceActivation وOwnerSignature (مرحلة لاحقة).
+    });
+
+    // MISSING: lib/core/security/esign.dart
+    // MISSING: lib/core/security/device_activation.dart
+    // MISSING: lib/core/security/owner_signature.dart
+    it.skip('فكّ الحجب بلا مفتاح: يُنفَّذ محليًّا بلا توقيع ويُنبَّه بأنه لن ينتشر', () => {
+      // يعتمد على ESign وDeviceActivation وOwnerSignature (مرحلة لاحقة).
+    });
+
+    // MISSING: lib/core/security/esign.dart
+    // MISSING: lib/core/security/device_activation.dart
+    // MISSING: lib/core/security/owner_signature.dart
+    it.skip('إضافة حجبٍ بعد فكٍّ موقَّع تُسقط توقيع الأقسام القديم وتُبقي توقيع الدور', () => {
+      // يعتمد على ESign وDeviceActivation وOwnerSignature (مرحلة لاحقة).
+    });
+  });
+
+  describe('القشرة', () => {
+    // MISSING: lib/features/home/home_shell.dart
+    // MISSING: lib/data/sync/auto_sync.dart
+    it.skip('حجب fuel: المدير لا يرى القسم ولو كان محفوظًا، وصفحاته مرفوضة بالتنقّل المباشر', () => {
+      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    });
+
+    // MISSING: lib/features/home/home_shell.dart
+    // MISSING: lib/data/sync/auto_sync.dart
+    it.skip('حجب supply: يبقى المحروقات وحده والإمداد مرفوض', () => {
+      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    });
+
+    // MISSING: lib/features/home/home_shell.dart
+    // MISSING: lib/data/sync/auto_sync.dart
+    it.skip('حجب admin.users: قسم «المستخدمون» يختفي من داخل الإعدادات وبقية الأقسام تبقى', () => {
+      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    });
+
+    // MISSING: lib/features/home/home_shell.dart
+    // MISSING: lib/data/sync/auto_sync.dart
+    it.skip('لا حجب للمالك: يرى كل الأقسام ولو خُزِّن له حجب', () => {
+      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    });
+  });
+});

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ImdDateField } from '../../core/ui/imd_form';
 import { isIsoDay, parseIsoDay } from '../iso_date';
 
 /// `DateTime.tryParse('2026-02-30')` يعيد 2026-03-02 بدل null، فكان تاريخٌ
@@ -40,8 +41,17 @@ describe('iso_date_strict_test', () => {
     // يعتمد على printDate و lrm من lib/core/print/print_format.dart (المرحلة 18).
   });
 
-  // MISSING: lib/core/ui/imd_form.dart
-  it.skip('منتقي التاريخ يُفتح على يومٍ داخل مداه', () => {
-    // يعتمد على ImdDateField.initialFor من lib/core/ui/imd_form.dart (المرحلة 2).
+  it('منتقي التاريخ يُفتح على يومٍ داخل مداه', () => {
+    const now = new Date(2026, 9, 22);
+    expect(ImdDateField.initialFor('1999-12-31', { now })).toEqual(
+      new Date(2000, 0, 1),
+    );
+    expect(ImdDateField.initialFor('2150-01-01', { now })).toEqual(
+      new Date(2100, 0, 1),
+    );
+    expect(ImdDateField.initialFor('2026-02-30', { now })).toEqual(now);
+    expect(ImdDateField.initialFor('2026-05-15', { now })).toEqual(
+      new Date(2026, 4, 15),
+    );
   });
 });

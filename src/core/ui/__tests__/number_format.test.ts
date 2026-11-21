@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { AppDatabase } from '../../../data/db/app_database';
+import { NativeDatabase } from '../../../data/db/sqlite_driver';
+import { SettingsRepo } from '../../../data/repos/settings_repo';
 import { arDigits, nf } from '../imd_format';
 import { ImdDigits, ImdNumberPrefs, ImdNumbers } from '../imd_numbers';
 
@@ -67,10 +70,28 @@ describe('number_format_test', () => {
   });
 
   describe('القراءة من القاعدة', () => {
-    // MISSING: lib/data/db/app_database.dart
-    // MISSING: lib/data/repos/settings_repo.dart
-    it.skip('يُحفظ ويُقرأ ويسري على الشاشات والمطبوعات معًا', async () => {
-      // يعتمد على AppDatabase و SettingsRepo (المرحلة 4/20).
+    it('يُحفظ ويُقرأ ويسري على الشاشات', async () => {
+      const db = AppDatabase.forTesting(NativeDatabase.memory());
+      try {
+        const repo = new SettingsRepo(db);
+        const prefs = new ImdNumberPrefs({
+          uiDigits: ImdDigits.latin,
+          printDigits: ImdDigits.arabic,
+          moneyDecimals: 0,
+        });
+        await repo.saveNumbers(prefs);
+        ImdNumbers.apply(new ImdNumberPrefs());
+        await repo.loadNumbers();
+        expect(nf(10)).toBe('10');
+        expect((await repo.numbers()).equals(prefs)).toBe(true);
+      } finally {
+        await db.close();
+      }
+    });
+
+    // MISSING: lib/core/print/print_format.dart (المرحلة 18)
+    it.skip('يُحفظ ويُقرأ ويسري على المطبوعات معًا (printMoney(10))', () => {
+      // يعتمد على printMoney من lib/core/print/print_format.dart (المرحلة 18).
     });
 
     it('صفٌّ تالفٌ لا يكسر كل رقمٍ في النظام', () => {

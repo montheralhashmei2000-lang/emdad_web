@@ -1,0 +1,2457 @@
+// المرحلة 5 — الدخول والمستخدمون والصلاحيات — الاختبارات (المواصفة الواجبة التحويل إلى Vitest)
+// عدد الملفات: 16
+// فهرس الملفات:
+//   - test/auth_lockout_escalation_test.dart (77 سطر)
+//   - test/auth_user_enumeration_test.dart (87 سطر)
+//   - test/user_rules_test.dart (196 سطر)
+//   - test/users_roles_test.dart (70 سطر)
+//   - test/role_templates_test.dart (181 سطر)
+//   - test/position_roles_test.dart (192 سطر)
+//   - test/perm_catalog_test.dart (123 سطر)
+//   - test/pbkdf2_test.dart (80 سطر)
+//   - test/password_upgrade_test.dart (89 سطر)
+//   - test/section_block_test.dart (400 سطر)
+//   - test/maker_checker_test.dart (120 سطر)
+//   - test/warehouse_scope_test.dart (99 سطر)
+//   - test/idle_lock_test.dart (285 سطر)
+//   - test/duplicate_username_test.dart (107 سطر)
+//   - test/sys_perm_test.dart (190 سطر)
+//   - test/auth_storage_test.dart (109 سطر)
+
+
+// ==================== FILE: test/auth_lockout_escalation_test.dart ====================
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/settings_repo.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// تصعيد قفل الدخول: كان ثلاث دقائق كل مرة، فينال المخمِّن ~١٠٠ محاولة في الساعة
+/// على حساب المدير بلا نهاية. الآن ٣ ثم ١٥ ثم ٦٠ دقيقة، وتُنسى المرّات بعد ٢٤ ساعة.
+void main() {
+  late AppDatabase db;
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+  });
+  tearDown(() => db.close());
+
+  int ms(DateTime t) => t.millisecondsSinceEpoch;
+
+  /// حالة قفلٍ سابق انتهت مدته: [strikes] مرةً، آخرها قبل [ago].
+  Future<void> seed({required int strikes, required Duration ago}) => SettingsRepo(db).write('authLocks', {
+        'ghost': {
+          'fails': 0,
+          'until': ms(DateTime.now().subtract(const Duration(seconds: 1))),
+          'strikes': strikes,
+          'lastLockAt': ms(DateTime.now().subtract(ago)),
+        },
+      });
+
+  Future<AuthResult> failFiveTimes() async {
+    final auth = AuthService(db);
+    late AuthResult last;
+    for (var i = 0; i < AuthService.maxAttempts; i++) {
+      last = await auth.login('ghost', 'wrong-pass-$i');
+    }
+    return last;
+  }
+
+  test('مدد القفل: ٣ ثم ١٥ ثم ٦٠ ثم تبقى ٦٠', () {
+    expect(AuthService.lockDurationFor(1), AuthService.lockDuration);
+    expect(AuthService.lockDurationFor(2), const Duration(minutes: 15));
+    expect(AuthService.lockDurationFor(3), const Duration(minutes: 60));
+    expect(AuthService.lockDurationFor(9), const Duration(minutes: 60));
+  });
+
+  test('القفل الأول ثلاث دقائق', () async {
+    final r = await failFiveTimes();
+    expect(r.status, AuthStatus.locked);
+    expect(r.lockRemaining, AuthService.lockDuration);
+    expect((await SettingsRepo(db).read('authLocks'))['ghost']['strikes'], 1);
+  });
+
+  test('القفل الثاني خلال ٢٤ ساعة ١٥ دقيقة، والثالث ساعة', () async {
+    await seed(strikes: 1, ago: const Duration(minutes: 10));
+    expect((await failFiveTimes()).lockRemaining, const Duration(minutes: 15));
+
+    await seed(strikes: 2, ago: const Duration(minutes: 30));
+    expect((await failFiveTimes()).lockRemaining, const Duration(minutes: 60));
+  });
+
+  test('بعد ٢٤ ساعة بلا قفل تُنسى المرّات السابقة', () async {
+    await seed(strikes: 3, ago: const Duration(hours: 25));
+    final r = await failFiveTimes();
+    expect(r.lockRemaining, AuthService.lockDuration);
+    expect((await SettingsRepo(db).read('authLocks'))['ghost']['strikes'], 1);
+  });
+
+  test('محاولةٌ خاطئة دون القفل تحفظ المرّات ولا تُسقطها', () async {
+    await seed(strikes: 2, ago: const Duration(minutes: 5));
+    await AuthService(db).login('ghost', 'wrong-pass');
+    final st = (await SettingsRepo(db).read('authLocks'))['ghost'] as Map;
+    expect(st['fails'], 1);
+    expect(st['strikes'], 2);
+  });
+}
+// ==================== END FILE: test/auth_lockout_escalation_test.dart ====================
+
+// ==================== FILE: test/auth_user_enumeration_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:imdad/core/security/pbkdf2.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// اسمٌ غير موجود يمرّ بمسار PBKDF2 كما تمرّ كلمة مرورٍ خاطئة لحسابٍ موجود، فلا
+/// يُكشف الموجود بفارق زمن الرد.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  late AuthService auth;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    auth = AuthService(db);
+    await auth.createAdmin(username: 'admin', password: 'Test@12345');
+    await auth.logout();
+    AuthService.dummyVerifications = 0;
+  });
+  tearDown(() => db.close());
+
+  test('اسم غير موجود يشغّل الاشتقاق الوهمي ويفشل بالرسالة نفسها', () async {
+    final unknown = await auth.login('ghost', 'Whatever@123');
+    expect(AuthService.dummyVerifications, 1);
+    expect(unknown.status, AuthStatus.badCredentials);
+
+    final wrong = await auth.login('admin', 'Wrong@12345');
+    expect(AuthService.dummyVerifications, 1, reason: 'الحساب الموجود يمرّ بالاشتقاق الحقيقي لا الوهمي');
+    expect(wrong.status, AuthStatus.badCredentials);
+    // الرسالة نفسها بصيغتها (عدا العدّاد): لا فرق يكشف وجود الاسم.
+    expect(unknown.message.replaceAll(RegExp(r'\d'), ''), wrong.message.replaceAll(RegExp(r'\d'), ''));
+  });
+
+  test('الدخول الصحيح لا يمرّ بالمسار الوهمي', () async {
+    final ok = await auth.login('admin', 'Test@12345');
+    expect(ok.isOk, isTrue);
+    expect(AuthService.dummyVerifications, 0);
+  });
+  _roundsGroup();
+}
+
+/// دورات الاشتقاق الوهمي تُحاكي أسرعَ حسابٍ في القاعدة لا المعيارَ الحالي.
+///
+/// حسابٌ قديم (٤٥ ألف دورة) يردّ أسرع بكثير من ٣١٠ ألفًا. فلو ثُبّت المسار
+/// الوهميُّ على المعيار لصار بطءُ الردّ قرينةً على أن الاسم **غير موجود** —
+/// وهو تسريبُ الوجود نفسه مقلوبًا.
+void _roundsGroup() {
+  group('دورات المسار الوهمي', () {
+    test('قاعدةٌ فيها حسابٌ قديم ⇒ الوهميُّ بدوراته هو', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      await db.into(db.users).insert(UsersCompanion.insert(
+            id: 'u1',
+            username: 'legacy',
+            saltHex: Value('aa' * 16),
+            hashHex: Value('bb' * 32),
+            iterations: const Value(Pbkdf2.legacyIterations),
+          ));
+
+      final sw = Stopwatch()..start();
+      await AuthService(db).login('لا-وجود-له', 'كلمة-مرور-طويلة');
+      final unknown = sw.elapsedMilliseconds;
+
+      sw.reset();
+      await AuthService(db).login('legacy', 'كلمة-مرور-خاطئة');
+      final wrong = sw.elapsedMilliseconds;
+
+      // النسبة لا الفرق المطلق: الآلة تتفاوت. قبل الإصلاح كانت ≈٧×.
+      expect(unknown, lessThan(wrong * 4 + 400),
+          reason: 'الاسم المجهول ($unknown م.ث) أبطأ بكثير من الخاطئ ($wrong م.ث) — يُكشف بالتوقيت');
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('قاعدةٌ فارغة تعود إلى المعيار الحالي', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      final before = AuthService.dummyVerifications;
+      await AuthService(db).login('أحد', 'كلمة-مرور-طويلة');
+      expect(AuthService.dummyVerifications, before + 1);
+    }, timeout: const Timeout(Duration(minutes: 2)));
+  });
+}
+// ==================== END FILE: test/auth_user_enumeration_test.dart ====================
+
+// ==================== FILE: test/user_rules_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/sys_notice.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/data/permission_impact.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// قواعد المالك والمدير في إدارة الحسابات + تنبيه الانتقال + تقرير الأثر.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  late UsersRepo repo;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    repo = UsersRepo(db);
+    // مالك + مدير + مستخدم، بإنشاءٍ داخلي موثوق (بلا actorRole).
+    await repo.createUser(username: 'boss', password: 'Test@12345', name: 'b', isAdmin: true);
+    await repo.createUser(username: 'adm', password: 'Test@12345', name: 'a', isAdmin: true);
+    await repo.createUser(username: 'clerk', password: 'Test@12345', name: 'c');
+    await (db.update(db.users)..where((t) => t.username.equals('boss')))
+        .write(const UsersCompanion(role: Value(UserRole.owner)));
+  });
+
+  tearDown(() => db.close());
+
+  Future<User> byName(String n) => (db.select(db.users)..where((t) => t.username.equals(n))).getSingle();
+
+  group('المدير (admin)', () {
+    const as = UserRole.admin;
+
+    test('ينشئ «مستخدمًا» بقالبٍ جاهز', () async {
+      final id = await repo.createUser(
+          username: 'new1', password: 'Test@12345', name: 'n', roleIds: ['data_entry'], actorRole: as);
+      final u = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+      expect(u.role, UserRole.user);
+      expect(UsersRepo.rolesOf(u), ['data_entry']);
+      expect(u.permissions, contains('stocktake'));
+    });
+
+    test('لا يمنح دور مدير ولا يخصّص صلاحيات ولا نطاقًا ولا يستعمل قالبًا مجهولًا', () async {
+      await expectLater(
+          repo.createUser(username: 'x1', password: 'Test@12345', name: 'x', isAdmin: true, actorRole: as),
+          throwsArgumentError);
+      await expectLater(
+          repo.createUser(
+              username: 'x2',
+              password: 'Test@12345',
+              name: 'x',
+              permissions: {
+                'items': {'view': true}
+              },
+              actorRole: as),
+          throwsArgumentError);
+      await expectLater(
+          repo.createUser(username: 'x3', password: 'Test@12345', name: 'x', warehouseScope: ['w'], actorRole: as),
+          throwsArgumentError);
+      await expectLater(
+          repo.createUser(username: 'x4', password: 'Test@12345', name: 'x', roleIds: ['nope'], actorRole: as),
+          throwsArgumentError);
+    });
+
+    test('يعدّل اسم مستخدمٍ عادي ويفعّله، ولا يعطّله ولا يعدّل صلاحياته أو دوره أو نطاقه', () async {
+      final clerk = await byName('clerk');
+      await repo.updateUser(id: clerk.id, name: 'جديد', actorRole: as);
+      await repo.updateUser(id: clerk.id, active: true, actorRole: as);
+      expect((await byName('clerk')).name, 'جديد');
+      await expectLater(repo.updateUser(id: clerk.id, active: false, actorRole: as), throwsArgumentError);
+      await expectLater(
+          repo.updateUser(
+              id: clerk.id,
+              permissions: {
+                'items': {'view': true}
+              },
+              actorRole: as),
+          throwsArgumentError);
+      await expectLater(repo.updateUser(id: clerk.id, isAdmin: true, actorRole: as), throwsArgumentError);
+      await expectLater(repo.updateUser(id: clerk.id, allWarehouses: true, actorRole: as), throwsArgumentError);
+      await expectLater(repo.updateUser(id: clerk.id, warehouseScope: ['w'], actorRole: as), throwsArgumentError);
+    });
+
+    test('لا يمسّ حساب مديرٍ أو مالك', () async {
+      for (final name in ['adm', 'boss']) {
+        final t = await byName(name);
+        await expectLater(repo.updateUser(id: t.id, name: 'x', actorRole: as), throwsArgumentError, reason: name);
+      }
+    });
+
+    test('لا يحذف أحدًا', () async {
+      final clerk = await byName('clerk');
+      await expectLater(repo.deleteUser(clerk.id, actorRole: as), throwsArgumentError);
+      expect((await db.select(db.users).get()).length, 3);
+    });
+  });
+
+  group('المالك (owner)', () {
+    const as = UserRole.owner;
+
+    test('يمنح دور المدير ويخصّص الصلاحيات والنطاق ويعطّل', () async {
+      await repo.createUser(username: 'adm3', password: 'Test@12345', name: 'x', isAdmin: true, actorRole: as);
+      final clerk = await byName('clerk');
+      await repo.updateUser(
+          id: clerk.id,
+          permissions: {
+            'items': {'view': true}
+          },
+          actorRole: as);
+      await repo.updateUser(id: clerk.id, allWarehouses: true, actorRole: as);
+      await repo.updateUser(id: clerk.id, active: false, actorRole: as);
+      expect((await byName('clerk')).active, isFalse);
+      expect((await byName('adm3')).role, UserRole.admin);
+    });
+
+    test('يحذف مستخدمًا عاديًا، ولا يحذف نفسه', () async {
+      final clerk = await byName('clerk');
+      expect(await repo.deleteUser(clerk.id, actorRole: as), isTrue);
+      expect(await repo.deleteUser((await byName('boss')).id, actorRole: as), isFalse);
+    });
+  });
+
+  test('مستخدم عادي لا يدير حسابات إطلاقًا', () async {
+    final clerk = await byName('clerk');
+    await expectLater(repo.updateUser(id: clerk.id, name: 'x', actorRole: UserRole.user), throwsArgumentError);
+    await expectLater(
+        repo.createUser(username: 'z', password: 'Test@12345', name: 'z', actorRole: UserRole.user),
+        throwsArgumentError);
+  });
+
+  test('الاستدعاء الداخلي الموثوق (بلا actorRole) لا يخضع للقواعد', () async {
+    final clerk = await byName('clerk');
+    await repo.updateUser(
+        id: clerk.id,
+        permissions: {
+          'items': {'view': true}
+        },
+        isAdmin: true);
+    expect((await byName('clerk')).role, UserRole.admin);
+  });
+
+  group('تنبيه الانتقال', () {
+    test('يظهر مرةً واحدة لكل مدير غير مالك، ولا يظهر للمالك ولا للمستخدم', () async {
+      final notice = SysTransitionNotice(db);
+      final adm = await byName('adm');
+      expect(await notice.shouldShow(adm), isTrue);
+      await notice.markSeen(adm);
+      expect(await notice.shouldShow(adm), isFalse);
+      expect(await notice.shouldShow(await byName('boss')), isFalse);
+      expect(await notice.shouldShow(await byName('clerk')), isFalse);
+    });
+
+    test('مديرٌ آخر يراه رغم أن الأول رآه، ويبقى «مرئيًا» بعد إعادة بناء الخدمة', () async {
+      await repo.createUser(username: 'adm2', password: 'Test@12345', name: 'a2', isAdmin: true);
+      await SysTransitionNotice(db).markSeen(await byName('adm'));
+      expect(await SysTransitionNotice(db).shouldShow(await byName('adm')), isFalse);
+      expect(await SysTransitionNotice(db).shouldShow(await byName('adm2')), isTrue);
+    });
+
+    test('الرسالة نصّها المتّفق عليه', () {
+      expect(SysTransitionNotice.message, 'النسخ الاحتياطي والتفعيل والمزامنة انتقلت للمالك. تواصل معه.');
+    });
+  });
+
+  group('تقرير الأثر', () {
+    test('يصنّف المستخدمين بلا تعديل أي حساب', () async {
+      final a = await byName('clerk');
+      await (db.update(db.users)..where((t) => t.id.equals(a.id))).write(const UsersCompanion(
+        permissions: Value(
+            '{"settings":{"edit":true},"usersAccess":{"view":true},"suppliers":{"create":true},"stores":{"create":true,"edit":true},"items":{"create":true}}'),
+      ));
+      final report = PermissionImpact.build(await db.select(db.users).get());
+      List<String> names(String id) => [for (final u in report.firstWhere((i) => i.id == id).users) u.username];
+      expect(names('admins'), ['adm']);
+      expect(names('settingsEditors'), ['clerk']);
+      expect(names('usersAccess'), ['clerk']);
+      expect(names('suppliersCreateOnly'), ['clerk']);
+      expect(names('storesCreateOnly'), isEmpty); // لديه edit أيضًا
+      expect(names('importInherit'), ['clerk']);
+      // قراءةٌ فقط.
+      expect((await byName('clerk')).role, UserRole.user);
+    });
+
+    test('import صريح يُخرج المستخدم من «يرث»', () async {
+      final a = await byName('clerk');
+      await (db.update(db.users)..where((t) => t.id.equals(a.id)))
+          .write(const UsersCompanion(permissions: Value('{"items":{"create":true,"import":false}}')));
+      final r = PermissionImpact.build(await db.select(db.users).get());
+      expect(r.firstWhere((i) => i.id == 'importInherit').users, isEmpty);
+    });
+  });
+}
+// ==================== END FILE: test/user_rules_test.dart ====================
+
+// ==================== FILE: test/users_roles_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/domain/access_control.dart';
+
+void main() {
+  group('تجميع صلاحيات الأدوار', () {
+    test('مستخدم بدورَي مدخل بيانات وأمين مخزن يجمع صلاحيات الاثنين', () {
+      final perms = AccessControl.merge([
+        AccessControl.roles['data_entry']!.permissions,
+        AccessControl.roles['storekeeper']!.permissions,
+      ]);
+      expect(perms['receive']?['create'], isTrue); // من مدخل البيانات
+      expect(perms['receive']?['approve'], isTrue); // من أمين المخزن
+      expect(perms['balances']?['view'], isTrue);
+    });
+
+    test('المطّلع لا يملك أي صلاحية إدخال أو تعديل', () {
+      final viewer = AccessControl.roles['viewer']!.permissions;
+      for (final page in viewer.keys) {
+        expect(viewer[page]?['create'] ?? false, isFalse, reason: page);
+        expect(viewer[page]?['edit'] ?? false, isFalse, reason: page);
+        expect(viewer[page]?['delete'] ?? false, isFalse, reason: page);
+      }
+    });
+
+    test('إدارة المستخدمين ليست ضمن أي دور جاهز — لمدير النظام وحده', () {
+      for (final role in AccessControl.roles.values) {
+        expect(role.permissions['usersAccess']?['edit'] ?? false, isFalse,
+            reason: role.id);
+      }
+      expect(
+        AccessControl.can(
+          isAdmin: false,
+          permissions: AccessControl.roles['office_manager']!.permissions,
+          page: 'usersAccess',
+          action: PermAction.edit,
+        ),
+        isFalse,
+      );
+      expect(
+        AccessControl.can(
+          isAdmin: true,
+          permissions: const {},
+          page: 'usersAccess',
+          action: PermAction.edit,
+        ),
+        isTrue,
+      );
+    });
+
+    test('نطاق المستودعات يمنع أمين مخزن من مستودع آخر', () {
+      expect(
+        AccessControl.canUseWarehouse(
+          isAdmin: false,
+          scope: const ['مخزن المعسكر'],
+          warehouse: 'المخزن الرئيسي',
+        ),
+        isFalse,
+      );
+      expect(
+        AccessControl.canUseWarehouse(
+          isAdmin: false,
+          scope: const ['مخزن المعسكر'],
+          warehouse: 'مخزن المعسكر',
+        ),
+        isTrue,
+      );
+    });
+  });
+}
+// ==================== END FILE: test/users_roles_test.dart ====================
+
+// ==================== FILE: test/role_templates_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/domain/perm_catalog.dart';
+
+PermissionMap _of(String id) => AccessControl.roles[id]!.permissions;
+
+bool _has(PermissionMap p, String page, String action) => p[page]?[action] == true;
+
+/// الصفحات التي يمنح القالب عليها أي إجراء فعلًا.
+Set<String> _pages(PermissionMap p) =>
+    {for (final e in p.entries) if (e.value.values.any((v) => v)) e.key};
+
+void main() {
+  group('أمين المحروقات (fuel_keeper)', () {
+    final p = _of('fuel_keeper');
+
+    test('كل صفحاته في قسم المحروقات — ولا شيء من الإمداد أو الإدارة', () {
+      for (final page in _pages(p)) {
+        expect(PermCatalog.byKey[page]?.section, PermSection.fuel, reason: page);
+      }
+    });
+
+    test('يغطي كل صفحات المحروقات بالعرض على الأقل', () {
+      for (final e in PermCatalog.entries.where((e) => e.section == PermSection.fuel)) {
+        expect(_has(p, e.key, PermAction.view), isTrue, reason: e.key);
+      }
+    });
+
+    test('يضع التفريدة ويصرف ويطبع ويعتمد الجرد، ويعدّل إعدادات القسم', () {
+      expect(_has(p, 'fuelMoves', PermAction.create), isTrue);
+      expect(_has(p, 'fuelMoves', PermAction.print), isTrue);
+      expect(_has(p, 'fuelAllocations', PermAction.edit), isTrue);
+      expect(_has(p, 'fuelStocktake', PermAction.approve), isTrue);
+      expect(_has(p, 'fuelSettings', PermAction.edit), isTrue);
+      expect(_has(p, 'fuelReports', PermAction.print), isTrue);
+    });
+
+    test('لا يملك صفحة إمدادٍ ولا إدارة', () {
+      for (final page in ['items', 'receive', 'issue', 'reports', 'linkages', 'settings', 'usersAccess']) {
+        expect(p.containsKey(page), isFalse, reason: page);
+      }
+    });
+  });
+
+  group('المالية (finance)', () {
+    final p = _of('finance');
+
+    test('الارتباطات والقوة البشرية وحدهما', () {
+      expect(_pages(p), {'linkages', 'personnel'});
+    });
+
+    test('كامل دورة المالية: إضافة وتعديل واعتماد وطباعة وتصدير واستيراد', () {
+      for (final a in [
+        PermAction.view, PermAction.create, PermAction.edit, PermAction.delete,
+        PermAction.approve, PermAction.print, PermAction.export, PermAction.import,
+      ]) {
+        expect(_has(p, 'linkages', a), isTrue, reason: 'linkages.$a');
+      }
+      for (final a in [PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export]) {
+        expect(_has(p, 'personnel', a), isTrue, reason: 'personnel.$a');
+      }
+    });
+
+    test('كل إجراءاته معروفة في الكتالوج (يراها المالك ويسحبها من الشاشة)', () {
+      p.forEach((page, actions) {
+        for (final a in actions.keys) {
+          expect(PermCatalog.byKey[page]!.actions, contains(a), reason: '$page.$a');
+        }
+      });
+    });
+  });
+
+  group('مدخل البيانات (data_entry) — إضافة فقط', () {
+    final p = _of('data_entry');
+
+    test('لا حذف ولا اعتماد ولا اعتماد على أي صفحة', () {
+      p.forEach((page, actions) {
+        for (final a in [PermAction.delete, PermAction.approve, PermAction.import]) {
+          expect(actions[a] == true, isFalse, reason: '$page.$a');
+        }
+      });
+    });
+
+    test('بلا «تعديل» على التفريدة وسجل التشغيل وخطط الوجبات، وله «إضافة»', () {
+      for (final page in ['feeding', 'kitchenLog', 'mealPlans']) {
+        expect(_has(p, page, PermAction.create), isTrue, reason: '$page.create');
+        expect(_has(p, page, PermAction.edit), isFalse, reason: '$page.edit');
+      }
+    });
+
+    test('لا «تعديل» على أي صفحة — والجرد يُعدّ بـ«إضافة»', () {
+      final withEdit = {for (final e in p.entries) if (e.value['edit'] == true) e.key};
+      expect(withEdit, isEmpty);
+      expect(_has(p, 'stocktake', PermAction.create), isTrue);
+    });
+
+    test('ما زال يضيف السندات', () {
+      for (final page in AccessControl.opsPages) {
+        expect(_has(p, page, PermAction.create), isTrue, reason: page);
+      }
+    });
+  });
+
+  group('أمين المخزن (storekeeper) — موسَّع لا مقلَّص', () {
+    final p = _of('storekeeper');
+
+    test('احتفظ بكل ما كان له', () {
+      for (final page in AccessControl.opsPages) {
+        for (final a in [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]) {
+          expect(_has(p, page, a), isTrue, reason: '$page.$a');
+        }
+      }
+      expect(_has(p, 'opening', PermAction.create), isTrue);
+      expect(_has(p, 'stocktake', PermAction.print), isTrue);
+      expect(_has(p, 'documents', PermAction.edit), isTrue);
+      expect(_has(p, 'balances', PermAction.export), isTrue);
+      expect(_has(p, 'reports', PermAction.print), isTrue);
+      // (2026-10-26) إدارة المحروقات خرجت من القالب (لقوالب المحروقات) — يحرسها
+      // «بلا محروقات» أدناه. اعتماد الطلبيات باقٍ ضمن العمليات، وفصل المهام
+      // يمنع اعتماد ما رفعه بنفسه.
+      expect(_has(p, 'rationOrders', PermAction.approve), isTrue);
+      for (final page in AccessControl.basicPages) {
+        expect(_has(p, page, PermAction.view), isTrue, reason: page);
+      }
+    });
+
+    test('الجديد: إدارة الكتالوج + تصدير التقارير', () {
+      expect(_has(p, 'items', PermAction.create), isTrue);
+      expect(_has(p, 'items', PermAction.edit), isTrue);
+      expect(_has(p, 'items', PermAction.import), isTrue);
+      expect(_has(p, 'items', PermAction.export), isTrue);
+      expect(_has(p, 'suppliers', PermAction.create), isTrue);
+      expect(_has(p, 'units', PermAction.print), isTrue);
+      expect(_has(p, 'assets', PermAction.edit), isTrue);
+      expect(_has(p, 'reports', PermAction.export), isTrue);
+    });
+
+    test('بلا محروقات (ليست لأمين مخزن الإمداد)', () {
+      for (final page in AccessControl.fuelPages) {
+        expect(p.containsKey(page), isFalse, reason: page);
+      }
+    });
+
+    test('الكتالوج بلا حذف، والمستودعات نفسها للعرض فقط', () {
+      for (final page in ['items', 'suppliers', 'units', 'kitchens', 'assets']) {
+        expect(_has(p, page, PermAction.delete), isFalse, reason: page);
+      }
+      expect(_has(p, 'stores', PermAction.create), isFalse);
+      expect(_has(p, 'stores', PermAction.view), isTrue);
+    });
+  });
+
+  group('القوالب عمومًا', () {
+    test('كل قالبٍ جديد/معدَّل يمنح مفاتيح معروفة في الكتالوج', () {
+      for (final id in ['fuel_keeper', 'finance', 'data_entry', 'storekeeper']) {
+        for (final page in _of(id).keys) {
+          expect(PermCatalog.byKey.containsKey(page), isTrue, reason: '$id: $page');
+        }
+      }
+    });
+
+    test('تطبيق القالب لقطةٌ عند الإنشاء: لا يتغيّر مستخدمٌ قائم بتغيّر القالب', () {
+      // permissionsForRoles تُحسب وتُخزَّن في سجل المستخدم وقت الإنشاء ولا تُعاد
+      // قراءتها من القوالب لاحقًا؛ فتعديل القوالب لا يسحب شيئًا من أحد.
+      final a = UsersRepo.permissionsForRoles(['data_entry']);
+      final b = UsersRepo.permissionsForRoles(['data_entry']);
+      expect(a, b);
+      expect(identical(a, _of('data_entry')), isFalse);
+    });
+
+    test('جمع قالبين اتحاد صلاحياتهما', () {
+      final merged = UsersRepo.permissionsForRoles(['fuel_keeper', 'finance']);
+      expect(_has(merged, 'fuelMoves', PermAction.create), isTrue);
+      expect(_has(merged, 'linkages', PermAction.import), isTrue);
+    });
+  });
+}
+// ==================== END FILE: test/role_templates_test.dart ====================
+
+// ==================== FILE: test/position_roles_test.dart ====================
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/domain/perm_catalog.dart';
+
+/// قوالب المناصب (طلب المالك 2026-10-26) ونطاق خزّانات المحروقات.
+void main() {
+  PermissionMap of(String id) => AccessControl.roles[id]!.permissions;
+  bool has(PermissionMap p, String page, String action) => p[page]?[action] == true;
+  Set<String> pages(PermissionMap p) => {for (final e in p.entries) if (e.value.values.any((v) => v)) e.key};
+
+  group('قوالب المناصب', () {
+    test('كلها في قائمة القوالب التي تعرضها شاشة المستخدمين', () {
+      expect(AccessControl.positions.length, 9);
+      for (final id in AccessControl.positions.keys) {
+        expect(AccessControl.roles.containsKey(id), isTrue, reason: id);
+      }
+    });
+
+    test('كل صفحةٍ وإجراءٍ في كل قالب معروفٌ في الكتالوج (يُرى ويُسحب من المصفوفة)', () {
+      AccessControl.roles.forEach((id, r) {
+        r.permissions.forEach((page, actions) {
+          final entry = PermCatalog.byKey[page];
+          expect(entry, isNotNull, reason: '$id: $page');
+          for (final a in actions.keys) {
+            expect(entry!.actions, contains(a), reason: '$id: $page.$a');
+          }
+        });
+      });
+    });
+
+    test('لا قالب يمنح الإدارة ولا التوقيع ولا السرية ولا sys', () {
+      AccessControl.positions.forEach((id, r) {
+        for (final page in ['settings', 'usersAccess', 'esign', 'cables.view.secret', 'cables.view.topsecret']) {
+          expect(r.permissions.containsKey(page), isFalse, reason: '$id: $page');
+        }
+        expect(r.permissions.keys.where((k) => k.startsWith('sys.')), isEmpty, reason: id);
+      });
+    });
+
+    test('لا حذف إلا في المحروقات لمسؤول الفرقة', () {
+      AccessControl.positions.forEach((id, r) {
+        r.permissions.forEach((page, actions) {
+          if (actions[PermAction.delete] != true) return;
+          expect(id, 'fuel_division_officer', reason: '$id: $page');
+          expect(PermCatalog.byKey[page]!.section, PermSection.fuel);
+        });
+      });
+    });
+
+    test('رئيس الشعبة يعتمد ولا يُدخل سندًا', () {
+      final p = of('supply_head');
+      for (final page in [...AccessControl.opsPages, 'opening', 'destruction', 'stocktake']) {
+        expect(has(p, page, PermAction.create), isFalse, reason: page);
+        expect(has(p, page, PermAction.edit), isFalse, reason: page);
+      }
+      for (final page in ['rationOrders', 'pendingOrders', 'stocktake', 'destruction', 'opening', 'campSettlement', 'mealPlans']) {
+        expect(has(p, page, PermAction.approve), isTrue, reason: page);
+      }
+      expect(has(p, 'fuelReports', PermAction.view), isTrue);
+    });
+
+    test('ركن إمداد الفرقة يخطط ويعتمد الخطط والطلبيات والتحويل', () {
+      final p = of('supply_deputy');
+      expect(has(p, 'ratios', PermAction.edit), isTrue);
+      expect(has(p, 'mealPlans', PermAction.approve), isTrue);
+      expect(has(p, 'rationOrders', PermAction.approve), isTrue);
+      expect(has(p, 'transfer', PermAction.approve), isTrue);
+      expect(has(p, 'campSettlement', PermAction.approve), isTrue);
+      expect(has(p, 'receive', PermAction.create), isFalse);
+    });
+
+    test('ركن إمداد المعسكر يصرف من مخزنه ولا ينشّط الخطة ولا يعدّل المقررات', () {
+      final p = of('camp_supply_officer');
+      expect(has(p, 'issue', PermAction.approve), isTrue);
+      expect(has(p, 'feeding', PermAction.edit), isTrue);
+      expect(has(p, 'rationOrders', PermAction.create), isTrue);
+      expect(has(p, 'rationOrders', PermAction.approve), isFalse);
+      expect(has(p, 'mealPlans', PermAction.approve), isFalse);
+      expect(has(p, 'ratios', PermAction.edit), isFalse);
+      expect(has(p, 'receive', PermAction.create), isFalse);
+    });
+
+    test('قالبا المحروقات في قسم المحروقات وحده', () {
+      for (final id in ['fuel_division_officer', 'fuel_camp_keeper']) {
+        for (final page in pages(of(id))) {
+          expect(PermCatalog.byKey[page]!.section, PermSection.fuel, reason: '$id: $page');
+        }
+      }
+    });
+
+    test('أمين محروقات المعسكر يصرف ويعدّ ولا يعتمد ولا يعدّل التفريدة', () {
+      final p = of('fuel_camp_keeper');
+      expect(has(p, 'fuelMoves', PermAction.create), isTrue);
+      expect(has(p, 'fuelStocktake', PermAction.edit), isTrue);
+      expect(has(p, 'fuelStocktake', PermAction.approve), isFalse);
+      expect(has(p, 'fuelAllocations', PermAction.edit), isFalse);
+      expect(has(p, 'fuelSettings', PermAction.edit), isFalse);
+      expect(has(of('fuel_division_officer'), 'fuelStocktake', PermAction.approve), isTrue);
+    });
+
+    test('أمينا المخازن بلا محروقات، والفرعي بلا كتالوج ولا افتتاحي', () {
+      for (final id in ['main_storekeeper', 'sub_storekeeper']) {
+        for (final page in pages(of(id))) {
+          expect(PermCatalog.byKey[page]!.section, isNot(PermSection.fuel), reason: '$id: $page');
+        }
+        expect(has(of(id), 'destruction', PermAction.approve), isFalse, reason: id);
+        expect(has(of(id), 'rationOrders', PermAction.approve), isFalse, reason: id);
+      }
+      final main = of('main_storekeeper');
+      expect(has(main, 'receive', PermAction.approve), isTrue);
+      expect(has(main, 'opening', PermAction.create), isTrue);
+      final sub = of('sub_storekeeper');
+      expect(has(sub, 'items', PermAction.create), isFalse);
+      expect(has(sub, 'opening', PermAction.view), isFalse);
+      expect(has(sub, 'transfer', PermAction.create), isTrue, reason: 'به يُستلم التحويل الوارد ويُرجع الفائض');
+      expect(has(sub, 'issue', PermAction.approve), isTrue);
+    });
+
+    test('مديرا المكتب: برقيات وأرشيف وقوة بشرية، بلا سندات ولا اعتماد', () {
+      for (final id in ['supply_office_manager', 'branch_office_manager']) {
+        final p = of(id);
+        expect(has(p, 'cables', PermAction.create), isTrue, reason: id);
+        expect(has(p, 'archive', PermAction.create), isTrue, reason: id);
+        expect(has(p, 'personnel', PermAction.edit), isTrue, reason: id);
+        p.forEach((page, actions) {
+          expect(actions[PermAction.approve] == true, isFalse, reason: '$id: $page');
+          if (AccessControl.opsPages.contains(page)) {
+            expect(actions[PermAction.create] == true, isFalse, reason: '$id: $page');
+          }
+        });
+      }
+    });
+  });
+
+  group('نطاق المعسكرات (التفريدة)', () {
+    const whs = [
+      (name: 'المخزن الرئيسي', feedsAllCamps: true, campIds: <String>[]),
+      (name: 'مخزن معسكر أ', feedsAllCamps: false, campIds: ['camp-a']),
+      (name: 'مخزن غير مربوط', feedsAllCamps: true, campIds: <String>[]),
+    ];
+
+    test('مخزن معسكرٍ في النطاق يحصر التفريدة بمعسكره', () {
+      expect(AccessControl.campScope(isAdmin: false, scope: const ['مخزن معسكر أ'], warehouses: whs), {'camp-a'});
+    });
+
+    test('الرئيسي أو مخزنٌ لا يُشتقّ منه معسكر أو بلا نطاق: لا قيد (كما كان)', () {
+      expect(AccessControl.campScope(isAdmin: false, scope: const ['المخزن الرئيسي', 'مخزن معسكر أ'], warehouses: whs),
+          isNull);
+      expect(AccessControl.campScope(isAdmin: false, scope: const ['مخزن غير مربوط'], warehouses: whs), isNull);
+      expect(AccessControl.campScope(isAdmin: false, scope: null, warehouses: whs), isNull);
+      expect(AccessControl.campScope(isAdmin: true, scope: const ['مخزن معسكر أ'], warehouses: whs), isNull);
+    });
+  });
+
+  group('نطاق خزّانات المحروقات', () {
+    const tanks = ['خزان الفرقة', 'خزان المعسكر أ'];
+
+    test('نطاقٌ لا يذكر خزّانًا لا يقيّد المحروقات (توافقٌ مع ما قبل)', () {
+      expect(
+        AccessControl.canUseFuelWarehouse(
+            isAdmin: false, scope: const ['المخزن الرئيسي'], fuelWarehouses: tanks, warehouse: 'خزان الفرقة'),
+        isTrue,
+      );
+    });
+
+    test('نطاقٌ يذكر خزّانًا يحصره فيه', () {
+      const scope = ['مخزن المعسكر أ', 'خزان المعسكر أ'];
+      expect(
+        AccessControl.canUseFuelWarehouse(
+            isAdmin: false, scope: scope, fuelWarehouses: tanks, warehouse: 'خزان المعسكر أ'),
+        isTrue,
+      );
+      expect(
+        AccessControl.canUseFuelWarehouse(isAdmin: false, scope: scope, fuelWarehouses: tanks, warehouse: 'خزان الفرقة'),
+        isFalse,
+      );
+    });
+
+    test('المدير وكل المستودعات بلا قيد', () {
+      expect(
+        AccessControl.canUseFuelWarehouse(
+            isAdmin: true, scope: const ['خزان المعسكر أ'], fuelWarehouses: tanks, warehouse: 'خزان الفرقة'),
+        isTrue,
+      );
+      expect(
+        AccessControl.canUseFuelWarehouse(isAdmin: false, scope: null, fuelWarehouses: tanks, warehouse: 'خزان الفرقة'),
+        isTrue,
+      );
+    });
+  });
+}
+// ==================== END FILE: test/position_roles_test.dart ====================
+
+// ==================== FILE: test/perm_catalog_test.dart ====================
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/domain/app_space.dart';
+import 'package:imdad/domain/menu_doors.dart';
+import 'package:imdad/domain/perm_catalog.dart';
+
+void main() {
+  const knownActions = {
+    PermAction.view,
+    PermAction.create,
+    PermAction.edit,
+    PermAction.delete,
+    PermAction.approve,
+    PermAction.print,
+    PermAction.export,
+    PermAction.import,
+  };
+
+  group('كتالوج الصلاحيات', () {
+    test('المفاتيح فريدة ولكل مدخلٍ اسمٌ وإجراءاتٌ معروفة تبدأ بالعرض', () {
+      final seen = <String>{};
+      for (final e in PermCatalog.entries) {
+        expect(seen.add(e.key), isTrue, reason: 'مفتاح مكرر: ${e.key}');
+        expect(e.label.trim(), isNotEmpty, reason: e.key);
+        expect(PermSection.all, contains(e.section), reason: e.key);
+        expect(e.actions, contains(PermAction.view), reason: e.key);
+        expect(e.actions.toSet().length, e.actions.length, reason: 'إجراء مكرر في ${e.key}');
+        for (final a in e.actions) {
+          expect(knownActions, contains(a), reason: '${e.key}: $a');
+        }
+      }
+    });
+
+    test('صفحات كل مساحة عمل لها مدخلات في الكتالوج (أو أبواب)', () {
+      for (final entry in AppSpace.pages.entries) {
+        for (final p in entry.value) {
+          expect(PermCatalog.byKey.containsKey(p) || kMenuDoors.containsKey(p), isTrue,
+              reason: '${entry.key}: $p بلا مدخلٍ في الكتالوج');
+        }
+      }
+    });
+
+    test('كل إجراءٍ تمنحه قوالب الأدوار موجودٌ في مدخله بالكتالوج', () {
+      // وإلا مُنحت صلاحيةٌ لا يستطيع المالك رؤيتها ولا سحبها من الشاشة.
+      // الاستثناء: منحٌ شاملٌ قديم في القوالب لإجراءٍ لا وجود له على تلك
+      // الشاشة (لا تصدير Excel ولا طباعة فيها) — خاملٌ لا أثر له، ولا يُسحب
+      // من أحد. أي منحٍ جديدٌ خارج الكتالوج يفشل هنا.
+      const inertGrants = {
+        'campDashboard.create', 'campDashboard.edit', 'campDashboard.export', 'campDashboard.print',
+        'fuelAllocations.export', 'fuelConsumption.export', 'fuelDashboard.export', 'fuelDashboard.print',
+        'fuelMoves.export', 'fuelReports.export', 'fuelSettings.export', 'fuelSettings.print',
+        'fuelStocktake.export', 'fuelUnits.export', 'fuelUnits.print', 'fuelVehicles.export',
+        'fuelVehicles.print', 'fuelWarehouses.export', 'fuelWarehouses.print', 'rationOrders.export',
+      };
+      final offenders = <String>{};
+      for (final role in AccessControl.roles.values) {
+        role.permissions.forEach((page, actions) {
+          final entry = PermCatalog.byKey[page];
+          expect(entry, isNotNull, reason: '${role.id} يمنح «$page» وهو خارج الكتالوج');
+          actions.forEach((a, on) {
+            if (on && !entry!.actions.contains(a) && !inertGrants.contains('$page.$a')) {
+              offenders.add('${role.id}: $page.$a');
+            }
+          });
+        });
+      }
+      expect(offenders, isEmpty);
+    });
+
+    test('كل مفتاحٍ يُفحص في الكود موجودٌ في الكتالوج (لا صلاحية تُستعمل ولا تُمنح)', () {
+      // نمطٌ على نصوص lib: has/guard/writable/manage/can('key' …) و perm: 'key'.
+      final call = RegExp(r"""(?:\bhas|\bguard|\bwritable|\bmanage|\bcan)\((?:context, )?'(\w+)'""");
+      final perm = RegExp(r"""\bperm:\s*'(\w+)'""");
+      final allowed = {
+        ...PermCatalog.byKey.keys,
+        ...kMenuDoors.keys,
+        ...PermCatalog.aliasLabels.keys,
+      };
+      final missing = <String>{};
+      for (final f in Directory('lib').listSync(recursive: true).whereType<File>()) {
+        if (!f.path.endsWith('.dart') || f.path.endsWith('.g.dart')) continue;
+        final src = f.readAsStringSync();
+        for (final m in [...call.allMatches(src), ...perm.allMatches(src)]) {
+          final key = m.group(1)!;
+          if (!allowed.contains(key)) missing.add('$key  (${f.path})');
+        }
+      }
+      expect(missing, isEmpty, reason: 'مفاتيح مفحوصة بلا مدخلٍ في الكتالوج:\n${missing.join('\n')}');
+    });
+  });
+
+  group('«import» إجراءٌ مستقل', () {
+    test('بلا مفتاح import صريح يرث «إضافة» (لا يفقد أحدٌ ما كان له)', () {
+      expect(AccessControl.allows({'create': true}, PermAction.import), isTrue);
+      expect(AccessControl.allows({'view': true}, PermAction.import), isFalse);
+    });
+
+    test('المفتاح الصريح هو الحكم: false يمنع ولو ملك «إضافة»', () {
+      expect(AccessControl.allows({'create': true, 'import': false}, PermAction.import), isFalse);
+      expect(AccessControl.allows({'import': true}, PermAction.import), isTrue);
+    });
+
+    test('الوراثة خاصةٌ بالاستيراد: بقية الإجراءات كما هي', () {
+      expect(AccessControl.allows({'create': true}, PermAction.export), isFalse);
+      expect(AccessControl.allows({'edit': true}, PermAction.edit), isTrue);
+      expect(AccessControl.allows(null, PermAction.view), isFalse);
+    });
+
+    test('المدير يتجاوز عبر can()', () {
+      expect(AccessControl.can(isAdmin: true, permissions: const {}, page: 'items', action: PermAction.import), isTrue);
+      expect(
+          AccessControl.can(
+              isAdmin: false,
+              permissions: const {'items': {'create': true}},
+              page: 'items',
+              action: PermAction.import),
+          isTrue);
+    });
+  });
+}
+// ==================== END FILE: test/perm_catalog_test.dart ====================
+
+// ==================== FILE: test/pbkdf2_test.dart ====================
+import 'package:crypto/crypto.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/pbkdf2.dart';
+
+/// قيم مرجعية مأخوذة من النظام الحالي (WebCrypto PBKDF2-HMAC-SHA256) حرفيًا،
+/// حتى تعمل حسابات المستخدمين المُرحَّلة في التطبيق الجديد دون إعادة تعيين كلمات المرور.
+void main() {
+  group('PBKDF2 مطابق لنسخة الويب', () {
+    test('كلمة مرور لاتينية · 45,000 دورة', () {
+      final hash = Pbkdf2.deriveHex(
+        'Admin#12345',
+        'a1b2c3d4e5f60718293a4b5c6d7e8f90',
+        iterations: Pbkdf2.legacyIterations,
+      );
+      expect(hash, '126a93206f5d47d8466ae625f0470bc73b835c9569a10b34db5b91356f4ef4e7');
+    });
+
+    test('كلمة مرور عربية (UTF-8) · 45,000 دورة', () {
+      final hash = Pbkdf2.deriveHex(
+        'كلمة المرور',
+        '00112233445566778899aabbccddeeff',
+        iterations: Pbkdf2.legacyIterations,
+      );
+      expect(hash, '76327c2f79784042286b93c84cc70d100eeaa6160d82b01ee3012c861c64bef3');
+    });
+
+    test('عدد دورات مختلف (1,000) للتأكد من صحة التنفيذ لا الثوابت', () {
+      final hash = Pbkdf2.deriveHex(
+        'x',
+        '0f0e0d0c0b0a09080706050403020100',
+        iterations: 1000,
+      );
+      expect(hash, '3830d1e88b6dd2bc0edbcfcb67e633a1975a193b143a748b5a588a759aed8147');
+    });
+
+    test('متجهات RFC 7914 (PBKDF2-HMAC-SHA256)', () {
+      // مستقلة عن نسخة الويب: تحرس التنفيذ السريع للحلقة الداخلية وطول مخرج أطول من كتلة.
+      expect(
+        Pbkdf2.toHex(Pbkdf2.derive('passwd'.codeUnits, 'salt'.codeUnits, iterations: 1, length: 64)),
+        '55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc'
+        '49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783',
+      );
+      expect(
+        Pbkdf2.toHex(Pbkdf2.derive('Password'.codeUnits, 'NaCl'.codeUnits, iterations: 80000, length: 64)),
+        '4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56'
+        'a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d',
+      );
+    });
+
+    test('مفتاح أطول من كتلة SHA-256 (64 بايت) يُختصر أولًا', () {
+      final long = List.filled(100, 0x61); // 'a' × 100
+      expect(
+        Pbkdf2.toHex(Pbkdf2.derive(long, 'salt'.codeUnits, iterations: 2)),
+        Pbkdf2.toHex(Pbkdf2.derive(sha256Of(long), 'salt'.codeUnits, iterations: 2)),
+      );
+    });
+
+    test('الملح الجديد بطول 32 حرفًا hex ويختلف في كل مرة', () {
+      final a = Pbkdf2.newSaltHex();
+      final b = Pbkdf2.newSaltHex();
+      expect(a.length, 32);
+      expect(RegExp(r'^[0-9a-f]{32}$').hasMatch(a), isTrue);
+      expect(a, isNot(b));
+    });
+
+    test('المقارنة بزمن ثابت', () {
+      expect(Pbkdf2.constantTimeEquals('abc', 'abc'), isTrue);
+      expect(Pbkdf2.constantTimeEquals('abc', 'abd'), isFalse);
+      expect(Pbkdf2.constantTimeEquals('abc', 'ab'), isFalse);
+    });
+
+    test('تحويل hex ذهابًا وإيابًا', () {
+      const hex = 'deadbeef0102';
+      expect(Pbkdf2.toHex(Pbkdf2.fromHex(hex)), hex);
+    });
+  });
+}
+
+List<int> sha256Of(List<int> v) => sha256.convert(v).bytes;
+// ==================== END FILE: test/pbkdf2_test.dart ====================
+
+// ==================== FILE: test/password_upgrade_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/pbkdf2.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+
+/// ترقية بصمات كلمات المرور: الحسابات القديمة (45,000 دورة) تبقى تعمل، وتُعاد
+/// تجزئتها بالعدد الحالي عند أول دخول ناجح، والحسابات الجديدة تُحفظ بعددها صراحة.
+void main() {
+  late AppDatabase db;
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+  });
+
+  tearDown(() => db.close());
+
+  Future<User> row(String id) => (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+
+  test('حساب قديم يدخل ثم تُرقّى بصمته ويبقى يدخل بعدها', () async {
+    const salt = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: 'web-1',
+          username: 'keeper',
+          saltHex: const Value(salt),
+          hashHex: Value(Pbkdf2.deriveHex('Admin#12345', salt, iterations: Pbkdf2.legacyIterations)),
+          iterations: const Value(Pbkdf2.legacyIterations),
+        ));
+    final auth = AuthService(db);
+
+    final first = await auth.login('keeper', 'Admin#12345');
+    expect(first.isOk, isTrue);
+    final upgraded = await row('web-1');
+    expect(upgraded.iterations, Pbkdf2.iterations);
+    expect(upgraded.saltHex, isNot(salt), reason: 'ملح جديد مع البصمة الجديدة');
+    expect(upgraded.updatedAt, isNotNull, reason: 'حتى تلتقطه المزامنة');
+
+    await auth.logout();
+    expect((await auth.login('keeper', 'Admin#12345')).isOk, isTrue);
+    expect((await auth.login('keeper', 'wrong-pass')).isOk, isFalse);
+  });
+
+  test('الدخول الفاشل لا يغيّر البصمة', () async {
+    const salt = '00112233445566778899aabbccddeeff';
+    final hash = Pbkdf2.deriveHex('secret-1', salt, iterations: Pbkdf2.legacyIterations);
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: 'web-2',
+          username: 'clerk',
+          saltHex: const Value(salt),
+          hashHex: Value(hash),
+          iterations: const Value(Pbkdf2.legacyIterations),
+        ));
+
+    await AuthService(db).login('clerk', 'nope');
+
+    final r = await row('web-2');
+    expect(r.hashHex, hash);
+    expect(r.iterations, Pbkdf2.legacyIterations);
+  });
+
+  test('المدير الأول والمستخدم الجديد يُحفظان بالعدد الحالي صراحة', () async {
+    final admin = await AuthService(db).createAdmin(username: 'admin', password: 'correct-horse');
+    expect(admin.iterations, Pbkdf2.iterations);
+
+    final id = await UsersRepo(db).createUser(username: 'clerk', password: 'desk-pass-1', name: 'كاتب');
+    expect((await row(id)).iterations, Pbkdf2.iterations);
+  });
+
+  test('إعادة تعيين كلمة مرور حساب مُرحَّل بعدد مختلف تكتب العدد الجديد معها', () async {
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: 'web-3',
+          username: 'storekeeper',
+          saltHex: const Value('00112233445566778899aabbccddeeff'),
+          hashHex: const Value('00'),
+          iterations: const Value(100000),
+        ));
+
+    await UsersRepo(db).resetPassword(id: 'web-3', password: 'new-pass-123', actorId: 'web-3', actorRole: 'user');
+
+    expect((await row('web-3')).iterations, Pbkdf2.iterations);
+    expect((await AuthService(db).login('storekeeper', 'new-pass-123')).isOk, isTrue);
+  });
+}
+// ==================== END FILE: test/password_upgrade_test.dart ====================
+
+// ==================== FILE: test/section_block_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/device_activation.dart';
+import 'package:imdad/core/security/esign.dart';
+import 'package:imdad/core/security/owner_signature.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+import 'package:imdad/data/sync/auto_sync.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:imdad/domain/app_space.dart';
+import 'package:imdad/domain/section_block.dart';
+import 'package:imdad/features/home/home_shell.dart';
+import 'package:imdad/main.dart' show ImdTheme;
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// حجب الأقسام (v25): النموذج، التطبيق fail-closed، المستودع والتوقيع، والقشرة.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('SectionBlock — النموذج', () {
+    test('انتماء الصفحات: المحروقات والإمداد والأقسام الإدارية والمحايدة', () {
+      expect(SectionBlock.sectionOf('fuelMoves'), SectionBlock.fuel);
+      expect(SectionBlock.sectionOf('fuelDashboard'), SectionBlock.fuel);
+      expect(SectionBlock.sectionOf('items'), SectionBlock.supply);
+      expect(SectionBlock.sectionOf('reportMoves'), SectionBlock.supply);
+      expect(SectionBlock.sectionOf('usersAccess'), SectionBlock.adminUsers);
+      expect(SectionBlock.sectionOf('lanSync'), SectionBlock.adminSync, reason: 'قبل تطبيعها إلى sys.sync');
+      expect(SectionBlock.sectionOf('deviceActivation'), SectionBlock.adminDevices);
+      expect(SectionBlock.sectionOf('branding'), SectionBlock.adminSettings);
+      expect(SectionBlock.sectionOf('supplyAudit'), SectionBlock.adminAudit);
+      expect(SectionBlock.sectionOf('auditTrail'), SectionBlock.adminAudit);
+      expect(SectionBlock.sectionOf('dash'), isNull);
+      expect(SectionBlock.sectionOf('settings'), isNull, reason: 'تُرشَّح أقسامها الداخلية لا الشاشة');
+    });
+
+    test('أقسام الإعدادات الداخلية تتبع الحجب كما حدّدتَ', () {
+      expect(SectionBlock.settingsSections['company'], SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['forms'], SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['verify'], SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['backup'], SectionBlock.adminSettings);
+      expect(SectionBlock.settingsSections['users'], SectionBlock.adminUsers);
+      expect(SectionBlock.settingsSections['sync'], SectionBlock.adminSync);
+      expect(SectionBlock.settingsSections['devices'], SectionBlock.adminDevices);
+      expect(SectionBlock.settingsSections.containsKey('general'), isFalse);
+    });
+
+    test('القراءة: فارغ = لا حجب، والتالف يحجب الكل (فشل مغلق)، والمجهول يُهمل', () {
+      expect(SectionBlock.parse(''), isEmpty);
+      expect(SectionBlock.parse('[]'), isEmpty);
+      expect(SectionBlock.parse(null), isEmpty);
+      expect(SectionBlock.parse('["fuel","bogus"]'), {SectionBlock.fuel});
+      expect(SectionBlock.parse('{not json'), SectionBlock.all.toSet(), reason: 'JSON تالف ⇒ كل شيء محجوب');
+      expect(SectionBlock.parse('{"a":1}'), SectionBlock.all.toSet(), reason: 'ليست قائمة ⇒ كل شيء محجوب');
+    });
+
+    test('الترميز حتميّ ومرتّب بلا تكرار (التوقيع يُحسب على نصّه)', () {
+      expect(SectionBlock.encode(['fuel', 'supply', 'fuel']), '["supply","fuel"]');
+      expect(SectionBlock.encode({'fuel', 'supply'}), SectionBlock.encode(['supply', 'fuel']));
+      expect(SectionBlock.encode(['nope']), '[]');
+    });
+
+    test('المالك لا يُحجب عنه شيء حتى لو خُزِّن له حجب', () {
+      for (final page in ['fuelMoves', 'items', 'usersAccess']) {
+        expect(SectionBlock.blocksPage(role: 'owner', blockedJson: '["supply","fuel","admin.users"]', page: page),
+            isFalse);
+      }
+      expect(SectionBlock.blocksSection(role: 'owner', blockedJson: '["fuel"]', section: 'fuel'), isFalse);
+      expect(SectionBlock.blocksPage(role: 'admin', blockedJson: '["fuel"]', page: 'fuelMoves'), isTrue,
+          reason: 'والمدير يُحجب');
+    });
+
+    test('AccessControl.can: المدير المحجوب عن قسمٍ لا يدخله، وغير المحجوب يدخل', () {
+      bool can(String page, {bool owner = false, String? blocked}) => AccessControl.can(
+            isAdmin: true,
+            isOwner: owner,
+            permissions: const {},
+            page: page,
+            sectionBlocked: blocked,
+          );
+      expect(can('fuelMoves'), isTrue);
+      expect(can('fuelMoves', blocked: '["fuel"]'), isFalse);
+      expect(can('items', blocked: '["fuel"]'), isTrue, reason: 'قسم آخر لا يتأثر');
+      expect(can('fuelMoves', owner: true, blocked: '["fuel"]'), isTrue);
+    });
+  });
+
+  group('المستودع والتوقيع', () {
+    late AppDatabase db;
+    late UsersRepo repo;
+    late String ownerPub;
+    late String ownerPriv;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      repo = UsersRepo(db);
+      final pair = ESign.generateKeyPair();
+      ownerPub = pair.publicB64;
+      ownerPriv = pair.privateHex;
+      await db.into(db.users).insert(UsersCompanion.insert(id: 'o1', username: 'boss', role: const Value('owner')));
+      await db.into(db.users).insert(UsersCompanion.insert(id: 'a1', username: 'adm', role: const Value('admin')));
+      await db.into(db.users).insert(UsersCompanion.insert(id: 'u1', username: 'ali'));
+    });
+
+    tearDown(() => db.close());
+
+    DeviceActivation withKey() => DeviceActivation(db, ownerPublicKey: ownerPub);
+    Future<User> user(String id) => (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+    Future<List<AuditLog>> audits(String action) =>
+        (db.select(db.auditLogs)..where((t) => t.action.equals(action))).get();
+
+    test('المالك وحده يحجب: المدير والمستخدم يُرفضان', () async {
+      for (final role in [UserRole.admin, UserRole.user]) {
+        await expectLater(
+          repo.setSectionBlocked(id: 'u1', blocked: {SectionBlock.fuel}, actorRole: role),
+          throwsA(isA<ArgumentError>()),
+          reason: role,
+        );
+      }
+      expect((await user('u1')).sectionBlocked, '[]');
+    });
+
+    test('لا يُحجب عن المالك شيء', () async {
+      await expectLater(
+        repo.setSectionBlocked(id: 'o1', blocked: {SectionBlock.fuel}, actorRole: UserRole.owner),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect((await user('o1')).sectionBlocked, '[]');
+    });
+
+    test('إضافة الحجب بلا توقيع وتُدقَّق بخطورة عالية', () async {
+      final r = await repo.setSectionBlocked(
+        id: 'u1',
+        blocked: {SectionBlock.fuel, SectionBlock.adminUsers},
+        actorRole: UserRole.owner,
+        actorEmail: 'boss@x',
+        activation: withKey(), // حتى مع وجود مفتاح: الإضافة لا تُوقَّع
+      );
+      expect(r.changed, isTrue);
+      expect(r.added, {SectionBlock.fuel, SectionBlock.adminUsers});
+      expect(r.signed, isFalse);
+      expect(r.unsignedUnblock, isFalse);
+
+      final u = await user('u1');
+      expect(u.sectionBlocked, SectionBlock.encode({SectionBlock.fuel, SectionBlock.adminUsers}));
+      expect(u.ownerSig, '');
+
+      final log = await audits('user.section_blocked.changed');
+      expect(log, hasLength(1));
+      expect(log.single.risk, 'high');
+      expect(log.single.actorEmail, 'boss@x');
+      expect(await audits('sys.sign.used'), isEmpty, reason: 'لا مفتاح استُعمل');
+    });
+
+    test('بلا تغيير ⇒ لا كتابة ولا تدقيق', () async {
+      final r = await repo.setSectionBlocked(id: 'u1', blocked: const {}, actorRole: UserRole.owner);
+      expect(r.changed, isFalse);
+      expect(await audits('user.section_blocked.changed'), isEmpty);
+    });
+
+    test('فكّ الحجب مع مفتاح المالك: يُوقَّع ويُتحقَّق منه بالمفتاح العام ويُدقَّق sys.sign.used', () async {
+      await repo.setSectionBlocked(
+          id: 'u1', blocked: {SectionBlock.fuel, SectionBlock.supply}, actorRole: UserRole.owner);
+
+      final act = withKey();
+      expect(await act.importPrivateKey(ownerPriv), isTrue);
+      final r = await repo.setSectionBlocked(
+        id: 'u1',
+        blocked: {SectionBlock.supply}, // فُكّ fuel
+        actorRole: UserRole.owner,
+        actorEmail: 'boss@x',
+        activation: act,
+      );
+      expect(r.removed, {SectionBlock.fuel});
+      expect(r.signed, isTrue);
+      expect(r.unsignedUnblock, isFalse);
+
+      final u = await user('u1');
+      final sig = OwnerSignature.parse(u.ownerSig)[OwnerSignature.sectionsKey]!;
+      bool verify({String? json, String? id, int? at}) => OwnerSignature.verifySections(
+            sigB64: sig,
+            userId: id ?? u.id,
+            blockedJson: json ?? u.sectionBlocked,
+            updatedAtSec: at ?? OwnerSignature.seconds(u.updatedAt!),
+            publicKey: ownerPub,
+          );
+      expect(verify(), isTrue, reason: 'التوقيع صحيح على userId|section_blocked|updatedAt');
+      expect(verify(json: '[]'), isFalse, reason: 'قيمة أخرى');
+      expect(verify(id: 'u2'), isFalse, reason: 'حساب آخر');
+      expect(verify(at: OwnerSignature.seconds(u.updatedAt!) + 1), isFalse, reason: 'وقت آخر');
+      expect(
+        OwnerSignature.verifySections(
+          sigB64: sig,
+          userId: u.id,
+          blockedJson: u.sectionBlocked,
+          updatedAtSec: OwnerSignature.seconds(u.updatedAt!),
+          publicKey: ESign.generateKeyPair().publicB64,
+        ),
+        isFalse,
+        reason: 'مفتاح عام آخر',
+      );
+
+      final used = await audits('sys.sign.used');
+      expect(used, hasLength(1));
+      expect(used.single.risk, 'high');
+    });
+
+    test('فكّ الحجب بلا مفتاح: يُنفَّذ محليًّا بلا توقيع ويُنبَّه بأنه لن ينتشر', () async {
+      await repo.setSectionBlocked(id: 'u1', blocked: {SectionBlock.fuel}, actorRole: UserRole.owner);
+
+      final r = await repo.setSectionBlocked(
+        id: 'u1',
+        blocked: const {},
+        actorRole: UserRole.owner,
+        activation: withKey(), // لا مفتاح خاصًّا مستورَدًا
+      );
+      expect(r.changed, isTrue);
+      expect(r.signed, isFalse);
+      expect(r.unsignedUnblock, isTrue);
+
+      final u = await user('u1');
+      expect(u.sectionBlocked, '[]', reason: 'التغيير المحلي نافذ');
+      expect(OwnerSignature.parse(u.ownerSig), isEmpty);
+      expect(await audits('sys.sign.used'), isEmpty);
+      final log = (await audits('user.section_blocked.changed')).last;
+      expect(log.details, contains('"unsignedUnblock":true'));
+    });
+
+    test('إضافة حجبٍ بعد فكٍّ موقَّع تُسقط توقيع الأقسام القديم وتُبقي توقيع الدور', () async {
+      final act = withKey();
+      await act.importPrivateKey(ownerPriv);
+      await repo.setSectionBlocked(id: 'u1', blocked: {SectionBlock.fuel}, actorRole: UserRole.owner);
+      await repo.setSectionBlocked(id: 'u1', blocked: const {}, actorRole: UserRole.owner, activation: act);
+      // توقيع دورٍ موجود (من الخطوة 3 مستقبلًا) يجب أن يبقى.
+      final signed = await user('u1');
+      await (db.update(db.users)..where((t) => t.id.equals('u1')))
+          .write(UsersCompanion(ownerSig: Value(OwnerSignature.encode({...OwnerSignature.parse(signed.ownerSig), 'r': 'ROLESIG'}))));
+
+      await repo.setSectionBlocked(id: 'u1', blocked: {SectionBlock.supply}, actorRole: UserRole.owner, activation: act);
+      final after = await user('u1');
+      final sigs = OwnerSignature.parse(after.ownerSig);
+      expect(sigs.containsKey(OwnerSignature.sectionsKey), isFalse, reason: 'غطّى محتوىً قديمًا');
+      // توقيع الدور باقٍ — بل مُجدَّدٌ صالحًا: الصفّ الذي حمل `r` كان مميَّزًا،
+      // و`resign` يجدّد توقيعه على حاله الجديد ليقبل الأقرانُ خفضَه.
+      expect(sigs['r'], isNot(anyOf(isNull, 'ROLESIG')));
+      expect(
+        OwnerSignature.verifyRole(
+          sigB64: sigs['r']!,
+          userId: 'u1',
+          role: after.role,
+          updatedAtSec: OwnerSignature.seconds(after.updatedAt!),
+          publicKey: ownerPub,
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('القشرة', () {
+    late AppDatabase db;
+    late AuthService auth;
+    late String ownerId;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      auth = AuthService(db);
+      await auth.createAdmin(username: 'root', password: 'Test@12345');
+      await auth.login('root', 'Test@12345');
+      ownerId = auth.currentUser!.id;
+    });
+
+    tearDown(() => db.close());
+
+    /// يُنشئ مديرًا عاديًّا (غير مالك) ويحجب عنه [blocked] ثم يُدخله.
+    Future<void> loginAdminBlocked(Set<String> blocked, {String space = AppSpace.supply}) async {
+      final id = await UsersRepo(db).createUser(
+        username: 'ops',
+        password: 'Test@12345',
+        name: 'مدير',
+        isAdmin: true,
+        actorRole: UserRole.owner,
+      );
+      await UsersRepo(db).setSectionBlocked(id: id, blocked: blocked, actorRole: UserRole.owner);
+      await auth.logout();
+      await auth.login('ops', 'Test@12345');
+      SharedPreferences.setMockInitialValues({'imdad.space.${auth.currentUser!.id}': space});
+    }
+
+    Widget host() => MultiProvider(
+          providers: [
+            Provider<AppDatabase>.value(value: db),
+            Provider<AuthService>.value(value: auth),
+            ChangeNotifierProvider<AutoSyncService>.value(value: AutoSyncService(db)),
+            ChangeNotifierProvider<ImdTheme>.value(value: ImdTheme(ThemeMode.light)),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            locale: const Locale('ar'),
+            home: Directionality(textDirection: TextDirection.rtl, child: HomeShell(onSignOut: () async {})),
+          ),
+        );
+
+    Future<void> pump(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1600, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host());
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 60));
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      }
+      await tester.pump();
+    }
+
+    /// تبويب مجموعةٍ في رأس الإعدادات (التبويبات بدل القائمة الجانبية، 2026-10-22).
+    Future<void> openGroup(WidgetTester tester, String group) async {
+      await tester.tap(find.text(group).last, warnIfMissed: false);
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 80));
+      }
+    }
+
+    testWidgets('حجب fuel: المدير لا يرى القسم ولو كان محفوظًا، وصفحاته مرفوضة بالتنقّل المباشر', (tester) async {
+      await tester.runAsync(() => loginAdminBlocked({SectionBlock.fuel}, space: AppSpace.fuel));
+      final me = auth.currentUser!;
+      expect(me.role, UserRole.admin);
+      expect(auth.can(me, 'fuelMoves'), isFalse, reason: 'التنقل المباشر/الصلاحية مرفوضان');
+      expect(auth.can(me, 'items'), isTrue, reason: 'الإمداد غير محجوب');
+
+      await pump(tester);
+      expect(tester.takeException(), isNull);
+      // الاختيار المحفوظ (المحروقات) لا يُفتح: يسقط إلى الإمداد.
+      expect(find.text('العمليات المخزنية'), findsWidgets);
+      expect(find.text('حركة المحروقات'), findsNothing);
+      expect(find.text('ادخل'), findsNothing, reason: 'قسمٌ واحد متاح ⇒ لا شاشة اختيار');
+    });
+
+    testWidgets('حجب supply: يبقى المحروقات وحده والإمداد مرفوض', (tester) async {
+      await tester.runAsync(() => loginAdminBlocked({SectionBlock.supply}));
+      expect(auth.can(auth.currentUser!, 'items'), isFalse);
+      expect(auth.can(auth.currentUser!, 'fuelMoves'), isTrue);
+
+      await pump(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.text('حركة المحروقات'), findsWidgets);
+      expect(find.text('العمليات المخزنية'), findsNothing);
+    });
+
+    testWidgets('حجب admin.users: قسم «المستخدمون» يختفي من داخل الإعدادات وبقية الأقسام تبقى', (tester) async {
+      await tester.runAsync(() => loginAdminBlocked({SectionBlock.adminUsers}));
+      await pump(tester);
+
+      // التنقّل البرمجي كما تفعل الشاشات الأخرى (ImdNav) — قسم الإعدادات مطويٌّ في الشريط.
+      Provider.of<ImdNav>(tester.element(find.byType(Scaffold).first), listen: false).go('settings');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 80));
+      }
+      expect(tester.takeException(), isNull);
+      // الأقسام تبويباتٌ تحت تبويب مجموعتها.
+      await openGroup(tester, 'الجهة والهوية');
+      expect(find.text('بيانات الجهة والشعار'), findsWidgets, reason: 'قسمٌ غير محجوب يبقى');
+      await openGroup(tester, 'الأمان والوصول');
+      expect(find.text('التحقق من التوقيع'), findsWidgets, reason: 'قسمٌ غير محجوب في المجموعة نفسها يبقى');
+      expect(find.text('المستخدمون والصلاحيات'), findsNothing, reason: 'admin.users مخفيّ');
+    });
+
+    testWidgets('لا حجب للمالك: يرى كل الأقسام ولو خُزِّن له حجب', (tester) async {
+      // حجبٌ مخزَّن مباشرةً في صف المالك (مزامنةٌ/تلاعب): لا أثر له.
+      await tester.runAsync(() async {
+        await (db.update(db.users)..where((t) => t.id.equals(ownerId)))
+            .write(UsersCompanion(sectionBlocked: Value(SectionBlock.encode(SectionBlock.all))));
+        await auth.logout();
+        await auth.login('root', 'Test@12345');
+      });
+      SharedPreferences.setMockInitialValues({'imdad.space.${auth.currentUser!.id}': AppSpace.supply});
+      expect(auth.currentUser!.role, UserRole.owner);
+      expect(auth.can(auth.currentUser!, 'fuelMoves'), isTrue);
+      expect(auth.can(auth.currentUser!, 'items'), isTrue);
+
+      await pump(tester);
+      expect(tester.takeException(), isNull);
+      expect(find.text('العمليات المخزنية'), findsWidgets);
+
+      // التنقّل البرمجي كما تفعل الشاشات الأخرى (ImdNav) — قسم الإعدادات مطويٌّ في الشريط.
+      Provider.of<ImdNav>(tester.element(find.byType(Scaffold).first), listen: false).go('settings');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 80));
+      }
+      await openGroup(tester, 'الأمان والوصول');
+      expect(find.text('المستخدمون والصلاحيات'), findsWidgets);
+    });
+  });
+}
+// ==================== END FILE: test/section_block_test.dart ====================
+
+// ==================== FILE: test/maker_checker_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/catalog_repo.dart';
+import 'package:imdad/data/repos/destructions_repo.dart';
+import 'package:imdad/data/repos/movements_repo.dart';
+import 'package:imdad/data/repos/stocktake_repo.dart';
+import 'package:imdad/domain/destruction.dart';
+import 'package:imdad/domain/maker_checker.dart';
+
+/// فصل المهام: المُنشئ لا يعتمد ما أنشأه (طلب المالك 2026-10-26).
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('القاعدة', () {
+    test('المُنشئ نفسه يُرفض، وغيره يُقبل، والمدير مستثنى', () {
+      expect(MakerChecker.violation(createdBy: 'a@imdad.local', actor: 'A@imdad.local ', exempt: false, doc: 'س'),
+          isNotNull);
+      expect(MakerChecker.violation(createdBy: 'a@imdad.local', actor: 'b@imdad.local', exempt: false, doc: 'س'),
+          isNull);
+      expect(MakerChecker.violation(createdBy: 'a@imdad.local', actor: 'a@imdad.local', exempt: true, doc: 'س'),
+          isNull);
+    });
+
+    test('سجلٌّ بلا مُنشئٍ معروف لا يُحكم عليه', () {
+      expect(MakerChecker.violation(createdBy: '', actor: 'a@imdad.local', exempt: false, doc: 'س'), isNull);
+    });
+  });
+
+  group('في المستودعات', () {
+    late AppDatabase db;
+    late CatalogRepo catalog;
+    late MovementsRepo moves;
+    const wh = 'المخزن الرئيسي';
+    const committee = [
+      CommitteeMember(name: 'أحمد', rank: 'نقيب', role: 'رئيس اللجنة'),
+      CommitteeMember(name: 'سالم', rank: 'ملازم', role: 'عضو'),
+    ];
+
+    setUp(() async {
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      catalog = CatalogRepo(db);
+      moves = MovementsRepo(db);
+      await catalog.quickAddWarehouse(wh);
+      await catalog.saveItem(id: 'rice', code: 'RICE', name: 'أرز', baseUnit: 'قطعة');
+      final r = await moves.saveReceipt(
+        warehouse: wh,
+        supplier: 'المورد',
+        date: '2026-10-01',
+        invoiceNo: 'INV-1',
+        lines: const [DocLineInput(itemId: 'rice', itemCode: 'RICE', itemName: 'أرز', unitName: 'قطعة', factor: 1, qty: 50)],
+      );
+      expect(r.ok, isTrue, reason: r.error);
+    });
+    tearDown(() => db.close());
+
+    const line = DocLineInput(itemId: 'rice', itemCode: 'RICE', itemName: 'أرز', unitName: 'قطعة', factor: 1, qty: 5);
+
+    test('محضر الإتلاف: لا يُحرَّر ويُعتمد بيدٍ واحدة، ويعتمده آخر', () async {
+      final repo = DestructionsRepo(db);
+      final today = DateTime.now().toIso8601String().substring(0, 10);
+      Future<String> save({String? id, bool approve = false, String actor = 'maker@imdad.local', bool exempt = false}) =>
+          repo.save(
+            id: id,
+            refNo: 'DST-1',
+            date: today,
+            warehouse: wh,
+            lines: const [line],
+            reason: 'انتهاء الصلاحية',
+            committee: committee,
+            approve: approve,
+            actor: actor,
+            exempt: exempt,
+          );
+
+      await expectLater(() => save(approve: true), throwsA(isA<DestructionBlocked>()));
+      final id = await save();
+      await expectLater(() => save(id: id, approve: true), throwsA(isA<DestructionBlocked>()));
+      await save(id: id, approve: true, actor: 'checker@imdad.local');
+      final row = await (db.select(db.destructions)..where((t) => t.id.equals(id))).getSingle();
+      expect(row.status, DestructionStatus.completed);
+      expect(row.createdBy, 'maker@imdad.local');
+      expect(row.approvedBy, 'checker@imdad.local');
+    });
+
+    test('محضر الإتلاف: المدير يحرّر ويعتمد بنفسه', () async {
+      final today = DateTime.now().toIso8601String().substring(0, 10);
+      final id = await DestructionsRepo(db).save(
+        refNo: 'DST-2',
+        date: today,
+        warehouse: wh,
+        lines: const [line],
+        reason: 'عطب',
+        committee: committee,
+        approve: true,
+        actor: 'admin@imdad.local',
+        exempt: true,
+      );
+      final row = await (db.select(db.destructions)..where((t) => t.id.equals(id))).getSingle();
+      expect(row.status, DestructionStatus.completed);
+    });
+
+    test('تسوية الجرد: من فتح الأمر لا يعتمدها', () async {
+      await db.into(db.stocktakes).insert(StocktakesCompanion.insert(
+            id: 'st1',
+            orderNo: const Value('ST-1'),
+            warehouse: const Value(wh),
+            createdBy: const Value('maker@imdad.local'),
+          ));
+      final repo = StocktakeRepo(db);
+      await expectLater(
+          () => repo.approve(sessionId: 'st1', approvedBy: 'maker@imdad.local'), throwsA(isA<ApprovalBlocked>()));
+      await repo.approve(sessionId: 'st1', approvedBy: 'checker@imdad.local');
+      final s = await repo.sessionById('st1');
+      expect(s!.status, StocktakeRepo.closed);
+    });
+  });
+}
+// ==================== END FILE: test/maker_checker_test.dart ====================
+
+// ==================== FILE: test/warehouse_scope_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/error_log.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/warehouse_scope.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+
+/// نطاق المستودعات فشلُه مغلق: التالف ⇒ لا مستودعات، لا «كل المستودعات».
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  late AuthService auth;
+
+  setUp(() {
+    ErrorLogger.reset();
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    auth = AuthService(db);
+  });
+  tearDown(() async {
+    ErrorLogger.reset();
+    await db.close();
+  });
+
+  Future<User> user(String id, String scope, {String role = 'user'}) async {
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: id,
+          username: id,
+          role: Value(role),
+          warehouseScope: Value(scope),
+        ));
+    return (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+  }
+
+  group('قيم صحيحة لا تتأثر', () {
+    test('ALL ⇒ كل المستودعات (null)، بأي حالة أحرف وبفراغات حولها', () async {
+      for (final v in ['ALL', 'all', ' ALL ']) {
+        final u = await user('u${v.hashCode}', v);
+        expect(auth.warehouseScopeOf(u), isNull, reason: v);
+        expect(UsersRepo.scopeOf(u), isNull, reason: v);
+      }
+      expect(ErrorLogger.recent, isEmpty, reason: 'لا خطأ يُسجَّل لقيمة صحيحة');
+    });
+
+    test('قائمة أسماء ⇒ هي نفسها، والقائمة الفارغة المقصودة تبقى فارغة', () async {
+      final u = await user('a', '["المخزن الرئيسي","مخزن ٢"]');
+      expect(auth.warehouseScopeOf(u), ['المخزن الرئيسي', 'مخزن ٢']);
+      expect(UsersRepo.scopeOf(u), ['المخزن الرئيسي', 'مخزن ٢']);
+
+      final none = await user('b', '[]');
+      expect(auth.warehouseScopeOf(none), isEmpty);
+      expect(ErrorLogger.recent, isEmpty);
+    });
+
+    test('المدير كل المستودعات حتى لو تلف نطاقه (الدور هو الحاكم)', () async {
+      final admin = await user('adm', '{bad', role: 'admin');
+      expect(auth.warehouseScopeOf(admin), isNull);
+    });
+  });
+
+  group('JSON تالف ⇒ فشل مغلق', () {
+    const corrupt = ['{bad json', '', '"ALL-ISH"', '{"a":1}', 'null', '[unterminated', '42'];
+
+    test('كل قيمة تالفة تُرجع قائمة فارغة لا null، في المسارين', () async {
+      for (var i = 0; i < corrupt.length; i++) {
+        final u = await user('c$i', corrupt[i]);
+        expect(auth.warehouseScopeOf(u), isNotNull, reason: 'تالف «${corrupt[i]}» فُتح على كل المستودعات');
+        expect(auth.warehouseScopeOf(u), isEmpty, reason: corrupt[i]);
+        expect(UsersRepo.scopeOf(u), isNotNull, reason: corrupt[i]);
+        expect(UsersRepo.scopeOf(u), isEmpty, reason: corrupt[i]);
+      }
+    });
+
+    test('التلف يُسجَّل خطأً حرجًا بمصدره', () async {
+      final persisted = <LoggedError>[];
+      ErrorLogger.sink = (e) async => persisted.add(e);
+
+      auth.warehouseScopeOf(await user('x', '{bad'));
+      UsersRepo.scopeOf(await user('y', '{bad'));
+
+      expect(persisted.map((e) => e.source), containsAll(['auth.warehouseScope', 'users.scopeJson']));
+      expect(persisted.every((e) => e.critical), isTrue);
+    });
+
+    test('نتيجة الفشل تنعكس في وصف النطاق: «بدون مستودعات» لا «كل المستودعات»', () async {
+      final u = await user('z', '{bad');
+      expect(UsersRepo.scopeLabel(u), 'بدون مستودعات');
+    });
+  });
+
+  test('parseWarehouseScope مباشرة', () {
+    expect(parseWarehouseScope('ALL', source: 't'), isNull);
+    expect(parseWarehouseScope('["أ"]', source: 't'), ['أ']);
+    expect(parseWarehouseScope('###', source: 't'), isEmpty);
+  });
+}
+// ==================== END FILE: test/warehouse_scope_test.dart ====================
+
+// ==================== FILE: test/idle_lock_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/idle_lock.dart';
+import 'package:imdad/core/security/pbkdf2.dart';
+import 'package:imdad/core/theme/app_theme.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/settings_repo.dart';
+import 'package:imdad/features/auth/idle_lock_host.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// القفل التلقائي بعد الخمول: المنطق (ساعة مُحاكاة) والغطاء (كلمة المرور).
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  var now = DateTime(2026, 10, 4, 9);
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    now = DateTime(2026, 10, 4, 9);
+  });
+  tearDown(() => db.close());
+
+  IdleLock make() => IdleLock(db, clock: () => now, tick: const Duration(hours: 1));
+
+  group('المنطق', () {
+    test('الافتراضي ١٥ دقيقة، ولا قفل قبل المهلة', () {
+      final lock = make()..activate();
+      addTearDown(lock.dispose);
+      expect(lock.minutes, IdleLock.defaultMinutes);
+
+      now = now.add(const Duration(minutes: 14, seconds: 59));
+      expect(lock.checkNow(), isFalse);
+      expect(lock.locked, isFalse);
+    });
+
+    test('يُقفل عند انقضاء المهلة، والنشاط يؤجّله', () {
+      final lock = make()..activate();
+      addTearDown(lock.dispose);
+
+      now = now.add(const Duration(minutes: 10));
+      lock.touch(); // نشاط
+      now = now.add(const Duration(minutes: 10));
+      expect(lock.checkNow(), isFalse, reason: '١٠ دقائق فقط منذ آخر نشاط');
+
+      now = now.add(const Duration(minutes: 5));
+      expect(lock.checkNow(), isTrue);
+      expect(lock.locked, isTrue);
+    });
+
+    test('أثناء القفل لا يفتحه النشاط، والفتح يعيد ضبط المهلة', () {
+      final lock = make()..activate();
+      addTearDown(lock.dispose);
+      lock.lockNow();
+
+      lock.touch();
+      expect(lock.locked, isTrue);
+
+      lock.unlock();
+      expect(lock.locked, isFalse);
+      now = now.add(const Duration(minutes: 14));
+      expect(lock.checkNow(), isFalse);
+    });
+
+    test('المعطَّل (٠) لا يقفل أبدًا، والإعداد يُحفظ في القاعدة ويُقرأ', () async {
+      final lock = make();
+      await lock.setMinutes(0);
+      lock.activate();
+      addTearDown(lock.dispose);
+      now = now.add(const Duration(days: 2));
+      expect(lock.checkNow(), isFalse);
+
+      await lock.setMinutes(5);
+      expect((await SettingsRepo(db).read('security'))['idleLockMinutes'], 5);
+
+      final other = make();
+      await other.load();
+      expect(other.minutes, 5);
+      expect(SettingsRepo.localOnlyKeys, contains('security'), reason: 'إعداد الجهاز لا يسافر');
+    });
+
+    test('غير نشط (قبل الدخول أو بعد الخروج) لا يقفل، والخروج يُزيل القفل', () {
+      final lock = make();
+      now = now.add(const Duration(hours: 3));
+      expect(lock.checkNow(), isFalse);
+      lock.lockNow();
+      expect(lock.locked, isFalse);
+
+      lock.activate();
+      lock.lockNow();
+      expect(lock.locked, isTrue);
+      lock.deactivate();
+      expect(lock.locked, isFalse);
+      lock.dispose();
+    });
+  });
+
+  group('الغطاء', () {
+    testWidgets('يعرض الغطاء، يرفض كلمة خاطئة، ويفتح بالصحيحة، ويخرج بزر الخروج', (tester) async {
+      // مستخدم ببصمة سريعة (١٠٠٠ دورة): التحقق فوريّ، أما الترقية بعد النجاح فتأخذ وقتها.
+      const salt = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+      await db.into(db.users).insert(UsersCompanion.insert(
+            id: 'u1',
+            username: 'sara',
+            name: const Value('سارة'),
+            saltHex: const Value(salt),
+            hashHex: Value(Pbkdf2.deriveHex('right-pass-1', salt, iterations: 1000)),
+            iterations: const Value(1000),
+          ));
+      await db.into(db.appSettings).insertOnConflictUpdate(AppSettingsCompanion.insert(
+            key: 'authSession',
+            value: Value('{"userId":"u1","startedAt":${DateTime.now().millisecondsSinceEpoch}}'),
+          ));
+      final auth = AuthService(db);
+      expect((await auth.restoreSession())?.username, 'sara');
+
+      final lock = IdleLock(db)..activate();
+      var signedOut = 0;
+
+      tester.view.physicalSize = const Size(900, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      var taps = 0;
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light(),
+        locale: const Locale('ar'),
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: IdleLockHost(
+            lock: lock,
+            auth: auth,
+            onSignOut: () async => signedOut++,
+            child: Scaffold(body: Center(child: TextButton(onPressed: () => taps++, child: const Text('المحتوى')))),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('المحتوى'));
+      expect(taps, 1, reason: 'غير مقفل: المحتوى يستجيب');
+      expect(find.text('الشاشة مقفلة'), findsNothing);
+
+      lock.lockNow();
+      await tester.pump();
+      expect(find.text('الشاشة مقفلة'), findsOneWidget);
+      expect(find.textContaining('سارة'), findsOneWidget);
+      // المحتوى خلف الغطاء معزول عن اللمس.
+      await tester.tap(find.text('المحتوى'), warnIfMissed: false);
+      expect(taps, 1);
+
+      // كلمة خاطئة.
+      await tester.enterText(find.byType(TextField), 'wrong-pass');
+      await tester.tap(find.text('فتح'));
+      await tester.pump();
+      for (var i = 0; i < 100 && find.textContaining('غير صحيحة').evaluate().isEmpty; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+        await tester.pump();
+      }
+      expect(lock.locked, isTrue);
+      expect(find.textContaining('غير صحيحة'), findsOneWidget);
+
+      // زر الخروج.
+      await tester.tap(find.text('تسجيل الخروج'));
+      await tester.pump();
+      expect(signedOut, 1);
+
+      // كلمة صحيحة (تشمل ترقية البصمة إلى العدد الحالي من الدورات فتطول).
+      await tester.enterText(find.byType(TextField), 'right-pass-1');
+      await tester.tap(find.text('فتح'));
+      await tester.pump();
+      // الإنجاز يُمرَّر عبر مصنع الزمن المحاكى: ننتظر حقيقيًّا ثم نضخّ.
+      for (var i = 0; i < 200 && lock.locked; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+        await tester.pump();
+      }
+      expect(lock.locked, isFalse);
+      expect(find.text('الشاشة مقفلة'), findsNothing);
+      await tester.tap(find.text('المحتوى'));
+      expect(taps, 2, reason: 'بعد الفتح يعمل المحتوى من جديد بحالته');
+      // المؤقّت الدوري يُلغى قبل نهاية الاختبار (يتحقق الإطار من عدم بقاء مؤقّتات).
+      lock.deactivate();
+    }, timeout: const Timeout(Duration(minutes: 5)));
+
+    // الشكوى الميدانية: بعد خمولٍ وعودة، يكتب المستخدم رمزًا ثم يحذفه ثم يكتب
+    // غيره فيعود المحذوف ويُكتب الجديد فوقه، ولا يزول ذلك إلا بنجاح الفتح.
+    // حالة تحريرٍ قديمة في نظام الإدخال لا يعيدها اختبار؛ يُحرَس ما يمنعها.
+    Future<(AuthService, IdleLock)> mount(WidgetTester tester) async {
+      const salt = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+      await db.into(db.users).insert(UsersCompanion.insert(
+            id: 'u1',
+            username: 'sara',
+            saltHex: const Value(salt),
+            hashHex: Value(Pbkdf2.deriveHex('right-pass-1', salt, iterations: 1000)),
+            iterations: const Value(1000),
+          ));
+      await db.into(db.appSettings).insertOnConflictUpdate(AppSettingsCompanion.insert(
+            key: 'authSession',
+            value: Value('{"userId":"u1","startedAt":${DateTime.now().millisecondsSinceEpoch}}'),
+          ));
+      final auth = AuthService(db);
+      await auth.restoreSession();
+      final lock = IdleLock(db)..activate();
+      tester.view.physicalSize = const Size(900, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light(),
+        locale: const Locale('ar'),
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: IdleLockHost(
+            lock: lock,
+            auth: auth,
+            onSignOut: () async {},
+            child: const Scaffold(body: Center(child: Text('المحتوى'))),
+          ),
+        ),
+      ));
+      lock.lockNow();
+      await tester.pump();
+      return (auth, lock);
+    }
+
+    testWidgets('حقل كلمة المرور بلا اقتراحات ولا تصحيح، واتجاهه من اليسار', (tester) async {
+      final (_, lock) = await mount(tester);
+      addTearDown(() {});
+      lock.deactivate();
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.obscureText, isTrue);
+      expect(field.autocorrect, isFalse);
+      expect(field.enableSuggestions, isFalse);
+      expect(field.enableIMEPersonalizedLearning, isFalse);
+      expect(field.textDirection, TextDirection.ltr);
+    });
+
+    testWidgets('العودة من الخلفية تبني الحقل من جديد وتمسح ما كُتب قبل الخمول', (tester) async {
+      final (_, lock) = await mount(tester);
+      await tester.enterText(find.byType(TextField), '123');
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, '123');
+      final before = tester.state<EditableTextState>(find.byType(EditableText));
+
+      for (final st in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(st);
+      }
+      await tester.pump();
+
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, isEmpty);
+      final after = tester.state<EditableTextState>(find.byType(EditableText));
+      expect(identical(before, after), isFalse, reason: 'حقلٌ جديد باتصال لوحة مفاتيحٍ جديد');
+
+      // ما يُكتب بعدها هو ما يُكتب وحده.
+      await tester.enterText(find.byType(TextField), '45');
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, '45');
+      lock.deactivate();
+    });
+
+    testWidgets('القفل يترك التركيز عن أي حقلٍ في الصفحة خلفه', (tester) async {
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(body: TextField(focusNode: node, autofocus: true)),
+      ));
+      await tester.pump();
+      expect(node.hasFocus, isTrue);
+
+      final lock = IdleLock(db)..activate();
+      lock.lockNow();
+      await tester.pump();
+      expect(node.hasFocus, isFalse);
+      lock.deactivate();
+    });
+  });
+}
+// ==================== END FILE: test/idle_lock_test.dart ====================
+
+// ==================== FILE: test/duplicate_username_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/password_hash.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/selfcheck_repo.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// اسمُ دخولٍ واحدٌ لحسابين: من يُصادَق؟
+///
+/// لا قيد تفرّد على `users.username` — وإضافته لجدولٍ قائم تُسقط مشغّلات
+/// المزامنة المعلّقة عليه، وقاعدةٌ فيها تكرارٌ سابق لن تُفتح بعدها. والتكرار
+/// واقعيٌّ لا نظري: جهازٌ هيّأ `local-admin` محليًّا ووصله `admin` بمعرّفٍ آخر
+/// بالمزامنة. فكان `login` يأخذ `matches.first` من استعلامٍ **بلا `ORDER BY`**،
+/// فأيُّ الحسابين يُصادَق غيرُ محدَّد. هذه الاختبارات تثبّت الاختيار وتكشف التكرار.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late AppDatabase db;
+  late AuthService auth;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    auth = AuthService(db);
+  });
+
+  tearDown(() => db.close());
+
+  /// حسابٌ باسمٍ وكلمة مرور ومعرّفٍ صريح.
+  Future<void> seed({
+    required String id,
+    required String username,
+    required String password,
+    String role = 'admin',
+    DateTime? updatedAt,
+  }) async {
+    final ph = await PasswordHash.create(password);
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: id,
+          username: username,
+          role: Value(role),
+          saltHex: Value(ph.saltHex),
+          hashHex: Value(ph.hashHex),
+          iterations: Value(ph.iterations),
+          warehouseScope: const Value('ALL'),
+          updatedAt: Value(updatedAt),
+        ));
+  }
+
+  test('الحساب المحلي يُقدَّم على الوارد بالمزامنة عند تكرار الاسم', () async {
+    // الوارد أحدثُ تعديلًا — ومع ذلك المحلي أحقُّ بالدخول على جهازه.
+    await seed(id: 'remote-9', username: 'admin', password: 'remote-pass-1');
+    await seed(
+      id: 'local-admin',
+      username: 'admin',
+      password: 'local-pass-1',
+      updatedAt: DateTime(2020),
+    );
+
+    final ok = await auth.login('admin', 'local-pass-1');
+    expect(ok.isOk, isTrue, reason: 'كلمة مرور الحساب المحلي لم تُقبل');
+    expect(ok.user!.id, 'local-admin');
+
+    // وكلمة مرور الحساب الآخر لا تفتح الجلسة: حسابٌ واحد هو المقصود بالاسم.
+    final other = await AuthService(db).login('admin', 'remote-pass-1');
+    expect(other.isOk, isFalse);
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('بلا حسابٍ محلي يفوز الأحدث تعديلًا — والاختيار ثابت لا عشوائي', () async {
+    await seed(id: 'b-old', username: 'nasser', password: 'old-pass-11', updatedAt: DateTime(2021));
+    await seed(id: 'a-new', username: 'nasser', password: 'new-pass-11', updatedAt: DateTime(2026));
+
+    // يُعاد بخدماتٍ جديدة: لو كان الاختيار رهنَ ترتيب الصفوف لتبدّل. ثلاثُ
+    // مرات لا عشر — كل دخولٍ اشتقاقُ PBKDF2 بـ٣١٠ ألف دورة.
+    for (var i = 0; i < 3; i++) {
+      final r = await AuthService(db).login('nasser', 'new-pass-11');
+      expect(r.isOk, isTrue);
+      expect(r.user!.id, 'a-new', reason: 'الاختيار تبدّل في المحاولة $i');
+    }
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('تهيئة مدير باسمٍ مستعمل تُرفض (ولو باختلاف حالة الأحرف)', () async {
+    await auth.createAdmin(username: 'Admin', password: 'first-pass-1');
+
+    await expectLater(
+      () => AuthService(db).createAdmin(username: 'admin', password: 'second-pass-1'),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect((await db.select(db.users).get()).length, 1);
+  });
+
+  test('فحص السلامة يكشف الاسم المكرّر ويسكت عن المفرد', () async {
+    await seed(id: 'local-admin', username: 'admin', password: 'pass-aaaa-1');
+    var res = await SelfCheckRepo(db).runAll();
+    expect(res.firstWhere((r) => r.id == 'dupUsernames').ok, isTrue);
+
+    // اسمٌ ثانٍ بحالة أحرفٍ مختلفة — المطابقة في الدخول غير حساسة، فهو تكرار.
+    await seed(id: 'remote-1', username: 'ADMIN', password: 'pass-bbbb-1');
+    res = await SelfCheckRepo(db).runAll();
+    final dup = res.firstWhere((r) => r.id == 'dupUsernames');
+    expect(dup.ok, isFalse);
+    expect(dup.note, contains('admin'));
+  });
+}
+// ==================== END FILE: test/duplicate_username_test.dart ====================
+
+// ==================== FILE: test/sys_perm_test.dart ====================
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/core/security/perm.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/users_repo.dart';
+import 'package:imdad/domain/access_control.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// المالك و`sys.*`: الأساس. المالك وحده يملك `sys.*`، ولا شيء مخزَّن يمنحها لغيره.
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('الأدوار', () {
+    test('المالك والمدير كلاهما «مدير» لصلاحيات الصفحات، والمالك وحده «مالك»', () {
+      expect(UserRole.isAdmin(UserRole.owner), isTrue);
+      expect(UserRole.isAdmin(UserRole.admin), isTrue);
+      expect(UserRole.isAdmin(UserRole.user), isFalse);
+      expect(UserRole.isAdmin(null), isFalse);
+      expect(UserRole.isOwner(UserRole.owner), isTrue);
+      expect(UserRole.isOwner(UserRole.admin), isFalse);
+      expect(UserRole.label(UserRole.owner), 'المالك');
+      expect(UserRole.label('نص غريب'), 'مستخدم');
+    });
+  });
+
+  group('AccessControl.can مع sys.*', () {
+    test('المالك وحده', () {
+      for (final key in SysPerm.all) {
+        expect(AccessControl.can(isAdmin: true, isOwner: true, permissions: const {}, page: key), isTrue, reason: key);
+        expect(AccessControl.can(isAdmin: true, permissions: const {}, page: key), isFalse, reason: 'admin $key');
+        expect(AccessControl.can(isAdmin: false, permissions: const {}, page: key), isFalse, reason: 'user $key');
+      }
+    });
+
+    test('مفتاحٌ sys.* داخل الصلاحيات المخزَّنة لا أثر له (فشلٌ مغلق)', () {
+      final injected = {
+        for (final k in SysPerm.all) k: {'view': true, 'edit': true, 'create': true},
+      };
+      for (final key in SysPerm.all) {
+        expect(AccessControl.can(isAdmin: false, permissions: injected, page: key), isFalse, reason: key);
+        expect(AccessControl.can(isAdmin: true, permissions: injected, page: key), isFalse, reason: 'admin $key');
+      }
+    });
+
+    test('صفحات العمل العادية لا تتأثر', () {
+      expect(AccessControl.can(isAdmin: true, permissions: const {}, page: 'items'), isTrue);
+      expect(AccessControl.can(isAdmin: false, permissions: const {}, page: 'items'), isFalse);
+    });
+
+    test('ستة مفاتيح بأسماء مقروءة', () {
+      expect(SysPerm.all, hasLength(6));
+      for (final k in SysPerm.all) {
+        expect(k, startsWith('sys.'));
+        expect(SysPerm.labels[k]!.trim(), isNotEmpty);
+      }
+    });
+  });
+
+  group('مع حسابات حقيقية', () {
+    late AppDatabase db;
+    late AuthService auth;
+    late UsersRepo repo;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      auth = AuthService(db);
+      repo = UsersRepo(db);
+      await auth.createAdmin(username: 'root', password: 'Test@12345');
+    });
+
+    tearDown(() => db.close());
+
+    Future<void> loginAs(String user, {String role = UserRole.admin}) async {
+      await (db.update(db.users)..where((t) => t.username.equals(user))).write(UsersCompanion(role: Value(role)));
+      final r = await auth.login(user, 'Test@12345');
+      expect(r.isOk, isTrue, reason: r.message);
+    }
+
+    test('المالك يملك sys.* ويملك كل صفحات العمل', () async {
+      await loginAs('root', role: UserRole.owner);
+      final perm = Perm(auth);
+      expect(perm.owner, isTrue);
+      expect(perm.admin, isTrue);
+      for (final k in SysPerm.all) {
+        expect(perm.sys(k), isTrue, reason: k);
+        expect(perm.has(k), isTrue, reason: k);
+      }
+      expect(perm.has('items', PermAction.delete), isTrue);
+      expect(auth.can(auth.currentUser!, SysPerm.backup), isTrue);
+      expect(auth.warehouseScopeOf(auth.currentUser!), isNull);
+    });
+
+    test('المدير: كل الصفحات وبلا sys.*', () async {
+      // مديران ⇒ لا ترقية تلقائية عند الدخول، فيبقى root مديرًا.
+      await repo.createUser(username: 'second', password: 'Test@12345', name: 's', isAdmin: true);
+      await loginAs('root'); // role = admin
+      final perm = Perm(auth);
+      expect(perm.admin, isTrue);
+      expect(perm.owner, isFalse);
+      for (final k in SysPerm.all) {
+        expect(perm.sys(k), isFalse, reason: k);
+        expect(perm.has(k), isFalse, reason: k);
+      }
+      expect(perm.has('items', PermAction.delete), isTrue);
+      expect(auth.can(auth.currentUser!, SysPerm.devices), isFalse);
+    });
+
+    test('مستخدمٌ عاديٌّ مخزَّنٌ له sys.* يدويًا: لا يملكها', () async {
+      await repo.createUser(
+        username: 'sneaky',
+        password: 'Test@12345',
+        name: 'x',
+        permissions: {
+          for (final k in SysPerm.all) k: {'view': true, 'edit': true},
+          'items': {'view': true},
+        },
+      );
+      final r = await auth.login('sneaky', 'Test@12345');
+      expect(r.isOk, isTrue, reason: r.message);
+      final perm = Perm(auth);
+      for (final k in SysPerm.all) {
+        expect(perm.sys(k), isFalse, reason: k);
+        expect(perm.has(k, PermAction.edit), isFalse, reason: k);
+      }
+      expect(perm.has('items'), isTrue);
+    });
+
+    group('حماية حساب المالك', () {
+      Future<String> makeOwner() async {
+        await (db.update(db.users)..where((t) => t.username.equals('root')))
+            .write(const UsersCompanion(role: Value(UserRole.owner)));
+        return (await (db.select(db.users)..where((t) => t.username.equals('root'))).getSingle()).id;
+      }
+
+      test('لا يتغيّر دوره ولا يُعطَّل', () async {
+        final id = await makeOwner();
+        await expectLater(repo.updateUser(id: id, isAdmin: false), throwsArgumentError);
+        await expectLater(repo.updateUser(id: id, isAdmin: true), throwsArgumentError);
+        await expectLater(repo.updateUser(id: id, active: false), throwsArgumentError);
+        final after = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+        expect(after.role, UserRole.owner);
+        expect(after.active, isTrue);
+      });
+
+      test('تعديل غير الدور والتفعيل مسموح (الاسم)', () async {
+        final id = await makeOwner();
+        await repo.updateUser(id: id, name: 'اسم جديد');
+        final after = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+        expect(after.name, 'اسم جديد');
+      });
+
+      test('لا يُحذف ولو وُجد مدير آخر', () async {
+        final id = await makeOwner();
+        await repo.createUser(username: 'second', password: 'Test@12345', name: 's', isAdmin: true);
+        expect(await repo.deleteUser(id), isFalse);
+        expect((await db.select(db.users).get()).length, 2);
+      });
+
+      test('المدير الآخر يُحذف ما دام المالك باقيًا (المالك يُحسب مديرًا)', () async {
+        await makeOwner();
+        final adminId = await repo.createUser(username: 'second', password: 'Test@12345', name: 's', isAdmin: true);
+        expect(await repo.deleteUser(adminId), isTrue);
+      });
+
+      test('آخر مديرٍ (دون مالك) لا يُحذف كما كان', () async {
+        final id = (await db.select(db.users).get()).single.id;
+        expect(await repo.deleteUser(id), isFalse);
+      });
+    });
+  });
+
+  test('كل مفتاح sys.* في الكود معرَّف في SysPerm (لا أخطاء إملائية)', () {
+    final lit = RegExp(r"""['"](sys\.\w+)['"]""");
+    final known = SysPerm.all.toSet();
+    final unknown = <String>{};
+    for (final f in Directory('lib').listSync(recursive: true).whereType<File>()) {
+      if (!f.path.endsWith('.dart') || f.path.endsWith('.g.dart')) continue;
+      for (final m in lit.allMatches(f.readAsStringSync())) {
+        if (!known.contains(m.group(1))) unknown.add('${m.group(1)} (${f.path})');
+      }
+    }
+    expect(unknown, isEmpty);
+  });
+}
+// ==================== END FILE: test/sys_perm_test.dart ====================
+
+// ==================== FILE: test/auth_storage_test.dart ====================
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:imdad/core/security/auth_service.dart';
+import 'package:imdad/data/db/app_database.dart';
+import 'package:imdad/data/repos/settings_repo.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// قفل الدخول والجلسة محفوظان في القاعدة المشفّرة لا في SharedPreferences،
+/// مع ترحيل القديم دون إسقاط الجلسات القائمة.
+void main() {
+  late AppDatabase db;
+
+  Future<void> addUser(String id, String name) => db.into(db.users).insert(UsersCompanion.insert(
+        id: id,
+        username: name,
+        name: Value(name),
+      ));
+
+  Future<Set<String>> prefKeys() async => (await SharedPreferences.getInstance()).getKeys();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+  });
+  tearDown(() => db.close());
+
+  test('مفاتيح القفل والجلسة محلية للجهاز: لا تُصدَّر ولا تُستورد', () {
+    expect(SettingsRepo.localOnlyKeys, containsAll(['authSession', 'authLocks']));
+  });
+
+  group('قفل الدخول', () {
+    test('خمس محاولات خاطئة تقفل، والعدّاد في القاعدة لا في SharedPreferences', () async {
+      final auth = AuthService(db);
+      AuthResult? last;
+      for (var i = 0; i < AuthService.maxAttempts; i++) {
+        last = await auth.login('ghost', 'wrong-pass-$i');
+      }
+      expect(last!.status, AuthStatus.locked);
+
+      expect((await SettingsRepo(db).read('authLocks')).keys, contains('ghost'));
+      expect((await prefKeys()).where((k) => k.startsWith('imdad.auth.lock.')), isEmpty);
+
+      // «إعادة تشغيل»: نسخة جديدة من الخدمة تقرأ القفل نفسه.
+      expect((await AuthService(db).login('ghost', 'anything-else')).status, AuthStatus.locked);
+    });
+
+    test('قفلٌ قديم في SharedPreferences يُحترم ثم يُنقل إلى القاعدة ويُمسح', () async {
+      final until = DateTime.now().add(const Duration(minutes: 2)).millisecondsSinceEpoch;
+      SharedPreferences.setMockInitialValues({
+        'imdad.auth.lock.ghost': '{"fails":0,"until":$until}',
+      });
+
+      expect((await AuthService(db).login('Ghost', 'whatever-pass')).status, AuthStatus.locked);
+
+      expect((await SettingsRepo(db).read('authLocks'))['ghost'], isA<Map>());
+      expect(await prefKeys(), isNot(contains('imdad.auth.lock.ghost')));
+    });
+  });
+
+  group('الجلسة', () {
+    test('جلسة قديمة سارية في SharedPreferences تُستعاد وتُنقل إلى القاعدة', () async {
+      await addUser('u1', 'sara');
+      final started = DateTime.now().subtract(const Duration(hours: 2)).millisecondsSinceEpoch;
+      SharedPreferences.setMockInitialValues({
+        'imdad.session.userId': 'u1',
+        'imdad.session.startedAt': started,
+      });
+
+      expect((await AuthService(db).restoreSession())?.username, 'sara');
+
+      final keys = await prefKeys();
+      expect(keys, isNot(contains('imdad.session.userId')));
+      expect(keys, isNot(contains('imdad.session.startedAt')));
+      final stored = await SettingsRepo(db).read('authSession');
+      expect(stored['userId'], 'u1');
+      expect(stored['startedAt'], started, reason: 'وقت البدء الأصلي يبقى فلا تتمدّد الجلسة');
+
+      // وبعدها تُستعاد من القاعدة وحدها.
+      expect((await AuthService(db).restoreSession())?.username, 'sara');
+    });
+
+    test('جلسة قديمة منتهية (أكثر من ١٢ ساعة) لا تُستعاد', () async {
+      await addUser('u1', 'sara');
+      SharedPreferences.setMockInitialValues({
+        'imdad.session.userId': 'u1',
+        'imdad.session.startedAt': DateTime.now().subtract(const Duration(hours: 13)).millisecondsSinceEpoch,
+      });
+      expect(await AuthService(db).restoreSession(), isNull);
+      expect(await prefKeys(), isNot(contains('imdad.session.userId')));
+    });
+
+    test('الخروج يمسح الجلسة من القاعدة', () async {
+      await addUser('u1', 'sara');
+      await db.into(db.appSettings).insertOnConflictUpdate(AppSettingsCompanion.insert(
+            key: 'authSession',
+            value: Value('{"userId":"u1","startedAt":${DateTime.now().millisecondsSinceEpoch}}'),
+          ));
+      final auth = AuthService(db);
+      expect((await auth.restoreSession())?.username, 'sara');
+
+      await auth.logout();
+
+      expect(await SettingsRepo(db).read('authSession'), isEmpty);
+      expect(await AuthService(db).restoreSession(), isNull);
+    });
+  });
+}
+// ==================== END FILE: test/auth_storage_test.dart ====================

@@ -1,0 +1,4294 @@
+// المرحلة 5 — الدخول والمستخدمون والصلاحيات — الشيفرة المصدرية (Dart)
+// عدد الملفات: 19
+// فهرس الملفات:
+//   - lib/core/security/auth_service.dart (787 سطر)
+//   - lib/core/security/perm.dart (142 سطر)
+//   - lib/core/security/warehouse_scope.dart (24 سطر)
+//   - lib/core/security/pbkdf2.dart (233 سطر)
+//   - lib/core/security/password_hash.dart (36 سطر)
+//   - lib/core/security/idle_lock.dart (136 سطر)
+//   - lib/core/security/sys_notice.dart (32 سطر)
+//   - lib/domain/access_control.dart (699 سطر)
+//   - lib/domain/perm_catalog.dart (180 سطر)
+//   - lib/domain/password_policy.dart (56 سطر)
+//   - lib/domain/maker_checker.dart (39 سطر)
+//   - lib/domain/section_block.dart (128 سطر)
+//   - lib/data/repos/users_repo.dart (514 سطر)
+//   - lib/data/permission_impact.dart (112 سطر)
+//   - lib/features/auth/login_screen.dart (432 سطر)
+//   - lib/features/auth/login/login_buttons.dart (205 سطر)
+//   - lib/features/auth/login/login_inputs.dart (146 سطر)
+//   - lib/features/auth/change_password_dialog.dart (109 سطر)
+//   - lib/features/auth/idle_lock_host.dart (222 سطر)
+
+
+// ==================== FILE: lib/core/security/auth_service.dart ====================
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show ValueNotifier, visibleForTesting;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../data/db/app_database.dart';
+import '../../data/repos/audit_repo.dart';
+import '../../data/repos/repo_guard.dart';
+import '../../data/repos/settings_repo.dart';
+import '../../data/repos/users_repo.dart';
+import '../../domain/access_control.dart';
+import '../../domain/password_policy.dart';
+import '../../domain/section_block.dart';
+import 'owner_promotion.dart';
+import 'password_hash.dart';
+import 'pbkdf2.dart';
+import 'warehouse_scope.dart';
+import '../../core/error_log.dart';
+
+/// نتيجة محاولة الدخول
+enum AuthStatus { ok, badCredentials, locked, inactive, notApproved }
+
+class AuthResult {
+  final AuthStatus status;
+  final User? user;
+  final int attemptsLeft;
+  final Duration lockRemaining;
+  final String message;
+
+  const AuthResult({
+    required this.status,
+    this.user,
+    this.attemptsLeft = 0,
+    this.lockRemaining = Duration.zero,
+    this.message = '',
+  });
+
+  bool get isOk => status == AuthStatus.ok;
+}
+
+/// المصادقة والجلسة:
+/// • PBKDF2-HMAC-SHA256 + salt لكل مستخدم؛ الحسابات القديمة (45,000 دورة) تُعاد
+///   تجزئتها بالعدد الحالي تلقائيًا عند أول دخول ناجح.
+/// • قفل الدخول بعد 5 محاولات خاطئة لمدة 3 دقائق (لكل اسم مستخدم).
+/// • مدة الجلسة 12 ساعة ثم يُطلب الدخول من جديد.
+/// • عدّاد المحاولات والجلسة (المعرّف ووقت البدء) محفوظان في قاعدة البيانات
+///   المشفّرة (SQLCipher) لا في `SharedPreferences` المقروءة والقابلة للتعديل
+///   بملفٍّ نصي. القيم القديمة في `SharedPreferences` تُنقل مرةً واحدة عند أول
+///   قراءة ثم تُمسح، فلا تسقط الجلسات القائمة عند الترقية.
+class AuthService {
+  AuthService(this.db, {this.isBranchDevice});
+
+  final AppDatabase db;
+
+  /// هل هذا جهاز فرع؟ (يصله المالك بالمزامنة فلا يُرقّى فيه ولا يُحدَّد.)
+  /// `null` ⇒ ليس فرعًا (جهاز مستقل أو إدارة).
+  final Future<bool> Function()? isBranchDevice;
+
+  Future<bool> _isBranch() async {
+    try {
+      return await isBranchDevice?.call() ?? false;
+    } catch (err, stack) {
+      ErrorLogger.log('auth.isBranch', err, stack);
+      return true; // فشلٌ مغلق: لا ترقية إن لم نعرف
+    }
+  }
+
+  /// يرقّي المدير المحلي الوحيد إلى مالك إن انطبقت الشروط ([OwnerPromotion.run]).
+  /// لا يُفشل الدخول أبدًا: عطبٌ هنا يُسجَّل ويُترك.
+  Future<void> _promoteOwnerIfDue() async {
+    try {
+      await OwnerPromotion.run(db, isBranchDevice: await _isBranch());
+    } catch (err, stack) {
+      ErrorLogger.log('auth.ownerPromotion', err, stack);
+    }
+  }
+
+  /// لا مالك وأكثر من مدير ⇒ يُنبَّه المديرون ليحدّدوا المالك. (لا في الفروع.)
+  Future<bool> ownerSelectionNeeded() async {
+    if (await _isBranch()) return false;
+    return OwnerPromotion.needsSelection(db);
+  }
+
+  /// يؤكّد كلمة مرور المستخدم الحالي دون فتح جلسة ولا عدّ محاولات — لتأكيد
+  /// إجراءٍ حسّاس (تحديد المالك).
+  Future<bool> confirmCurrentPassword(String password) async {
+    final u = _current;
+    if (u == null || password.isEmpty) return false;
+    final fresh = await (db.select(db.users)..where((t) => t.id.equals(u.id))).getSingleOrNull();
+    if (fresh == null) return false;
+    return PasswordHash.verify(password, fresh.saltHex, fresh.hashHex, fresh.iterations);
+  }
+
+  /// يحدّد [userId] مالكًا: مديرٌ حالي، وكلمة مروره تأكيدٌ، وليس جهاز فرع.
+  Future<bool> assignOwner({required String userId, required String confirmPassword}) async {
+    final me = _current;
+    if (me == null || !UserRole.isAdmin(me.role)) return false;
+    if (await _isBranch()) return false;
+    if (!await confirmCurrentPassword(confirmPassword)) return false;
+    final ok = await OwnerPromotion.assign(db, userId: userId, actorEmail: me.email);
+    if (ok && userId == me.id) {
+      _current = await (db.select(db.users)..where((t) => t.id.equals(me.id))).getSingleOrNull() ?? _current;
+    }
+    return ok;
+  }
+
+  /// الحد الأدنى لطول كلمة المرور عند إنشاء الحساب أو تغييرها.
+  static const int minPasswordLength = 8;
+
+  /// هل يُنبَّه هذا المستخدم لتغيير كلمة مروره بعد الدخول؟ كلمته أقصر من الحد
+  /// الحالي ([minPasswordLength]) أو لا تحقق [PasswordPolicy] — **أيًّا كان دوره** (2026-10-26). كان المدير
+  /// مستثنى «فلا يُزعَج»، وحسابه أثمن ما يُخمَّن في النظام. [role] باقٍ للتوافق.
+  static bool shouldSuggestPasswordChange({required String role, required String password, String username = ''}) =>
+      !PasswordPolicy.ok(password, username: username);
+
+  /// بصمة وهمية لمسار «اسم غير موجود» (انظر [login]) — قيمٌ ثابتة لا سرّ فيها.
+  static const String _dummySaltHex = '5b1f0c6e9a2d47e38c0b7f14d6a92e53';
+  static const String _dummyHashHex = '3e7a91c4d05b28f6a1c9e4073bd852f6c0a7e19d4b63f58a2d0e91c7b4a6f385';
+
+  /// عدد مرّات الاشتقاق الوهمي — يقرؤه الاختبار ليثبت أن المسارين يشغّلان PBKDF2.
+  @visibleForTesting
+  static int dummyVerifications = 0;
+
+  /// دورات الاشتقاق الوهمي: أقلُّ ما تحمله حسابات هذا الجهاز، فيُشبه زمنُ الردّ
+  /// على اسمٍ مجهول أسرعَ ردٍّ ممكن على اسمٍ موجود (انظر [login]).
+  Future<int> _dummyRounds() async {
+    final row = await db
+        .customSelect('SELECT MIN(iterations) AS m FROM users WHERE iterations > 0')
+        .getSingleOrNull();
+    final min = (row?.data['m'] as num?)?.toInt() ?? 0;
+    return min >= 1 ? min.clamp(Pbkdf2.legacyIterations, Pbkdf2.iterations) : Pbkdf2.iterations;
+  }
+
+  static const int maxAttempts = 5;
+  static const Duration lockDuration = Duration(minutes: 3); // AUTHCORE.LOCK_MS = 180000
+
+  /// مدة القفل بحسب مرّاته المتتالية: ٣ ثم ١٥ ثم ٦٠ دقيقة.
+  ///
+  /// كان القفل ثلاث دقائق كل مرة بلا تصعيد، فمن يخمّن كلمة مرور مدير ينال خمس
+  /// محاولاتٍ كل ثلاث دقائق (~١٠٠ في الساعة) إلى ما لا نهاية. التصعيد يقطع ذلك،
+  /// والدخول الناجح أو مرور [strikeDecay] بلا قفلٍ جديد يعيده إلى البداية.
+  static Duration lockDurationFor(int level) => switch (level) {
+        <= 1 => lockDuration,
+        2 => const Duration(minutes: 15),
+        _ => const Duration(minutes: 60),
+      };
+
+  /// مدةٌ بلا قفلٍ جديد تُنسى بعدها المرّات السابقة.
+  static const Duration strikeDecay = Duration(hours: 24);
+  static const Duration sessionDuration = Duration(hours: 12);
+  // مفاتيح التخزين القديم في SharedPreferences — للترحيل والمسح فقط.
+  static const String _kSessionUser = 'imdad.session.userId';
+  static const String _kSessionStart = 'imdad.session.startedAt';
+  static const String _kLockPrefix = 'imdad.auth.lock.';
+
+  // مفاتيح قاعدة البيانات (جدول الإعدادات، محلية فقط: SettingsRepo.localOnlyKeys).
+  static const String _sessionKey = 'authSession';
+  static const String _locksKey = 'authLocks';
+
+  /// علامة «الجلسة مفتوحة» داخل صفّ الجلسة.
+  ///
+  /// تُكتب عند فتح الجلسة وتُمحى بالخروج الصريح (`logout`، وهو ما يُنادى من
+  /// `_shutdown` عند إغلاق النافذة أو الخروج بزر الرجوع). فوجودُها عند الإقلاع
+  /// يعني أن التطبيق **لم يُغلق إغلاقًا نظيفًا**: قُتل من مدير المهام، أو سُحب
+  /// من قائمة تطبيقات أندرويد، أو انقطعت الكهرباء، أو انهار.
+  @visibleForTesting
+  static const String sessionOpenKey = 'open';
+  static const String _sessionOpen = sessionOpenKey;
+
+  User? _cur;
+  User? get currentUser => _cur;
+
+  /// المستخدم الحالي — كل تغييرٍ له يُنشر إلى حارس طبقة البيانات ([RepoGuard]).
+  User? get _current => _cur;
+  set _current(User? u) {
+    _cur = u;
+    RepoGuard.current = u == null
+        ? null
+        : RepoActor(
+            role: u.role,
+            permissions: {
+              for (final e in permissionsOf(u).entries)
+                if (e.value is Map) e.key: {for (final a in (e.value as Map).entries) '${a.key}': a.value == true},
+            },
+            scope: warehouseScopeOf(u),
+            sectionBlocked: u.sectionBlocked,
+          );
+  }
+
+  /// يرتفع كلما تغيّر **دور** المستخدم الحالي أو **حجب أقسامه** في القاعدة (وصل
+  /// بالمزامنة مثلًا) فتُعيد الشاشات بناءها. الكائن الحالي يُستبدل بالمحدَّث فيسري
+  /// الحجب والدور الجديدان فورًا لا عند الدخول التالي فقط.
+  final ValueNotifier<int> userVersion = ValueNotifier<int>(0);
+  StreamSubscription<Object?>? _userWatch;
+
+  void _watchCurrent() {
+    _userWatch?.cancel();
+    _userWatch = db.tableUpdates(TableUpdateQuery.onTable(db.users)).listen((_) => _refreshCurrent());
+  }
+
+  Future<void> _refreshCurrent() async {
+    final me = _current;
+    if (me == null) return;
+    final fresh = await (db.select(db.users)..where((t) => t.id.equals(me.id))).getSingleOrNull();
+    if (fresh == null || _current?.id != me.id) return; // الحذف والإيقاف يعالجهما فحص الجلسة
+    if (fresh.role == me.role && fresh.sectionBlocked == me.sectionBlocked) return;
+    _current = fresh;
+    userVersion.value++;
+  }
+
+  /// لا يوجد أي مستخدم بعد ⇒ تظهر تهيئة حساب المدير الأول.
+  /// يظهر قسم التهيئة ما دام لا يوجد حساب مدير مُهيّأ محليًا.
+  Future<bool> needsBootstrap() async {
+    final count =
+        await db.customSelect("SELECT COUNT(*) AS c FROM users WHERE id LIKE 'local-%'").getSingle();
+    return (count.data['c'] as int) == 0;
+  }
+
+  /// هل على هذا الجهاز أي حساب يُدخل به؟
+  ///
+  /// غير [needsBootstrap] عمدًا: ذاك يسأل عن حساب مدير **مُهيّأ محليًا**، وهذا
+  /// يسأل عن أي حساب مهما كان مصدره. جهاز الفرع يستقبل حساباته بالمزامنة
+  /// بمعرّفات ليست `local-`، فلو قِيس دخوله بـ[needsBootstrap] لبقي «جديدًا»
+  /// إلى الأبد رغم امتلاكه حسابات.
+  Future<bool> hasAnyUser() async {
+    final count = await db.customSelect('SELECT COUNT(*) AS c FROM users').getSingle();
+    return (count.data['c'] as int) > 0;
+  }
+
+  Future<User> createAdmin({
+    required String username,
+    required String password,
+    String name = '',
+  }) async {
+    final u = _normalizeUsername(username);
+    _validateUsername(u);
+    _validatePassword(password, username: u);
+    // اسمٌ يطابق حسابًا قائمًا (ولو باختلاف حالة الأحرف) يُرفض بدل أن يُنشئ
+    // قرينًا له: المطابقة في `login` غير حساسة للحالة، فحسابان بـ`admin`
+    // و`Admin` يتنازعان اسمًا واحدًا. `UsersRepo.create` يحرس هكذا، وكان هذا
+    // المسار (تهيئة أول مدير) وحده بلا حارس.
+    final q = u.toLowerCase();
+    final clash = (await db.select(db.users).get()).any((x) => x.username.toLowerCase() == q);
+    if (clash) throw ArgumentError('✖ اسم المستخدم «$u» مستعمل على هذا الجهاز');
+    final ph = await PasswordHash.create(password);
+    final id = 'local-$u';
+    final row = UsersCompanion.insert(
+      id: id,
+      username: u,
+      name: Value(name.isEmpty ? u : name),
+      email: Value('$u@imdad.local'),
+      role: const Value('admin'),
+      saltHex: Value(ph.saltHex),
+      hashHex: Value(ph.hashHex),
+      iterations: Value(ph.iterations),
+      warehouseScope: const Value('ALL'),
+    );
+    await db.into(db.users).insert(row);
+    final user = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingle();
+    await _startSession(user);
+    return user;
+  }
+
+  Future<AuthResult> login(String username, String password) async {
+    // نفس `doLogin` في auth-ux.js: الرسائل، وعدّاد المحاولات لكل اسم مستخدم (حتى غير الموجود).
+    final u = username.trim();
+    if (u.isEmpty || password.isEmpty) {
+      return const AuthResult(status: AuthStatus.badCredentials, message: '✖ أدخل اسم المستخدم وكلمة المرور');
+    }
+    final user = u.contains('@') ? u.split('@').first : u;
+    // المطابقة غير حساسة لحالة الأحرف، فالعدّاد كذلك: وإلا أخذ كل شكل للاسم
+    // (admin / Admin / ADMIN …) خمس محاولات مستقلة وسقط القفل.
+    final lockKey = user.toLowerCase();
+    final st = await _lockRead(lockKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (st.until > now) {
+      final remaining = Duration(milliseconds: st.until - now);
+      return AuthResult(
+        status: AuthStatus.locked,
+        lockRemaining: remaining,
+        message: '⏳ تم قفل الدخول مؤقتًا بسبب محاولات كثيرة. حاول بعد ${_fmt(remaining)}',
+      );
+    }
+
+    final found = await _findAccount(u, user);
+    final bool ok;
+    if (found != null) {
+      ok = await PasswordHash.verify(password, found.saltHex, found.hashHex, found.iterations);
+    } else {
+      // اسمٌ غير موجود يمرّ بالاشتقاق نفسه فيتساوى زمن الرد تقريبًا مع كلمة
+      // مرورٍ خاطئة لحسابٍ موجود، ولا يُكشف الموجود بالتوقيت. النتيجة تُهمل:
+      // البصمة الوهمية لا تطابق شيئًا.
+      //
+      // وعددُ الدورات يُؤخذ من **أقلّ** ما في القاعدة لا من المعيار الحالي: حسابٌ
+      // قديم (٤٥ ألف دورة) يردّ أسرع بكثير من ٣١٠ ألفًا، فلو ثُبّت الوهميُّ على
+      // المعيار لصار بطءُ الردّ نفسه قرينةً على أن الاسم **غير موجود** — وهو
+      // التسريب الذي جاء هذا المسار ليسدّه، مقلوبًا. وقاعدةٌ بلا حسابات تعود
+      // إلى المعيار.
+      dummyVerifications++;
+      await PasswordHash.verify(password, _dummySaltHex, _dummyHashHex, await _dummyRounds());
+      ok = false;
+    }
+
+    if (!ok) return _failed(lockKey, st, now, action: 'auth.login_failed');
+
+    // `ok` لا يكون صحيحًا بلا حسابٍ فعلي؛ الفحص يُرسّخ ذلك للمحلل.
+    if (found == null) return const AuthResult(status: AuthStatus.badCredentials);
+    if (!found.active || !found.approved) {
+      await _audit('auth.login_denied', 'رُفض دخول «${found.username}» — الحساب ${found.active ? 'غير معتمد' : 'موقوف'}',
+          details: {'username': found.username}, actorEmail: found.email);
+    }
+    if (!found.active) {
+      return const AuthResult(
+        status: AuthStatus.inactive,
+        message: '✖ الحساب غير مفعّل — اطلب من مدير النظام تفعيل حسابك',
+      );
+    }
+    if (!found.approved) {
+      return const AuthResult(
+        status: AuthStatus.notApproved,
+        message: '✖ الحساب غير معتمد بعد — انتظر اعتماد المدير',
+      );
+    }
+
+    await _lockStore(lockKey, const _LockState(0, 0));
+    await _promoteOwnerIfDue();
+    final fresh =
+        await (db.select(db.users)..where((t) => t.id.equals(found.id))).getSingleOrNull() ?? found;
+    final account = await _upgradeHash(fresh, password);
+    await _startSession(account);
+    await _audit('auth.login', 'دخول «${account.username}»',
+        details: {'username': account.username, 'method': 'password'}, actorEmail: account.email);
+    return AuthResult(status: AuthStatus.ok, user: account, message: '🌐 تم الدخول محليًا (بدون إنترنت)');
+  }
+
+  /// يتحقّق من بيانات دخول **مستخدمٍ آخر** دون أن يبدّل الجلسة — لتفويض الآمر
+  /// على جلسة أمين المخزن (رقابة مزدوجة: من ينفّذ غير من يجيز).
+  ///
+  /// الحراسة نفسها التي في [login] حرفيًّا: عدّاد المحاولات والقفل المتصاعد على
+  /// الاسم، والاشتقاق الوهمي لاسمٍ غير موجود، والحساب الموقوف أو غير المعتمد
+  /// مرفوض. فلا تصير شاشة التفويض بابًا ثانيًا لتخمين كلمات المرور بلا قفل.
+  /// النجاح يُدقَّق `auth.signer_verified` (high) ولا يفتح جلسة.
+  Future<AuthResult> verifySigner(String username, String password, {String purpose = ''}) async {
+    final u = username.trim();
+    if (u.isEmpty || password.isEmpty) {
+      return const AuthResult(status: AuthStatus.badCredentials, message: '✖ أدخل اسم الآمر وكلمة مروره');
+    }
+    final user = u.contains('@') ? u.split('@').first : u;
+    final lockKey = user.toLowerCase();
+    final st = await _lockRead(lockKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (st.until > now) {
+      final remaining = Duration(milliseconds: st.until - now);
+      return AuthResult(
+        status: AuthStatus.locked,
+        lockRemaining: remaining,
+        message: '⏳ قُفل هذا الحساب مؤقتًا بسبب محاولات كثيرة. حاول بعد ${_fmt(remaining)}',
+      );
+    }
+    final found = await _findAccount(u, user);
+    final bool ok;
+    if (found != null) {
+      ok = await PasswordHash.verify(password, found.saltHex, found.hashHex, found.iterations);
+    } else {
+      dummyVerifications++;
+      await PasswordHash.verify(password, _dummySaltHex, _dummyHashHex, await _dummyRounds());
+      ok = false;
+    }
+    if (!ok || found == null) return _failed(lockKey, st, now, action: 'auth.signer_failed');
+    if (!found.active || !found.approved) {
+      return const AuthResult(status: AuthStatus.inactive, message: '✖ حساب الآمر موقوف أو غير معتمد');
+    }
+    await _lockStore(lockKey, const _LockState(0, 0));
+    await _audit('auth.signer_verified', 'أجاز «${found.username}» ${purpose.isEmpty ? 'إجراءً' : purpose} على جلسة «${_current?.username ?? ''}»',
+        details: {'signer': found.username, 'session': _current?.username ?? '', 'purpose': purpose},
+        risk: AuditRepo.riskHigh,
+        actorEmail: found.email);
+    return AuthResult(status: AuthStatus.ok, user: found, message: '✔ تحقّق الآمر');
+  }
+
+  /// الحساب الذي يُصادَق باسم [user] (أو بريد [raw]) — ترتيب [login] نفسه.
+  Future<User?> _findAccount(String raw, String user) async {
+    // الحساب المحلي بالاسم نفسه أولًا، ثم مطابقة غير حساسة لحالة الأحرف (findUserAccount).
+    var matches = await (db.select(db.users)..where((t) => t.username.equals(user))).get();
+    if (matches.isEmpty) {
+      final all = await db.select(db.users).get();
+      final q = user.toLowerCase();
+      matches = all
+          .where((x) => x.username.toLowerCase() == q || x.email.toLowerCase() == raw.toLowerCase())
+          .toList();
+    }
+    // لا قيد تفرّد على `users.username` (إضافته لجدولٍ قائم تُسقط مشغّلات
+    // المزامنة، وقاعدةٌ فيها تكرارٌ سابق لن تُفتح أصلًا). والتكرار ممكن فعلًا:
+    // جهازٌ هيّأ `local-admin` محليًّا ووصله `admin` بمعرّفٍ آخر بالمزامنة.
+    //
+    // فيُرتَّب الاختيار صراحةً بدل `matches.first` من استعلامٍ بلا `ORDER BY`:
+    // المعرّف المحلي أولًا (حسابُ هذا الجهاز أحقُّ بالدخول منه)، ثم الأحدث
+    // تعديلًا، ثم المعرّف أبجديًّا — فيكون أيُّ الحسابين يُصادَق **محدَّدًا
+    // وثابتًا** لا رهنًا بترتيب الصفوف في الملف. والتكرار يُبلَّغ في فحص السلامة.
+    if (matches.length > 1) {
+      matches.sort((a, b) {
+        final local = (b.id.startsWith('local-') ? 1 : 0) - (a.id.startsWith('local-') ? 1 : 0);
+        if (local != 0) return local;
+        final at = (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt);
+        return at != 0 ? at : a.id.compareTo(b.id);
+      });
+    }
+    final found = matches.isEmpty ? null : matches.first;
+    return found;
+  }
+
+  /// محاولةٌ فاشلة: عدّاد الاسم ثم القفل المؤقت، وكلاهما يُدقَّق (M-11).
+  Future<AuthResult> _failed(String lockKey, _LockState st, int now, {required String action}) async {
+    final decayed = st.lastLockAt > 0 && now - st.lastLockAt > strikeDecay.inMilliseconds;
+    final strikes = decayed ? 0 : st.strikes;
+    final lastLockAt = decayed ? 0 : st.lastLockAt;
+    final _LockState ns;
+    Duration duration = Duration.zero;
+    if (st.fails + 1 >= maxAttempts) {
+      duration = lockDurationFor(strikes + 1);
+      ns = _LockState(0, now + duration.inMilliseconds, strikes: strikes + 1, lastLockAt: now);
+    } else {
+      ns = _LockState(st.fails + 1, 0, strikes: strikes, lastLockAt: lastLockAt);
+    }
+    await _lockStore(lockKey, ns);
+    if (ns.until > now) {
+      await _audit(
+          'auth.locked',
+          'قُفل الدخول باسم «$lockKey» ${duration.inMinutes} دقيقة بعد $maxAttempts محاولات فاشلة'
+              '${ns.strikes > 1 ? ' (القفل رقم ${ns.strikes} خلال ${strikeDecay.inHours} ساعة)' : ''}',
+          details: {'username': lockKey, 'level': ns.strikes, 'minutes': duration.inMinutes},
+          risk: AuditRepo.riskHigh);
+      return AuthResult(
+        status: AuthStatus.locked,
+        lockRemaining: duration,
+        message: '⛔ كثير جدًا من المحاولات — قُفل الدخول لهذا المستخدم ${_fmt(duration)}.',
+      );
+    }
+    await _audit(action, 'محاولة دخول فاشلة باسم «$lockKey» (${ns.fails}/$maxAttempts)',
+        details: {'username': lockKey, 'attempt': ns.fails});
+    return AuthResult(
+      status: AuthStatus.badCredentials,
+      attemptsLeft: maxAttempts - ns.fails,
+      message: '✖ اسم المستخدم أو كلمة المرور غير صحيحة (${ns.fails}/$maxAttempts)',
+    );
+  }
+
+  /// سجل الدخول والخروج (M-11): كان لا يُسجَّل دخولٌ ناجح ولا فاشل ولا قفلٌ ولا
+  /// خروج، مع أن سجل التدقيق يَعِد بذلك — فجوة امتثالٍ في نظامٍ عسكري. وفشل
+  /// التسجيل لا يمنع الدخول أبدًا.
+  Future<void> _audit(
+    String action,
+    String summary, {
+    Map<String, dynamic> details = const {},
+    String risk = AuditRepo.riskNormal,
+    String actorEmail = '',
+  }) async {
+    try {
+      await AuditRepo(db).log(
+        action: action,
+        entityType: 'جلسة',
+        summary: summary,
+        details: details,
+        risk: risk,
+        actorEmail: actorEmail,
+      );
+    } catch (err, stack) {
+      ErrorLogger.log('auth.audit', err, stack);
+    }
+  }
+
+  /// فكّ قفل الخمول لصاحب الجلسة الحالية **بمعرّفه** (M-13).
+  ///
+  /// كان الفكّ يمرّ بـ[login] باسم المستخدم، والأسماء قد تتكرر بين حسابٍ محلي
+  /// وآخر وصل بالمزامنة (البند 17) — فيُصادَق الحساب الآخر وتتبدّل الجلسة بصمت.
+  /// الآن يُتحقَّق من كلمة مرور الحساب الذي فُتحت له الجلسة نفسه، بعدّاد المحاولات
+  /// والقفل المؤقت نفسيهما.
+  Future<AuthResult> unlock(String password) async {
+    final me = _current;
+    if (me == null) return const AuthResult(status: AuthStatus.badCredentials, message: '✖ لا جلسة مفتوحة');
+    if (password.isEmpty) return const AuthResult(status: AuthStatus.badCredentials, message: '✖ أدخل كلمة المرور');
+    final lockKey = me.username.toLowerCase();
+    final st = await _lockRead(lockKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (st.until > now) {
+      final remaining = Duration(milliseconds: st.until - now);
+      return AuthResult(
+        status: AuthStatus.locked,
+        lockRemaining: remaining,
+        message: '⏳ تم قفل الدخول مؤقتًا بسبب محاولات كثيرة. حاول بعد ${_fmt(remaining)}',
+      );
+    }
+    final fresh = await (db.select(db.users)..where((t) => t.id.equals(me.id))).getSingleOrNull();
+    if (fresh == null || !fresh.active) {
+      return const AuthResult(status: AuthStatus.inactive, message: '✖ الحساب غير مفعّل أو حُذف — سجّل الدخول من جديد');
+    }
+    final ok = await PasswordHash.verify(password, fresh.saltHex, fresh.hashHex, fresh.iterations);
+    if (!ok) return _failed(lockKey, st, now, action: 'auth.unlock_failed');
+    await _lockStore(lockKey, const _LockState(0, 0));
+    _current = fresh;
+    await _audit('auth.unlock', 'فكّ «${fresh.username}» قفل الخمول',
+        details: {'username': fresh.username}, actorEmail: fresh.email);
+    return AuthResult(status: AuthStatus.ok, user: fresh, message: '✔ فُتح القفل');
+  }
+
+  /// يفتح جلسةً لمستخدمٍ تحقّق منه مسارٌ آخر غير كلمة المرور (البصمة).
+  /// الشروط بعد التحقق هي نفسها: مفعَّل ومعتمد.
+  Future<AuthResult> startSessionFor(User user) async {
+    if (!user.active) {
+      return const AuthResult(
+        status: AuthStatus.inactive,
+        message: '✖ الحساب غير مفعّل — اطلب من مدير النظام تفعيل حسابك',
+      );
+    }
+    if (!user.approved) {
+      return const AuthResult(
+        status: AuthStatus.notApproved,
+        message: '✖ الحساب غير معتمد بعد — انتظر اعتماد المدير',
+      );
+    }
+    await _startSession(user);
+    await _audit('auth.login', 'دخول «${user.username}» بالبصمة',
+        details: {'username': user.username, 'method': 'biometric'}, actorEmail: user.email);
+    return AuthResult(status: AuthStatus.ok, user: user, message: '🌐 تم الدخول بالبصمة');
+  }
+
+  /// إعادة تجزئة كلمة المرور بالعدد الحالي من الدورات إن كانت بصمتها أضعف.
+  ///
+  /// لا تُعرف كلمة المرور الصريحة إلا لحظة الدخول، فهذه الفرصة الوحيدة للترقية.
+  /// التحديث يمر بمشغّلات المزامنة فتصل البصمة الجديدة إلى بقية الأجهزة، وفشله
+  /// لا يمنع الدخول: البصمة القديمة ما زالت صحيحة.
+  Future<User> _upgradeHash(User user, String password) async {
+    if (!PasswordHash.needsUpgrade(user.iterations)) return user;
+    try {
+      final ph = await PasswordHash.create(password);
+      await (db.update(db.users)..where((t) => t.id.equals(user.id) & t.hashHex.equals(user.hashHex))).write(
+        UsersCompanion(
+          saltHex: Value(ph.saltHex),
+          hashHex: Value(ph.hashHex),
+          iterations: Value(ph.iterations),
+          updatedAt: Value(DateTime.now()),
+        ),
+      );
+      // الهاش وختم `updatedAt` تغيّرا: توقيعات المالك على حسابٍ مميَّز تُجدَّد إن كان
+      // مفتاحه هنا، وإلا رُفض الهاش الجديد عند بقية الأجهزة (يبقى القديم صالحًا).
+      await UsersRepo(db).resign(user.id);
+      return await (db.select(db.users)..where((t) => t.id.equals(user.id))).getSingleOrNull() ?? user;
+    } catch (err, stack) {
+      // الدخول نجح؛ فشل ترقية الهاش لا يُسقطه، لكنه لا يمرّ صامتًا.
+      ErrorLogger.log('auth.hashUpgrade', err, stack);
+      return user;
+    }
+  }
+
+  // كان هنا `localReset` («إعادة تعيين محلي»: مسح حسابات `local-` من الجهاز
+  // وحده) بلا أي مستدعٍ — أُزيل في 2026-10-22 بقرار المالك: كودٌ ميت يمسح
+  // حسابات الدخول دعوةٌ لأن يُربط بزرٍّ بلا بوابة. من نسي كلمة مروره يعيد
+  // تعيينها له المالك أو المدير (`UsersRepo.resetPassword`) ثم المزامنة.
+
+  /// حالة القفل لمستخدم. إن لم توجد في القاعدة وُجد قديمها في SharedPreferences
+  /// فيُنقل إلى القاعدة ويُمسح من هناك.
+  Future<_LockState> _lockRead(String user) async {
+    final repo = SettingsRepo(db);
+    final locks = await repo.read(_locksKey);
+    final inDb = locks[user];
+    if (inDb is Map) return _LockState.fromMap(inDb);
+
+    final prefs = await SharedPreferences.getInstance();
+    final legacyRaw = prefs.getString('$_kLockPrefix$user');
+    if (legacyRaw == null) return const _LockState(0, 0);
+    _LockState legacy = const _LockState(0, 0);
+    try {
+      legacy = _LockState.fromMap(jsonDecode(legacyRaw) as Map);
+    } catch (err, stack) {
+      ErrorLogger.log('auth.legacyLock', err, stack);
+    }
+    locks[user] = legacy.toMap();
+    await repo.write(_locksKey, locks);
+    await prefs.remove('$_kLockPrefix$user');
+    return legacy;
+  }
+
+  Future<void> _lockStore(String user, _LockState s) async {
+    final repo = SettingsRepo(db);
+    final locks = await repo.read(_locksKey);
+    if (s.fails == 0 && s.until == 0 && s.strikes == 0) {
+      locks.remove(user); // لا حاجة لسطر صفري
+    } else {
+      locks[user] = s.toMap();
+    }
+    await repo.write(_locksKey, locks);
+    // لا يبقى نظيرٌ قديم يُحيي العدّاد بعد تصفيره.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('$_kLockPrefix$user');
+  }
+
+  /// الجلسة المحفوظة، أو `null`.
+  ///
+  /// [open] تعني أن الجلسة **ما زالت مفتوحة** في نظر التطبيق: تُكتب مع الجلسة
+  /// وتُمحى بالخروج (انظر [_startSession] و[restoreSession]). وجلسةٌ كتبها
+  /// إصدارٌ أقدم لا تحملها، فتُعدّ مُغلَقةً إغلاقًا نظيفًا — توافقٌ لمرةٍ واحدة.
+  Future<({String id, int startedAt, bool open})?> _readSession() async {
+    final repo = SettingsRepo(db);
+    final map = await repo.read(_sessionKey);
+    final id = map['userId'];
+    final at = map['startedAt'];
+    if (id is String && id.isNotEmpty && at is num) {
+      return (id: id, startedAt: at.toInt(), open: map[_sessionOpen] == true);
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final legacyId = prefs.getString(_kSessionUser);
+    final legacyAt = prefs.getInt(_kSessionStart);
+    if (legacyId == null || legacyAt == null) return null;
+    await repo.write(_sessionKey, {'userId': legacyId, 'startedAt': legacyAt});
+    await _clearLegacySession(prefs);
+    return (id: legacyId, startedAt: legacyAt, open: false);
+  }
+
+  Future<void> _clearLegacySession(SharedPreferences prefs) async {
+    await prefs.remove(_kSessionUser);
+    await prefs.remove(_kSessionStart);
+  }
+
+  /// استعادة جلسة سارية (أقل من 12 ساعة) بعد إعادة فتح التطبيق.
+  /// هل انتهت مدة الجلسة (12 ساعة) أو أُوقف الحساب؟ تُستدعى دوريًا والتطبيق مفتوح.
+  Future<bool> sessionExpired() async {
+    if (_current == null) return true;
+    final session = await _readSession();
+    if (session == null) return true;
+    // العلامة لا تُقاس هنا: الجلسة مفتوحةٌ فعلًا والتطبيق يعمل.
+    final started = DateTime.fromMillisecondsSinceEpoch(session.startedAt);
+    if (DateTime.now().difference(started) >= sessionDuration) return true;
+    final rows = await (db.select(db.users)..where((t) => t.id.equals(_current!.id))).get();
+    return rows.isEmpty || !rows.first.active;
+  }
+
+  /// يستعيد جلسةً سارية، أو `null` فتُطلب كلمة المرور.
+  ///
+  /// **الإنهاء القسري يُسقط الجلسة.** كان المعيار عمرَ الجلسة وحده (أقل من ١٢
+  /// ساعة)، وكل مسارات الخروج المقصود تُنهي الجلسة قبل أن تُغلق النافذة
+  /// (`_shutdown` ← [logout]) — فلم يكن يبلغ هذا الموضعَ إلا تطبيقٌ **لم يُغلق**:
+  /// قُتل من مدير المهام، أو سُحب من قائمة تطبيقات أندرويد، أو انهار، أو
+  /// انقطعت كهرباؤه. فمن أخذ الجهاز في تلك الحال فتح النظام بلا كلمة مرور،
+  /// وبدأ عدّاد الخمول من الصفر. الآن تُمحى الجلسة ويُسجَّل الحدث.
+  Future<User?> restoreSession() async {
+    await _promoteOwnerIfDue();
+    final session = await _readSession();
+    if (session == null) return null;
+    final id = session.id;
+    final started = DateTime.fromMillisecondsSinceEpoch(session.startedAt);
+    if (session.open) {
+      await logout();
+      await _auditUncleanExit(id, started);
+      return null;
+    }
+    if (DateTime.now().difference(started) >= sessionDuration) {
+      await logout();
+      return null;
+    }
+    final rows = await (db.select(db.users)..where((t) => t.id.equals(id))).get();
+    if (rows.isEmpty || !rows.first.active) {
+      await logout();
+      return null;
+    }
+    _current = rows.first;
+    _watchCurrent();
+    return _current;
+  }
+
+  Future<void> logout() async {
+    final leaving = _current;
+    if (leaving != null) {
+      await _audit('auth.logout', 'خروج «${leaving.username}»',
+          details: {'username': leaving.username}, actorEmail: leaving.email);
+    }
+    _userWatch?.cancel();
+    _userWatch = null;
+    _current = null;
+    await SettingsRepo(db).write(_sessionKey, {});
+    await _clearLegacySession(await SharedPreferences.getInstance());
+  }
+
+  /// جلسةٌ أُسقطت لأن التطبيق لم يُغلق إغلاقًا نظيفًا. الحدث يُسجَّل لأنه قد
+  /// يكون انهيارًا متكررًا أو جهازًا أُخذ وهو مفتوح. وفشلُ التسجيل لا يمنع
+  /// الإقلاع: الجلسة مُحيت قبله، وهي المقصود.
+  Future<void> _auditUncleanExit(String userId, DateTime startedAt) async {
+    try {
+      final row = await (db.select(db.users)..where((t) => t.id.equals(userId))).getSingleOrNull();
+      await AuditRepo(db).log(
+        action: 'auth.session.unclean',
+        entityType: 'جلسة',
+        summary: 'أُسقطت جلسة «${row?.username ?? userId}» لأن التطبيق أُنهي بلا إغلاق نظيف — تُطلب كلمة المرور',
+        details: {'userId': userId, 'startedAt': startedAt.toIso8601String()},
+        actorEmail: row?.email ?? '',
+      );
+    } catch (err, stack) {
+      ErrorLogger.log('auth.uncleanExitAudit', err, stack);
+    }
+  }
+
+  Future<void> _startSession(User user) async {
+    _current = user;
+    _watchCurrent();
+    await SettingsRepo(db).write(_sessionKey, {
+      'userId': user.id,
+      'startedAt': DateTime.now().millisecondsSinceEpoch,
+      // تبقى ما دامت الجلسة مفتوحة؛ يمحوها الخروج الصريح وحده.
+      _sessionOpen: true,
+    });
+    await _clearLegacySession(await SharedPreferences.getInstance());
+  }
+
+  /// صلاحيات المستخدم الحالي، مخزَّنةً JSON.
+  Map<String, dynamic> permissionsOf(User user) {
+    try {
+      return (jsonDecode(user.permissions) as Map).cast<String, dynamic>();
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  bool can(User user, String page, [String action = 'view']) {
+    if (SysPerm.isSys(page)) return UserRole.isOwner(user.role);
+    // القسم المحجوب مغلق (المالك وحده لا يُحجب عنه شيء).
+    if (SectionBlock.blocksPage(role: user.role, blockedJson: user.sectionBlocked, page: page)) return false;
+    if (UserRole.isAdmin(user.role)) return true;
+    final perms = permissionsOf(user);
+    return AccessControl.allows(perms[page] is Map ? perms[page] as Map : null, action);
+  }
+
+  /// نطاق المستودعات: `null` ⇒ كل المستودعات (المدير أو `ALL`)، وإلا قائمة أسماء.
+  /// التالف يُرجع قائمةً فارغة (فشل مغلق) — انظر [parseWarehouseScope].
+  List<String>? warehouseScopeOf(User user) {
+    if (UserRole.isAdmin(user.role)) return null;
+    return parseWarehouseScope(user.warehouseScope, source: 'auth.warehouseScope');
+  }
+
+  static String _normalizeUsername(String v) => v.trim();
+
+  static void _validateUsername(String v) {
+    if (!RegExp(r'^[A-Za-z0-9_.]{3,20}$').hasMatch(v)) {
+      throw ArgumentError('✖ اسم المستخدم: 3-20 حرفًا إنجليزيًا/أرقام/نقطة/شرطة سفلية');
+    }
+  }
+
+  static void _validatePassword(String v, {String username = ''}) {
+    final why = PasswordPolicy.problem(v, username: username);
+    if (why != null) throw ArgumentError('✖ $why');
+  }
+
+  /// مدّةٌ بالمللي ثانية إلى نصٍّ مقروء.
+  static String _fmt(Duration d) {
+    final s = (d.inMilliseconds / 1000).ceil();
+    return s < 60 ? '$s ثانية' : '${(s / 60).ceil()} دقيقة';
+  }
+}
+
+class _LockState {
+  const _LockState(this.fails, this.until, {this.strikes = 0, this.lastLockAt = 0});
+
+  factory _LockState.fromMap(Map o) => _LockState(
+        (o['fails'] as num?)?.toInt() ?? 0,
+        (o['until'] as num?)?.toInt() ?? 0,
+        strikes: (o['strikes'] as num?)?.toInt() ?? 0,
+        lastLockAt: (o['lastLockAt'] as num?)?.toInt() ?? 0,
+      );
+
+  final int fails;
+  final int until;
+
+  /// كم مرةً قُفل الاسم متتاليًا (يحدد مدة القفل التالي — [AuthService.lockDurationFor]).
+  final int strikes;
+
+  /// متى قُفل آخر مرة (ملّي ثانية)، لنسيان المرّات بعد [AuthService.strikeDecay].
+  final int lastLockAt;
+
+  Map<String, dynamic> toMap() => {
+        'fails': fails,
+        'until': until,
+        if (strikes > 0) 'strikes': strikes,
+        if (lastLockAt > 0) 'lastLockAt': lastLockAt,
+      };
+}
+// ==================== END FILE: lib/core/security/auth_service.dart ====================
+
+// ==================== FILE: lib/core/security/perm.dart ====================
+import 'package:flutter/widgets.dart';
+import 'package:provider/provider.dart';
+
+import '../../domain/access_control.dart';
+import '../../domain/cable_clearance.dart';
+import '../../domain/perm_catalog.dart';
+import '../../domain/section_block.dart';
+import '../ui/imd_widgets.dart';
+import 'auth_service.dart';
+
+/// مساعدات الصلاحيات في الشاشات: فحص إذنٍ واحد، وإدارة صفحة، وحراسة وصول.
+class Perm {
+  Perm(this._auth);
+  final AuthService _auth;
+
+  /// أسماء الصفحات كما تظهر في رسائل الصلاحية — من [PermCatalog] (المصدر الوحيد)
+  /// مضافًا إليها أسماء بنود القائمة التي تتبع صلاحية غيرها.
+  static final Map<String, String> labels = {
+    ...PermCatalog.aliasLabels,
+    ...PermCatalog.labels,
+  };
+
+  static Perm of(BuildContext context) => Perm(context.read<AuthService>());
+
+  /// `can()` — مدير النظام.
+  /// مدير أو مالك: كل صلاحيات الصفحات.
+  bool get admin => UserRole.isAdmin(_auth.currentUser?.role);
+
+  /// المالك وحده: يملك `sys.*`.
+  bool get owner => UserRole.isOwner(_auth.currentUser?.role);
+
+  /// صلاحية نظامٍ خاصة (`sys.*`) — للمالك وحده.
+  bool sys(String key) => owner;
+
+  /// حارس `sys.*`: يرفض بإشعارٍ يسمّي الصلاحية.
+  bool guardSys(BuildContext context, String key) {
+    if (sys(key)) return true;
+    showImdToast(context, '✖ هذا الإجراء للمالك وحده — ${SysPerm.labels[key] ?? key}', error: true);
+    return false;
+  }
+
+  String get email => _auth.currentUser?.email ?? '';
+
+  /// اسم المستخدم الحالي للعرض (الاسم، وإلا اسم الدخول).
+  String get displayName {
+    final u = _auth.currentUser;
+    if (u == null) return '';
+    return u.name.trim().isNotEmpty ? u.name.trim() : u.username;
+  }
+
+  static Map? _pageMap(Object? v) => v is Map ? v : null;
+
+  bool has(String page, [String action = PermAction.view]) {
+    final u = _auth.currentUser;
+    if (u == null) return false;
+    if (SysPerm.isSys(page)) return owner;
+    if (SectionBlock.blocksPage(role: u.role, blockedJson: u.sectionBlocked, page: page)) return false;
+    if (admin) return true;
+    return AccessControl.allows(_pageMap(_auth.permissionsOf(u)[page]), action);
+  }
+
+  /// درجات سرية البرقيات التي يطّلع عليها المستخدم الحالي (M-18) — لا يرثها
+  /// المدير بدوره كبقية الصفحات، انظر [CableClearance].
+  Set<String> cableClearance() {
+    final u = _auth.currentUser;
+    if (u == null || !has('cables')) return const {};
+    return CableClearance.allowed(role: u.role, permissions: _auth.permissionsOf(u));
+  }
+
+  /// هل القسم [section] (من [SectionBlock.all]) محجوبٌ عن المستخدم الحالي؟
+  /// المالك لا يُحجب عنه شيء.
+  bool blocked(String section) {
+    final u = _auth.currentUser;
+    if (u == null) return true;
+    return SectionBlock.blocksSection(role: u.role, blockedJson: u.sectionBlocked, section: section);
+  }
+
+  /// `pageManage(page)`
+  bool manage(String page) =>
+      has(page, PermAction.create) ||
+      has(page, PermAction.edit) ||
+      has(page, PermAction.delete) ||
+      has(page, PermAction.approve);
+
+  /// `can() || pageManage(page)` — الشرط المتكرر لإظهار أزرار الإدارة.
+  ///
+  /// **لا يصلح لزرٍّ مدمِّر:** يصدق بأيِّ إجراءٍ من الأربعة، فمن يملك الإضافة
+  /// وحدها «قابلٌ للكتابة». استعمل [canDelete] لزرِّ الحذف و[has] لغيره.
+  bool writable(String page) => admin || manage(page);
+
+  /// صلاحية الحذف على [page] وحدها — بوابةُ كل زرٍّ يحذف.
+  ///
+  /// كانت أزرار الحذف في الكتالوج والتشغيل اليومي والمحروقات تُعرض بـ[writable]،
+  /// وهو يصدق بالإضافة أو التعديل أو الاعتماد. وقالب «أمين مخزن» يمنح الأصناف
+  /// والموردين والوحدات والمطابخ والأصول إضافةً وتعديلًا **بلا حذف** صراحةً —
+  /// فكان يرى الزرَّ ويحذف، على نقيض ما يَعِد به القالب.
+  bool canDelete(String page) => has(page, PermAction.delete);
+
+  /// نطاق المستودعات: null ⇒ كل المستودعات (`scopeOf()==='ALL'`).
+  List<String>? get scope {
+    final u = _auth.currentUser;
+    if (u == null) return const [];
+    return _auth.warehouseScopeOf(u);
+  }
+
+  /// `canWh(name)`
+  bool canWh(String warehouse) {
+    final s = scope;
+    return s == null || warehouse.isEmpty || s.contains(warehouse);
+  }
+
+  /// نطاق مستودع محروقات [warehouse] من بين [fuelWarehouses] — انظر
+  /// [AccessControl.canUseFuelWarehouse] (لا يقيّد إلا نطاقًا يذكر خزّانًا).
+  bool canFuelWh(String warehouse, Iterable<String> fuelWarehouses) => AccessControl.canUseFuelWarehouse(
+        isAdmin: false,
+        scope: scope,
+        fuelWarehouses: fuelWarehouses,
+        warehouse: warehouse,
+      );
+
+  /// خزّانات المحروقات التي يراها المستخدم من دليلها [all]، أو `null` إن لم يُقيَّد
+  /// (بها تُصفّى التقارير ولوحة المحروقات: «الكل» = خزّانات النطاق وحدها).
+  Set<String>? fuelScope(Iterable<String> all) {
+    final names = all.toSet();
+    final own = {for (final w in names) if (canFuelWh(w, names)) w};
+    return own.length == names.length ? null : own;
+  }
+
+  /// `blockMsg(wh)` في access-control.js
+  static String scopeBlock(String warehouse) =>
+      '✖ المستودع «$warehouse» خارج نطاق صلاحياتك — تواصل مع مدير النظام';
+
+  /// `guardPerm(page, action)`
+  bool guard(BuildContext context, String page,
+      [String action = PermAction.edit]) {
+    if (has(page, action)) return true;
+    showImdToast(
+        context, '✖ لا تملك صلاحية: ${labels[page] ?? page} — $action');
+    return false;
+  }
+}
+// ==================== END FILE: lib/core/security/perm.dart ====================
+
+// ==================== FILE: lib/core/security/warehouse_scope.dart ====================
+import 'dart:convert';
+
+import '../error_log.dart';
+
+/// يقرأ نطاق المستودعات المخزَّن لمستخدم (`users.warehouse_scope`).
+///
+/// القيم الصحيحة: `ALL` (كل المستودعات ⇒ `null`) أو JSON بقائمة أسماء.
+///
+/// **فشلٌ مغلق:** أي قيمة أخرى — نصٌّ تالف، JSON ليس قائمة، فراغ — تُعدّ تالفة،
+/// فتُرجع قائمةً **فارغة** (لا مستودعات) وتُسجَّل خطأً حرجًا. كان التلف يُرجع
+/// `null` أي «كل المستودعات»، فيرى المستخدم المقيَّد كل شيء بسبب تلف قيمته.
+/// يصلح المدير النطاق من «المستخدمون والصلاحيات».
+List<String>? parseWarehouseScope(String raw, {required String source}) {
+  if (raw.trim().toUpperCase() == 'ALL') return null;
+  try {
+    final v = jsonDecode(raw);
+    if (v is List) return [for (final e in v) e.toString()];
+    throw FormatException('نطاق المستودعات ليس قائمة: «$raw»');
+  } catch (err, stack) {
+    ErrorLogger.critical(source, err, stack: stack);
+    return const <String>[];
+  }
+}
+// ==================== END FILE: lib/core/security/warehouse_scope.dart ====================
+
+// ==================== FILE: lib/core/security/pbkdf2.dart ====================
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
+
+/// اشتقاق المفاتيح: PBKDF2-HMAC-SHA256 · Salt عشوائي 16 بايت · مخرج 256 بت (64 حرفًا hex).
+///
+/// عدد الدورات يُحفظ مع كل حساب (`users.iterations`)، فالحسابات القديمة المُرحَّلة
+/// من النظام السابق (45,000 دورة — [legacyIterations]) تبقى تعمل، وتُعاد تجزئتها بالعدد
+/// الحالي [iterations] عند أول دخول ناجح (انظر `PasswordHash`).
+class Pbkdf2 {
+  /// العدد الحالي لكل كلمة مرور جديدة أو مُعاد تجزئتها. (توصية OWASP لـ SHA-256.)
+  static const int iterations = 310000;
+
+  /// عدد النظام السابق ودفعات التطبيق الأولى — للتحقق من الحسابات القديمة فقط.
+  static const int legacyIterations = 45000;
+  static const int _keyLengthBytes = 32; // 256 بت
+  static const int _saltLengthBytes = 16;
+
+  /// توليد salt عشوائي بصيغة hex (32 حرفًا) كما يفعل النظام الحالي.
+  static String newSaltHex() {
+    final rnd = Random.secure();
+    final bytes = Uint8List(_saltLengthBytes);
+    for (var i = 0; i < bytes.length; i++) {
+      bytes[i] = rnd.nextInt(256);
+    }
+    return toHex(bytes);
+  }
+
+  /// اشتقاق المفتاح وإرجاعه hex — نفس ناتج WebCrypto في النسخة الحالية.
+  static String deriveHex(String password, String saltHex,
+      {int iterations = iterations}) {
+    final derived = derive(
+      utf8.encode(password),
+      fromHex(saltHex),
+      iterations: iterations,
+      length: _keyLengthBytes,
+    );
+    return toHex(derived);
+  }
+
+  /// PBKDF2 (RFC 8018) فوق HMAC-SHA256.
+  ///
+  /// الحلقة الداخلية هي كل الكلفة، فكُتبت بلا حجز ذاكرة: حالتا SHA-256 بعد كتلتي
+  /// ipad وopad تُحسبان مرة واحدة من كلمة المرور، ثم كل دورة = ضغطتان فقط بدل
+  /// أربع في `Hmac.convert` (الذي يعيد معالجة المفتاح في كل استدعاء). الناتج
+  /// مطابق بايتًا ببايت للتنفيذ المرجعي — تحرسه متجهات اختبارٍ في pbkdf2_test.
+  static Uint8List derive(
+    List<int> password,
+    List<int> salt, {
+    int iterations = iterations,
+    int length = _keyLengthBytes,
+  }) {
+    if (iterations < 1) {
+      throw ArgumentError.value(iterations, 'iterations', 'يجب أن يكون 1 فأكثر');
+    }
+    if (length < 1) {
+      throw ArgumentError.value(length, 'length', 'يجب أن يكون 1 فأكثر');
+    }
+
+    // مفتاح HMAC: يُختصر بـ SHA-256 إن زاد عن طول الكتلة (64 بايت).
+    final key = Uint8List(64)..setAll(0, password.length > 64 ? sha256.convert(password).bytes : password);
+    final ipad = Uint8List(64);
+    final opad = Uint8List(64);
+    for (var i = 0; i < 64; i++) {
+      ipad[i] = key[i] ^ 0x36;
+      opad[i] = key[i] ^ 0x5c;
+    }
+    final innerState = Uint32List.fromList(_sha256Init);
+    _Sha256.compressBytes(innerState, ipad);
+    final outerState = Uint32List.fromList(_sha256Init);
+    _Sha256.compressBytes(outerState, opad);
+
+    final hmac = Hmac(sha256, password);
+    const hashLength = 32; // sha256
+    final blocks = (length + hashLength - 1) ~/ hashLength;
+    final output = Uint8List(blocks * hashLength);
+
+    // كتلة رسالة لقيمة بطول 32 بايت بعد كتلة مفتاح: الحشوة ثابتة وطولها (64+32)×8 بت.
+    final w = Uint32List(64);
+    final st = Uint32List(8);
+    final u = Uint32List(8);
+    final acc = Uint32List(8);
+
+    for (var block = 1; block <= blocks; block++) {
+      final blockIndex = Uint8List(4)
+        ..[0] = (block >> 24) & 0xff
+        ..[1] = (block >> 16) & 0xff
+        ..[2] = (block >> 8) & 0xff
+        ..[3] = block & 0xff;
+
+      final first = hmac.convert(<int>[...salt, ...blockIndex]).bytes;
+      for (var j = 0; j < 8; j++) {
+        u[j] = (first[j * 4] << 24) | (first[j * 4 + 1] << 16) | (first[j * 4 + 2] << 8) | first[j * 4 + 3];
+        acc[j] = u[j];
+      }
+
+      for (var i = 1; i < iterations; i++) {
+        // الداخلي: SHA256(ipad || u)
+        st.setAll(0, innerState);
+        _Sha256.compressDigest(st, w, u);
+        // الخارجي: SHA256(opad || الداخلي)
+        u.setAll(0, st);
+        st.setAll(0, outerState);
+        _Sha256.compressDigest(st, w, u);
+        u.setAll(0, st);
+        for (var j = 0; j < 8; j++) {
+          acc[j] ^= u[j];
+        }
+      }
+      final base = (block - 1) * hashLength;
+      for (var j = 0; j < 8; j++) {
+        output[base + j * 4] = acc[j] >> 24;
+        output[base + j * 4 + 1] = (acc[j] >> 16) & 0xff;
+        output[base + j * 4 + 2] = (acc[j] >> 8) & 0xff;
+        output[base + j * 4 + 3] = acc[j] & 0xff;
+      }
+    }
+    return Uint8List.sublistView(output, 0, length);
+  }
+
+  /// مقارنة بزمن ثابت لتفادي تسريب المعلومات عبر توقيت المقارنة.
+  static bool constantTimeEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
+  }
+
+  static String toHex(List<int> bytes) {
+    final sb = StringBuffer();
+    for (final b in bytes) {
+      sb.write(b.toRadixString(16).padLeft(2, '0'));
+    }
+    return sb.toString();
+  }
+
+  static Uint8List fromHex(String hex) {
+    final clean = hex.trim();
+    if (clean.length.isOdd) {
+      throw ArgumentError.value(hex, 'hex', 'طول غير صالح');
+    }
+    final out = Uint8List(clean.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return out;
+  }
+}
+
+const List<int> _sha256Init = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, //
+  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+/// دالة ضغط SHA-256 (FIPS 180-4) على حالة 8 كلمات — لا تُستخدم إلا داخل [Pbkdf2.derive].
+class _Sha256 {
+  static const List<int> _k = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, //
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  /// ضغط كتلة من 64 بايت (كتلة مفتاح HMAC).
+  static void compressBytes(Uint32List state, Uint8List block) {
+    final w = Uint32List(64);
+    for (var i = 0; i < 16; i++) {
+      w[i] = (block[i * 4] << 24) | (block[i * 4 + 1] << 16) | (block[i * 4 + 2] << 8) | block[i * 4 + 3];
+    }
+    _run(state, w);
+  }
+
+  /// ضغط الكتلة الأخيرة لرسالة من 32 بايت تلي كتلة مفتاح: الكلمات الثماني ثم
+  /// بت الحشوة ثم الطول الكلي 768 بت.
+  static void compressDigest(Uint32List state, Uint32List w, Uint32List digest) {
+    for (var i = 0; i < 8; i++) {
+      w[i] = digest[i];
+    }
+    w[8] = 0x80000000;
+    for (var i = 9; i < 15; i++) {
+      w[i] = 0;
+    }
+    w[15] = 768;
+    _run(state, w);
+  }
+
+  static int _rotr(int x, int n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
+
+  static void _run(Uint32List state, Uint32List w) {
+    for (var i = 16; i < 64; i++) {
+      final x = w[i - 15];
+      final y = w[i - 2];
+      final s0 = _rotr(x, 7) ^ _rotr(x, 18) ^ (x >> 3);
+      final s1 = _rotr(y, 17) ^ _rotr(y, 19) ^ (y >> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff;
+    }
+    var a = state[0], b = state[1], c = state[2], d = state[3];
+    var e = state[4], f = state[5], g = state[6], h = state[7];
+    for (var i = 0; i < 64; i++) {
+      final s1 = _rotr(e, 6) ^ _rotr(e, 11) ^ _rotr(e, 25);
+      final ch = (e & f) ^ (~e & g);
+      final t1 = (h + s1 + ch + _k[i] + w[i]) & 0xffffffff;
+      final s0 = _rotr(a, 2) ^ _rotr(a, 13) ^ _rotr(a, 22);
+      final maj = (a & b) ^ (a & c) ^ (b & c);
+      final t2 = (s0 + maj) & 0xffffffff;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + t1) & 0xffffffff;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) & 0xffffffff;
+    }
+    state[0] = (state[0] + a) & 0xffffffff;
+    state[1] = (state[1] + b) & 0xffffffff;
+    state[2] = (state[2] + c) & 0xffffffff;
+    state[3] = (state[3] + d) & 0xffffffff;
+    state[4] = (state[4] + e) & 0xffffffff;
+    state[5] = (state[5] + f) & 0xffffffff;
+    state[6] = (state[6] + g) & 0xffffffff;
+    state[7] = (state[7] + h) & 0xffffffff;
+  }
+}
+// ==================== END FILE: lib/core/security/pbkdf2.dart ====================
+
+// ==================== FILE: lib/core/security/password_hash.dart ====================
+import 'package:flutter/foundation.dart';
+
+import 'pbkdf2.dart';
+
+/// بصمة كلمة مرور جاهزة للحفظ في جدول المستخدمين (الأعمدة الثلاثة معًا).
+class PasswordHash {
+  const PasswordHash({required this.saltHex, required this.hashHex, required this.iterations});
+
+  final String saltHex;
+  final String hashHex;
+  final int iterations;
+
+  /// بصمة جديدة بملح جديد وبالعدد الحالي من الدورات.
+  ///
+  /// الاشتقاق يعمل في Isolate منفصل حتى لا تتجمد الواجهة أثناءه (على الويب
+  /// يعمل `compute` في الخيط نفسه).
+  static Future<PasswordHash> create(String password) async {
+    final salt = Pbkdf2.newSaltHex();
+    const n = Pbkdf2.iterations;
+    final hash = await compute(_derive, (password, salt, n));
+    return PasswordHash(saltHex: salt, hashHex: hash, iterations: n);
+  }
+
+  /// مطابقة كلمة مرور مع بصمة محفوظة بعدد دوراتها هي (لا العدد الحالي).
+  static Future<bool> verify(String password, String saltHex, String hashHex, int iterations) async {
+    if (saltHex.isEmpty || hashHex.isEmpty || iterations < 1 || iterations > Pbkdf2.iterations) return false;
+    final derived = await compute(_derive, (password, saltHex, iterations));
+    return Pbkdf2.constantTimeEquals(derived, hashHex);
+  }
+
+  /// هل البصمة أضعف من المعيار الحالي فتُعاد تجزئتها عند الدخول الناجح؟
+  static bool needsUpgrade(int iterations) => iterations < Pbkdf2.iterations;
+}
+
+String _derive((String, String, int) a) => Pbkdf2.deriveHex(a.$1, a.$2, iterations: a.$3);
+// ==================== END FILE: lib/core/security/password_hash.dart ====================
+
+// ==================== FILE: lib/core/security/idle_lock.dart ====================
+import 'dart:async';
+
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
+import '../../data/db/app_database.dart';
+import '../../data/repos/settings_repo.dart';
+
+/// القفل التلقائي بعد الخمول.
+///
+/// بعد [minutes] دقيقة بلا حركة فأرة أو لمسة أو مفتاح يُقفل التطبيق بغطاءٍ يطلب
+/// كلمة مرور المستخدم الحالي — **دون تسجيل خروج**: الشاشات المفتوحة ومسوّدات
+/// الإدخال تبقى كما هي خلف الغطاء، فلا يضيع عملٌ بسبب قهوة.
+///
+/// الإعداد محلي للجهاز (`SettingsRepo.localOnlyKeys['security']`)، والافتراضي
+/// [defaultMinutes]؛ الصفر يعطّل القفل. المعيار الزمني ساعة الجهاز، فاستئناف
+/// تطبيق أندرويد بعد ساعة في الخلفية يقفل فورًا عند العودة.
+class IdleLock extends ChangeNotifier with WidgetsBindingObserver {
+  IdleLock(this._db, {DateTime Function()? clock, this.tick = const Duration(seconds: 10)})
+      : _now = clock ?? DateTime.now {
+    _lastActivity = _now();
+  }
+
+  final AppDatabase _db;
+  final DateTime Function() _now;
+
+  /// دورية فحص الخمول. المؤقّت لا يُعاد ضبطه مع كل حركة (مكلف)، بل تُسجَّل آخر
+  /// حركة ويُقارَن بها كل [tick].
+  final Duration tick;
+
+  static const String settingsKey = 'security';
+  static const int defaultMinutes = 15;
+
+  /// الخيارات المعروضة في الإعدادات (دقائق؛ 0 = معطّل).
+  static const List<int> choices = [0, 5, 10, 15, 30, 60];
+
+  int _minutes = defaultMinutes;
+  bool _locked = false;
+  bool _active = false;
+  late DateTime _lastActivity;
+  Timer? _timer;
+
+  int get minutes => _minutes;
+  bool get enabled => _minutes > 0;
+  bool get locked => _locked;
+
+  /// يقرأ الإعداد المحفوظ. القيم غير المعروفة تُهمَل إلى الافتراضي.
+  Future<void> load() async {
+    final raw = (await SettingsRepo(_db).read(settingsKey))['idleLockMinutes'];
+    final m = raw is num ? raw.toInt() : defaultMinutes;
+    _minutes = m < 0 ? defaultMinutes : m;
+    notifyListeners();
+  }
+
+  Future<void> setMinutes(int minutes) async {
+    _minutes = minutes < 0 ? 0 : minutes;
+    final repo = SettingsRepo(_db);
+    final map = await repo.read(settingsKey);
+    map['idleLockMinutes'] = _minutes;
+    await repo.write(settingsKey, map);
+    _lastActivity = _now();
+    notifyListeners();
+  }
+
+  /// يبدأ المراقبة عند تسجيل الدخول.
+  void activate() {
+    if (_active) return;
+    _active = true;
+    _lastActivity = _now();
+    WidgetsBinding.instance.addObserver(this);
+    HardwareKeyboard.instance.addHandler(_onKey);
+    _timer = Timer.periodic(tick, (_) => checkNow());
+  }
+
+  /// يوقف المراقبة ويُزيل القفل عند الخروج.
+  void deactivate() {
+    if (!_active && !_locked) return;
+    _active = false;
+    _timer?.cancel();
+    _timer = null;
+    WidgetsBinding.instance.removeObserver(this);
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    if (_locked) {
+      _locked = false;
+      notifyListeners();
+    }
+  }
+
+  bool _onKey(KeyEvent event) {
+    touch();
+    return false; // لا يستهلك المفتاح
+  }
+
+  /// نشاط مستخدم. أثناء القفل لا يفتح شيئًا: الفتح بكلمة المرور وحدها.
+  void touch() {
+    if (!_locked) _lastActivity = _now();
+  }
+
+  /// يقفل إن انقضت مهلة الخمول. يعيد هل قُفل الآن.
+  bool checkNow() {
+    if (!_active || _locked || !enabled) return false;
+    if (_now().difference(_lastActivity) < Duration(minutes: _minutes)) return false;
+    lockNow();
+    return true;
+  }
+
+  /// قفلٌ فوري (زرّ «قفل الشاشة»).
+  void lockNow() {
+    if (!_active || _locked) return;
+    // حقلٌ في الصفحة خلف الغطاء قد يكون ممسكًا باتصال لوحة المفاتيح: يُترك قبل
+    // أن يطلب حقلُ كلمة المرور اتصاله، فلا يتجاور اتصالان في حالةٍ واحدة.
+    FocusManager.instance.primaryFocus?.unfocus();
+    _locked = true;
+    notifyListeners();
+  }
+
+  /// بعد التحقق من كلمة المرور.
+  void unlock() {
+    if (!_locked) return;
+    _locked = false;
+    _lastActivity = _now();
+    notifyListeners();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) checkNow();
+  }
+
+  @override
+  void dispose() {
+    deactivate();
+    super.dispose();
+  }
+}
+// ==================== END FILE: lib/core/security/idle_lock.dart ====================
+
+// ==================== FILE: lib/core/security/sys_notice.dart ====================
+import '../../data/db/app_database.dart';
+import '../../data/repos/settings_repo.dart';
+import '../../domain/access_control.dart';
+
+/// تنبيه المرحلة الانتقالية: بعد الترقية انتقلت النسخ الاحتياطي والتفعيل
+/// والمزامنة إلى المالك. يُعرض **مرةً واحدة** لكل مديرٍ غير مالك على هذا الجهاز
+/// ثم لا يتكرر (حالته محلية فقط ولا تُزامَن).
+class SysTransitionNotice {
+  SysTransitionNotice(this.db);
+
+  final AppDatabase db;
+
+  static const String key = 'sysNotice';
+
+  static const String message =
+      'النسخ الاحتياطي والتفعيل والمزامنة انتقلت للمالك. تواصل معه.';
+
+  /// هل يُعرض التنبيه لـ[user] الآن؟ (مدير غير مالك لم يرَه من قبل.)
+  Future<bool> shouldShow(User user) async {
+    if (!UserRole.isAdmin(user.role) || UserRole.isOwner(user.role)) return false;
+    final seen = await SettingsRepo(db).read(key);
+    return seen[user.id] != true;
+  }
+
+  Future<void> markSeen(User user) async {
+    final repo = SettingsRepo(db);
+    final seen = await repo.read(key);
+    seen[user.id] = true;
+    await repo.write(key, seen);
+  }
+}
+// ==================== END FILE: lib/core/security/sys_notice.dart ====================
+
+// ==================== FILE: lib/domain/access_control.dart ====================
+/// الأدوار ونطاق المستودعات — نقل مطابق لـ access-control.js.
+/// • قوالب أدوار جاهزة تُجمع لمستخدم واحد (مدخل بيانات، أمين مخزن، ركن إمداد، مدير مكتب، مطّلع).
+/// • نطاق المستودعات: كل المستودعات أو قائمة محددة، ويُطبَّق على الإدخال والسجلات والتقارير والأرصدة.
+/// • مدير النظام (role = admin) يملك كل الصلاحيات ولا يخضع للنطاق.
+library;
+
+import 'perm_catalog.dart';
+import 'section_block.dart';
+
+class PermAction {
+  static const String view = 'view';
+  static const String create = 'create';
+  static const String edit = 'edit';
+  static const String delete = 'delete';
+  static const String approve = 'approve';
+  static const String print = 'print';
+  static const String export = 'export';
+
+  /// استيراد بياناتٍ من ملف (Excel وغيره) — إجراءٌ مستقل عن «إضافة».
+  static const String import = 'import';
+}
+
+/// أدوار الحساب (عمود `users.role`).
+///
+/// • [owner]: المالك — كل الصلاحيات ومعها `sys.*`، ولا يُعدَّل من أحد.
+/// • [admin]: مدير النظام — كل صلاحيات الصفحات، **بلا** `sys.*`.
+/// • [user]: مستخدم عادي — بحسب صلاحياته المخزَّنة.
+///
+/// القيمة القديمة `admin` تبقى كما هي، فلا ترحيل لها: المالك أضيف فوقها.
+class UserRole {
+  const UserRole._();
+
+  static const String owner = 'owner';
+  static const String admin = 'admin';
+  static const String user = 'user';
+
+  /// يملك كل صلاحيات الصفحات (مالك أو مدير).
+  static bool isAdmin(String? role) => role == admin || role == owner;
+
+  static bool isOwner(String? role) => role == owner;
+
+  static String label(String? role) => switch (role) {
+        owner => 'المالك',
+        admin => 'مدير النظام',
+        _ => 'مستخدم',
+      };
+}
+
+/// الصلاحيات الخاصة بالنظام (`sys.*`) — **للمالك وحده**.
+///
+/// ليست في كتالوج الصلاحيات ولا في القوالب ولا في مصفوفة الصلاحيات، ولا تُقرأ
+/// من `users.permissions` إطلاقًا: فمفتاحٌ `sys.backup: true` يصل بمزامنةٍ أو
+/// بملف استعادة أو بتعديلٍ يدوي للقاعدة **لا أثر له** (فشلٌ مغلق). الفحص دور
+/// الحساب [UserRole.owner] لا غير.
+class SysPerm {
+  const SysPerm._();
+
+  static const String prefix = 'sys.';
+
+  /// تعديل صلاحيات الآخرين وأدوارهم وحجب الأقسام.
+  static const String permissions = 'sys.permissions';
+
+  /// منح دور مدير النظام، وحذف المستخدمين وتعطيلهم، وإعادة كلمة مرور مدير.
+  static const String users = 'sys.users';
+
+  /// النسخ الاحتياطي الكامل (تصدير واستعادة وجدولة) والإعادة المحلية واستيراد
+  /// حسابات المستخدمين بالجملة.
+  static const String backup = 'sys.backup';
+
+  /// تفعيل الأجهزة: إصدار الرموز والإلغاء والمفتاح الخاص.
+  static const String devices = 'sys.devices';
+
+  /// المزامنة: الاقتران والمفاتيح الدائمة واستقبال الحسابات.
+  static const String sync = 'sys.sync';
+
+  /// الإعدادات الحساسة: قواعد المحرك ومفتاح التوقيع والأرشفة التلقائية.
+  static const String settingsSensitive = 'sys.settingsSensitive';
+
+  static const Map<String, String> labels = {
+    permissions: 'تعديل الصلاحيات والأدوار وحجب الأقسام',
+    users: 'منح دور المدير وحذف المستخدمين وتعطيلهم',
+    backup: 'النسخ الاحتياطي الكامل واستيراد المستخدمين',
+    devices: 'تفعيل الأجهزة',
+    sync: 'المزامنة والاقتران',
+    settingsSensitive: 'الإعدادات الحساسة (القواعد والتوقيع والأرشفة)',
+  };
+
+  static List<String> get all => labels.keys.toList();
+
+  static bool isSys(String page) => page.startsWith(prefix);
+}
+
+/// صلاحيات على شكل: { 'receive': {'view': true, 'create': true}, ... }
+typedef PermissionMap = Map<String, Map<String, bool>>;
+
+class RoleTemplate {
+  const RoleTemplate({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.permissions,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+  final PermissionMap permissions;
+}
+
+class AccessControl {
+  static const List<String> basicPages = [
+    'dashboard', 'items', 'suppliers', 'units', 'stores', 'kitchens', 'assets',
+    'supplyAuthorities',
+  ];
+
+  /// طلبيات الإعاشة ضمن العمليات: من يستلم ويصرف هو من يطلب، ومن يعتمد سندًا
+  /// هو من يعتمد طلبية.
+  /// صفحات المحروقات — قسمٌ مستقل عن مخزون الإعاشة: أمين المحروقات ليس
+  /// بالضرورة أمين المستودع، وصلاحية أحدهما لا تُعطى للآخر ضمنًا.
+  static const List<String> fuelPages = [
+    'fuelDashboard', 'fuelAllocations', 'fuelMoves', 'fuelStocktake',
+    'fuelWarehouses', 'fuelUnits', 'fuelSettings',
+    'fuelVehicles', 'fuelReports', 'fuelConsumption',
+  ];
+
+  static const List<String> opsPages = [
+    'receive', 'issue', 'transfer', 'returns', 'rationOrders',
+  ];
+
+  static PermissionMap grant(List<String> pages, List<String> actions) {
+    final out = <String, Map<String, bool>>{};
+    for (final p in pages) {
+      out[p] = {for (final a in actions) a: true};
+    }
+    return out;
+  }
+
+  static PermissionMap merge(List<PermissionMap> maps) {
+    final out = <String, Map<String, bool>>{};
+    for (final m in maps) {
+      m.forEach((page, actions) {
+        final target = out.putIfAbsent(page, () => <String, bool>{});
+        actions.forEach((action, allowed) {
+          if (allowed) target[action] = true;
+        });
+      });
+    }
+    return out;
+  }
+
+  /// القوالب كما تُمنح: كل قالبٍ مصفّى بالكتالوج ([PermCatalog]) — فلا يمنح
+  /// قالبٌ إجراءً لا تعرضه مصفوفة الصلاحيات ولا تفحصه شاشة (كان في القوالب
+  /// القديمة ٢١ مفتاحًا ميتًا، كـ«طباعة» لوحة المحروقات: لا أثر لها، لكنها
+  /// تُخزَّن في حساب المستخدم ولا يراها المالك ليسحبها).
+  static final Map<String, RoleTemplate> roles = {
+    for (final r in _templates.values)
+      r.id: RoleTemplate(
+        id: r.id,
+        label: r.label,
+        description: r.description,
+        permissions: catalogOnly(r.permissions),
+      ),
+  };
+
+  /// [map] بلا ما ليس في الكتالوج من صفحاتٍ وإجراءات.
+  static PermissionMap catalogOnly(PermissionMap map) => {
+        for (final e in map.entries)
+          if (PermCatalog.byKey[e.key] case final entry?)
+            e.key: {
+              for (final a in e.value.entries)
+                if (entry.actions.contains(a.key)) a.key: a.value,
+            },
+      };
+
+  static final Map<String, RoleTemplate> _templates = {
+    'data_entry': RoleTemplate(
+      id: 'data_entry',
+      label: 'مدخل بيانات',
+      description: 'إضافة سندات وتفريدات وسجلات جديدة فقط في مستودعات نطاقه — دون تعديل ما سُجّل أو حذفه أو اعتماده',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view, PermAction.create]),
+        // إضافةٌ فقط: التفريدة تُحفظ لليوم الجديد بـ«إضافة» (انظر strength_screen)،
+        // وتصحيح ما سُجّل لمن يملك «تعديل».
+        grant(['feeding', 'kitchenLog', 'mealPlans'], [PermAction.view, PermAction.create]),
+        grant(['balances', 'pendingOrders'], [PermAction.view]),
+        grant(['documents'], [PermAction.view]),
+        // العدّ إضافة: سطرٌ لم يُعدّ بعد يكفيه «إضافة» (انظر _canCountLine في
+        // شاشة الجرد)، وتصحيح عدٍّ مسجَّل يتطلب «تعديل».
+        grant(['stocktake'], [PermAction.view, PermAction.create]),
+      ]),
+    ),
+    'storekeeper': RoleTemplate(
+      id: 'storekeeper',
+      label: 'أمين مخزن',
+      description: 'الاستلام والصرف والتحويل والمرتجعات والجرد واعتمادها وطباعتها، وإدارة الكتالوج (الأصناف والموردون والوحدات…) والأرصدة والتقارير، في مستودعات نطاقه',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        // الكتالوج: يضيف ويعدّل ويستورد ويصدّر ويطبع — بلا حذف، وبلا إدارة المستودعات نفسها.
+        grant(['items'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+          PermAction.print, PermAction.export, PermAction.import,
+        ]),
+        grant(['suppliers'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.export,
+        ]),
+        grant(['kitchens', 'assets'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+        ]),
+        grant(['units'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(opsPages, [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.approve, PermAction.print]),
+        // (2026-10-26) أُزيلت من هذا القالب إدارة المحروقات (التفريدة والمستودعات
+        // والوحدات والإعدادات واعتماد الجرد) — كانت تعليقاتها تقول «ركن الإمداد»:
+        // دخلت من قالبه، والمحروقات لقوالبها. اعتماد الطلبيات باقٍ (ضمن العمليات
+        // أعلاه) وفصل المهام يمنع اعتماد ما رفعه بنفسه. القالب لقطةٌ عند الإنشاء.
+        grant(['rationOrders'], [PermAction.view, PermAction.print]),
+        // ودليل الجهات يديره من يطلب منها.
+        grant(['supplyAuthorities'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+        ]),
+        grant(['opening'], [PermAction.view, PermAction.create, PermAction.print]),
+        // أمين المخزن يحرّر محضر الإتلاف ويطبعه؛ اعتماده (إخراج الكميات) لمن يُمنح صراحةً.
+        grant(['destruction'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['balances'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['campDashboard'], [PermAction.view]),
+        grant(['stocktake'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['reports'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['documents'], [PermAction.view, PermAction.print, PermAction.edit]),
+      ]),
+    ),
+    'supply_officer': RoleTemplate(
+      id: 'supply_officer',
+      label: 'ركن إمداد',
+      description: 'التخطيط والتغذية والاستحقاقات وأوامر الصرف ومتابعة الأرصدة والتقارير',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(['units', 'kitchens'], [PermAction.view, PermAction.create, PermAction.edit]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['issue'], [PermAction.view, PermAction.create, PermAction.approve, PermAction.print]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['feeding', 'kitchenLog'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['ratios'], [PermAction.view, PermAction.edit, PermAction.print, PermAction.export]),
+        // ركن الإمداد هو من يضع قائمة الطعام ويعتمدها — ولذلك وحده التنشيط.
+        grant(['mealPlans'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+          PermAction.approve, PermAction.print, PermAction.export,
+        ]),
+        // سجل المعسكرات يبنيه ركن الإمداد ويصفّيه — وهو من يوازن بين الوحدات.
+        grant(['campLedger', 'campDashboard'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+          PermAction.print, PermAction.export,
+        ]),
+        grant(['campSettlement'], [PermAction.view, PermAction.approve]),
+        grant(['balances', 'reports', 'actualEntitlement'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['stocktake'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'fuel_keeper': RoleTemplate(
+      id: 'fuel_keeper',
+      label: 'أمين المحروقات',
+      description: 'قسم المحروقات وحده: التفريدة والصرف والتوريد والتحويل والجرد والتقارير — بلا أي صلاحية على الإمداد',
+      permissions: merge([
+        grant(['fuelDashboard', 'fuelVehicles'], [PermAction.view]),
+        grant(['fuelMoves', 'fuelAllocations'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete, PermAction.print,
+        ]),
+        grant(['fuelWarehouses', 'fuelUnits'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete,
+        ]),
+        grant(['fuelReports', 'fuelConsumption'], [PermAction.view, PermAction.print]),
+        grant(['fuelStocktake'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['fuelSettings'], [PermAction.view, PermAction.edit]),
+      ]),
+    ),
+    'finance': RoleTemplate(
+      id: 'finance',
+      label: 'المالية',
+      description: 'الارتباطات: القوة البشرية والمالية (السندات والعهد والعقود والمسيرات والإخلاء) وطباعتها وتصديرها واستيرادها',
+      permissions: merge([
+        grant(['personnel'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete,
+          PermAction.print, PermAction.export,
+        ]),
+        grant(['linkages'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete, PermAction.approve,
+          PermAction.print, PermAction.export, PermAction.import,
+        ]),
+      ]),
+    ),
+    'office_manager': RoleTemplate(
+      id: 'office_manager',
+      label: 'مدير مكتب',
+      description: 'اطلاع شامل وطباعة وتصدير واعتماد، دون إدخال أو تعديل أو حذف',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['feeding', 'kitchenLog', 'ratios', 'mealPlans'], [
+          PermAction.view, PermAction.print, PermAction.export,
+        ]),
+        grant(['balances', 'reports', 'actualEntitlement', 'campLedger', 'campDashboard', 'auditTrail', 'executiveCmd'], [
+          PermAction.view, PermAction.print, PermAction.export,
+        ]),
+        grant(['stocktake'], [
+          PermAction.view, PermAction.approve, PermAction.print, PermAction.export,
+        ]),
+        grant(['sensitiveOps'], [PermAction.view]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'viewer': RoleTemplate(
+      id: 'viewer',
+      label: 'مطّلع',
+      description: 'مشاهدة البيانات والأرصدة والتقارير فقط',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view]),
+        grant(['balances', 'reports', 'actualEntitlement', 'documents', 'stocktake', 'mealPlans'], [PermAction.view]),
+      ]),
+    ),
+    // قوالب المناصب بعد القوالب الوظيفية.
+    ...positions,
+  };
+
+  /// صفحات الإمداد التي تُقرأ وتُطبع وتُصدَّر (تقارير وأرصدة وحسابات) — يجمعها
+  /// قالبا القيادة والمكتب.
+  static const List<String> supplyReadPages = [
+    'balances', 'reports', 'actualEntitlement', 'campLedger',
+  ];
+
+  /// قوالب **المناصب** (طلب المالك 2026-10-26): كلٌّ منها منصبٌ في هيكل شعبة
+  /// الإمداد والتموين. تظهر في [roles] مع بقية القوالب وتُجمع معها، وتُطبَّق
+  /// لقطةً عند الإنشاء — ثم يضيّقها المالك أو يوسّعها من مصفوفة الصلاحيات.
+  ///
+  /// **ما لا يمنحه أي قالب منها:** الحذف (إلا في المحروقات لمسؤول الفرقة، كما
+  /// في «أمين المحروقات»)، وتصاريح البرقيات السرية والسرية للغاية، والتوقيع
+  /// الإلكتروني للقائد، و`sys.*` — منحٌ صريحٌ من المالك لشخصٍ بعينه.
+  ///
+  /// **النطاق ليس في القالب:** ركن إمداد المعسكر وأمين المخزن الفرعي ومسؤول
+  /// محروقات المعسكر ومدير مكتب الفرع يُحصرون في مستودعاتهم وخزّاناتهم من
+  /// «نطاق المستودعات» في نافذة الصلاحيات؛ بلا نطاقٍ يعملون على الكل.
+  static final Map<String, RoleTemplate> positions = {
+    'supply_head': RoleTemplate(
+      id: 'supply_head',
+      label: 'رئيس شعبة الإمداد والتموين',
+      description: 'اطلاعٌ كامل على الإمداد والمحروقات وطباعتها وتصديرها، واعتماد القرارات الكبرى: '
+          'الطلبيات وأوامر التوريد والجرد والإتلاف والأرصدة الافتتاحية وتصفية الشهر وخطط الوجبات '
+          'والإخلاء المالي والمراجعة الحساسة — بلا إدخال سندات ولا تعديلها ولا حذف',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['rationOrders', 'pendingOrders', 'opening', 'destruction'], [
+          PermAction.view, PermAction.approve, PermAction.print,
+        ]),
+        grant(['stocktake'], [PermAction.view, PermAction.approve, PermAction.print, PermAction.export]),
+        grant(['feeding', 'kitchenLog', 'ratios'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['mealPlans'], [PermAction.view, PermAction.approve, PermAction.print, PermAction.export]),
+        grant(supplyReadPages, [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['campDashboard', 'healthOps'], [PermAction.view]),
+        grant(['campSettlement'], [PermAction.view, PermAction.approve]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+        grant(['cables', 'archive'], [PermAction.view, PermAction.print]),
+        grant(['cables.view.normal', 'cables.view.allBranches'], [PermAction.view]),
+        grant(['personnel'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['linkages'], [PermAction.view, PermAction.approve, PermAction.print, PermAction.export]),
+        grant(['auditTrail', 'executiveCmd'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['activityIntel'], [PermAction.view, PermAction.export]),
+        grant(['sensitiveOps'], [PermAction.view, PermAction.approve]),
+        grant(['healthOps'], [PermAction.view]),
+        grant(fuelPages, [PermAction.view]),
+        grant(['fuelReports', 'fuelConsumption', 'fuelAllocations'], [PermAction.view, PermAction.print]),
+        grant(['fuelStocktake'], [PermAction.view, PermAction.approve, PermAction.print]),
+      ]),
+    ),
+    'supply_deputy': RoleTemplate(
+      id: 'supply_deputy',
+      label: 'نائب رئيس الشعبة / ركن إمداد الفرقة',
+      description: 'تخطيط الإمداد على مستوى الفرقة: نسب الاستحقاق وخطط الوجبات واعتمادها، وطلبيات '
+          'الإعاشة والتحويل إلى المعسكرات واعتمادها، وسجل المعسكرات وتصفيته، والتفريدة، والتقارير — '
+          'ومشاهدة المحروقات وتقاريرها',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(['units', 'kitchens', 'supplyAuthorities'], [PermAction.view, PermAction.create, PermAction.edit]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['issue'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['transfer', 'rationOrders'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['feeding', 'kitchenLog'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['ratios'], [PermAction.view, PermAction.edit, PermAction.print, PermAction.export]),
+        grant(['mealPlans'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+          PermAction.approve, PermAction.print, PermAction.export,
+        ]),
+        grant(['campLedger'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['campSettlement'], [PermAction.view, PermAction.approve]),
+        grant(['balances', 'reports', 'actualEntitlement'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['campDashboard'], [PermAction.view]),
+        grant(['stocktake'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+        grant(['cables'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['cables.view.normal', 'cables.view.allBranches'], [PermAction.view]),
+        grant(['executiveCmd'], [PermAction.view, PermAction.print]),
+        grant(fuelPages, [PermAction.view]),
+        grant(['fuelReports', 'fuelConsumption', 'fuelAllocations'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'camp_supply_officer': RoleTemplate(
+      id: 'camp_supply_officer',
+      label: 'ركن إمداد معسكر',
+      description: 'إمداد المعسكر في نطاق مخزنه: التفريدة اليومية وسجل الطهي وخطط وجبات المعسكر '
+          '(بلا تنشيط)، ورفع طلبيات الإعاشة، والصرف من مخزن المعسكر لوحداته ومطابخه واعتماده، '
+          'والمرتجعات، واعتماد جرده، وحساب استحقاقه — احصره بمخزن معسكره من «نطاق المستودعات»',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(['units', 'kitchens'], [PermAction.view, PermAction.create, PermAction.edit]),
+        grant(['receive', 'transfer'], [PermAction.view, PermAction.print]),
+        grant(['issue'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['returns', 'rationOrders'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print,
+        ]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.print]),
+        grant(['feeding', 'kitchenLog'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['mealPlans'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['ratios'], [PermAction.view, PermAction.print]),
+        grant(['balances', 'actualEntitlement', 'campLedger'], [
+          PermAction.view, PermAction.print, PermAction.export,
+        ]),
+        grant(['campDashboard', 'campSettlement'], [PermAction.view]),
+        grant(['reports'], [PermAction.view, PermAction.print]),
+        grant(['stocktake'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'fuel_division_officer': RoleTemplate(
+      id: 'fuel_division_officer',
+      label: 'مسؤول محروقات الفرقة',
+      description: 'قسم المحروقات كاملًا على مستوى الفرقة: التفريدة وتوزيعها على الوحدات، والصرف '
+          'والتوريد والتحويل، والجرد واعتماده، والمستودعات والوحدات والإعدادات والتقارير — بلا الإمداد',
+      permissions: merge([
+        grant(fuelPages, [PermAction.view]),
+        grant(['fuelMoves', 'fuelAllocations'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete, PermAction.print,
+        ]),
+        grant(['fuelWarehouses', 'fuelUnits'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.delete,
+        ]),
+        grant(['fuelReports', 'fuelConsumption'], [PermAction.view, PermAction.print]),
+        grant(['fuelStocktake'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['fuelSettings'], [PermAction.view, PermAction.edit]),
+      ]),
+    ),
+    'fuel_camp_keeper': RoleTemplate(
+      id: 'fuel_camp_keeper',
+      label: 'مسؤول / أمين محروقات معسكر',
+      description: 'خزّان المعسكر وحده: صرف المحروقات بالاستحقاق وتوريدها وتحويلها وطباعة سنداتها، '
+          'وعدّ الجرد (اعتماده لمسؤول الفرقة)، وتقارير الخزّان — بلا تعديل التفريدة ولا الإعدادات. '
+          'احصره بخزّانه من «نطاق المستودعات» (⛽)',
+      permissions: merge([
+        grant(fuelPages, [PermAction.view]),
+        grant(['fuelMoves'], [PermAction.view, PermAction.create, PermAction.print]),
+        grant(['fuelAllocations'], [PermAction.view, PermAction.print]),
+        grant(['fuelStocktake'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['fuelReports', 'fuelConsumption'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'main_storekeeper': RoleTemplate(
+      id: 'main_storekeeper',
+      label: 'أمين مخازن الإمداد الرئيسي',
+      description: 'المخزن الرئيسي: الاستلام من الموردين والصرف والتحويل إلى المخازن الفرعية والمرتجعات '
+          'واعتمادها وطباعتها، والأرصدة الافتتاحية، ومحاضر الإتلاف (بلا اعتماد)، والجرد، وتنفيذ أوامر '
+          'التوريد، وإدارة الكتالوج بلا حذف — بلا المحروقات ولا اعتماد الطلبيات',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(['items'], [
+          PermAction.view, PermAction.create, PermAction.edit,
+          PermAction.print, PermAction.export, PermAction.import,
+        ]),
+        grant(['suppliers'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.export]),
+        grant(['units'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['kitchens', 'assets', 'supplyAuthorities'], [PermAction.view, PermAction.create, PermAction.edit]),
+        grant(['receive', 'issue', 'transfer', 'returns'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['rationOrders'], [PermAction.view, PermAction.print]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.approve, PermAction.print]),
+        grant(['opening'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['destruction'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['stocktake'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['balances', 'reports'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['campDashboard'], [PermAction.view]),
+        grant(['documents'], [PermAction.view, PermAction.print, PermAction.edit]),
+      ]),
+    ),
+    'sub_storekeeper': RoleTemplate(
+      id: 'sub_storekeeper',
+      label: 'أمين مخزن فرعي',
+      description: 'المخزن الفرعي في نطاقه: استلام التحويلات الواردة، والصرف للوحدات والمطابخ واعتماده، '
+          'وإرجاع الفائض إلى الرئيسي، والمرتجعات، ورفع الطلبيات، وعدّ الجرد، وتحرير محضر الإتلاف — '
+          'بلا الكتالوج ولا الأرصدة الافتتاحية. احصره بمخزنه من «نطاق المستودعات»',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(['receive'], [PermAction.view, PermAction.create, PermAction.print]),
+        grant(['issue'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print,
+        ]),
+        grant(['transfer', 'returns', 'rationOrders'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print,
+        ]),
+        grant(['pendingOrders'], [PermAction.view, PermAction.print]),
+        grant(['destruction'], [PermAction.view, PermAction.create, PermAction.print]),
+        grant(['stocktake'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['kitchenLog'], [PermAction.view, PermAction.create]),
+        grant(['balances', 'reports'], [PermAction.view, PermAction.print]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'supply_office_manager': RoleTemplate(
+      id: 'supply_office_manager',
+      label: 'مدير مكتب شعبة الإمداد / مكتب إمداد الفرقة',
+      description: 'المكتب: البرقيات العادية والأرشيف الإلكتروني إدخالًا وتعديلًا وطباعة، والقوة البشرية، '
+          'والاطلاع على السندات والتقارير والارتباطات المالية والمحروقات وطباعتها وتصديرها — بلا سندات '
+          'مخزنية ولا اعتماد',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['pendingOrders', 'stocktake', 'destruction', 'opening'], [PermAction.view, PermAction.print]),
+        grant(['feeding', 'mealPlans', 'kitchenLog', 'ratios'], [PermAction.view, PermAction.print]),
+        grant(supplyReadPages, [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['campDashboard'], [PermAction.view]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+        grant(['cables', 'archive'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['cables.view.normal', 'cables.view.allBranches'], [PermAction.view]),
+        grant(['personnel'], [
+          PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export,
+        ]),
+        grant(['linkages'], [PermAction.view, PermAction.print, PermAction.export]),
+        grant(['executiveCmd', 'auditTrail'], [PermAction.view, PermAction.print]),
+        grant(['fuelDashboard'], [PermAction.view]),
+        grant(['fuelAllocations', 'fuelReports', 'fuelConsumption'], [PermAction.view, PermAction.print]),
+      ]),
+    ),
+    'branch_office_manager': RoleTemplate(
+      id: 'branch_office_manager',
+      label: 'مدير مكتب إمداد فرع',
+      description: 'مكتب الفرع في نطاقه: البرقيات العادية والأرشيف إدخالًا وطباعة، والقوة البشرية للفرع، '
+          'والاطلاع على سندات الفرع وأرصدته وتفريدته وحساب استحقاقه وطباعتها — بلا سندات ولا اعتماد',
+      permissions: merge([
+        grant(basicPages, [PermAction.view]),
+        grant(opsPages, [PermAction.view, PermAction.print]),
+        grant(['stocktake'], [PermAction.view, PermAction.print]),
+        grant(['feeding', 'mealPlans'], [PermAction.view, PermAction.print]),
+        grant(['balances', 'reports', 'actualEntitlement', 'campLedger'], [PermAction.view, PermAction.print]),
+        grant(['documents'], [PermAction.view, PermAction.print]),
+        grant(['cables', 'archive'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+        grant(['cables.view.normal'], [PermAction.view]),
+        grant(['personnel'], [PermAction.view, PermAction.create, PermAction.edit, PermAction.print]),
+      ]),
+    ),
+  };
+
+
+  /// صلاحيات مجموعة أدوار مجتمعة.
+  static PermissionMap permissionsForRoles(List<String> roleIds) => merge([
+        for (final id in roleIds)
+          if (roles.containsKey(id)) roles[id]!.permissions,
+      ]);
+
+  /// هل تسمح خريطة إجراءات صفحةٍ ([pageActions]) بـ[action]؟
+  ///
+  /// **توافقٌ مع ما قبل «import»:** الاستيراد كان يُحرس بـ«إضافة»، فمن لم
+  /// يُذكر له مفتاح `import` صراحةً (لا `true` ولا `false`) يرث صلاحية
+  /// «إضافة» كما كانت — فلا يفقد أحدٌ قدرةً كانت له. وإن حدّد المالك
+  /// `import` صراحةً (تفعيلًا أو إلغاءً) فهو الحكم.
+  static bool allows(Map? pageActions, String action) {
+    if (pageActions == null) return false;
+    if (action == PermAction.import && !pageActions.containsKey(PermAction.import)) {
+      return pageActions[PermAction.create] == true;
+    }
+    return pageActions[action] == true;
+  }
+
+  /// فحص صلاحية صفحة/إجراء.
+  static bool can({
+    required bool isAdmin,
+    required PermissionMap permissions,
+    required String page,
+    String action = PermAction.view,
+    bool isOwner = false,
+    String? sectionBlocked,
+  }) {
+    // `sys.*` للمالك وحده، ولا يُقرأ من الصلاحيات المخزَّنة أبدًا.
+    if (SysPerm.isSys(page)) return isOwner;
+    // القسم المحجوب مغلقٌ على المدير أيضًا؛ المالك وحده لا يُحجب عنه شيء. الفحص
+    // على هوية الصفحة كما مُرِّرت (قبل أي تطبيعٍ إلى صلاحيةٍ أخرى).
+    if (SectionBlock.blocksPage(role: isOwner ? 'owner' : 'user', blockedJson: sectionBlocked, page: page)) {
+      return false;
+    }
+    if (isAdmin) return true;
+    return allows(permissions[page], action);
+  }
+
+  /// هل يملك المستخدم أي صلاحية إدارة على الصفحة (إضافة/تعديل/حذف/اعتماد)؟
+  static bool canManage({
+    required bool isAdmin,
+    required PermissionMap permissions,
+    required String page,
+  }) =>
+      isAdmin ||
+      [PermAction.create, PermAction.edit, PermAction.delete, PermAction.approve]
+          .any((a) => permissions[page]?[a] == true);
+
+  /// نطاق المستودعات: null ⇒ كل المستودعات.
+  static bool canUseWarehouse({
+    required bool isAdmin,
+    required List<String>? scope,
+    required String warehouse,
+  }) {
+    if (isAdmin || scope == null) return true;
+    if (warehouse.isEmpty) return true;
+    return scope.contains(warehouse);
+  }
+
+  /// نطاق مستودعات المحروقات — **اختياريٌّ بالتصريح**.
+  ///
+  /// خزّانات الوقود دليلٌ مستقل عن مستودعات الإعاشة، ونطاقُ مستخدمٍ كُتب قبل
+  /// هذا الحكم يذكر مستودعات الإعاشة وحدها؛ لو طُبِّق على الوقود كما هو لفقد
+  /// أمين المحروقات كل خزّاناته بعد التحديث. لذلك: نطاقٌ لا يذكر أي مستودع
+  /// محروقات ([fuelWarehouses]) لا يقيّد المحروقات (كما كان)، ونطاقٌ يذكر
+  /// واحدًا منها على الأقل يقيّدها بما ذكر — مسؤول محروقات المعسكر بخزّان معسكره.
+  static bool canUseFuelWarehouse({
+    required bool isAdmin,
+    required List<String>? scope,
+    required Iterable<String> fuelWarehouses,
+    required String warehouse,
+  }) {
+    if (isAdmin || scope == null || warehouse.isEmpty) return true;
+    final names = fuelWarehouses.toSet();
+    if (!scope.any(names.contains)) return true;
+    return scope.contains(warehouse);
+  }
+
+  /// المعسكرات التي يعمل عليها مستخدمٌ بنطاق مستودعاته، أو `null` = كلها.
+  ///
+  /// ركن إمداد المعسكر يُحصر بمخزن معسكره، والتفريدة (القوة) بالمعسكر لا
+  /// بالمستودع — فالمعسكر يُشتقّ من ربط المستودع: مستودعٌ في النطاق أُطفئ فيه
+  /// «يغذّي كل المعسكرات» يمنح معسكراته (`campIds`). وحتى لا يفقد أحدٌ قدرةً
+  /// كانت له بعد التحديث: مستودعٌ في النطاق يغذّي كل المعسكرات (الرئيسي)، أو
+  /// نطاقٌ لا يُشتقّ منه معسكرٌ واحد، لا يقيّد شيئًا.
+  static Set<String>? campScope({
+    required bool isAdmin,
+    required List<String>? scope,
+    required Iterable<({String name, bool feedsAllCamps, List<String> campIds})> warehouses,
+  }) {
+    if (isAdmin || scope == null) return null;
+    final camps = <String>{};
+    for (final w in warehouses) {
+      if (!scope.contains(w.name)) continue;
+      if (w.feedsAllCamps) return null;
+      camps.addAll(w.campIds);
+    }
+    return camps.isEmpty ? null : camps;
+  }
+
+  static List<String> filterWarehouses({
+    required bool isAdmin,
+    required List<String>? scope,
+    required List<String> all,
+  }) {
+    if (isAdmin || scope == null) return all;
+    return all.where(scope.contains).toList();
+  }
+}
+// ==================== END FILE: lib/domain/access_control.dart ====================
+
+// ==================== FILE: lib/domain/perm_catalog.dart ====================
+/// كتالوج الصلاحيات — **المصدر الوحيد** لمعرّفات الصلاحيات وأسمائها وإجراءاتها.
+///
+/// تقرؤه شاشة المستخدمين (لرسم مصفوفة الصلاحيات)، و`Perm.labels` (لرسائل
+/// الرفض)، واختبار الاكتمال (يتأكد أن كل مفتاحٍ يُفحص في الكود له مدخلٌ هنا،
+/// فلا تعود صلاحيةٌ «مستخدمة ولا تُمنح»).
+///
+/// **القسم** (`section`) يُشتقّ من الشاشات لا من مفتاحٍ مستقل: من يملك شاشاتٍ
+/// في قسمٍ يراه، وهو ما تقرؤه `AppSpace.availableFor`. وقيم القسم هي نفسها
+/// `AppSpace.supply` و`AppSpace.fuel` مضافًا إليها [PermSection.admin].
+library;
+
+import 'access_control.dart' show PermAction;
+
+/// أقسام الكتالوج.
+class PermSection {
+  const PermSection._();
+
+  static const String supply = 'supply';
+  static const String fuel = 'fuel';
+
+  /// الإدارة: الإعدادات والمستخدمون (ليست «مساحة عمل» في القائمة).
+  static const String admin = 'admin';
+
+  static const List<String> all = [supply, fuel, admin];
+
+  static const Map<String, String> labels = {
+    supply: 'الإمداد والتموين',
+    fuel: 'المحروقات',
+    admin: 'الإدارة',
+  };
+}
+
+/// مدخلٌ في الكتالوج: صفحةٌ بإجراءاتها المتاحة.
+class PermEntry {
+  const PermEntry(this.key, this.label, this.section, this.group, this.actions);
+
+  final String key;
+  final String label;
+  final String section;
+
+  /// مجموعة العرض داخل القسم (عنوانٌ في مصفوفة الصلاحيات).
+  final String group;
+  final List<String> actions;
+}
+
+class PermCatalog {
+  const PermCatalog._();
+
+  // مجموعات إجراءاتٍ متكررة.
+  static const _v = [PermAction.view];
+  static const _crud = [PermAction.view, PermAction.create, PermAction.edit, PermAction.delete];
+  static const _doc = [..._crud, PermAction.approve, PermAction.print];
+
+  static const entries = <PermEntry>[
+    // ───────── الإمداد والتموين ─────────
+    PermEntry('dashboard', 'الرئيسية', PermSection.supply, 'الرئيسية', _v),
+
+    PermEntry('items', 'الأصناف', PermSection.supply, 'البيانات الأساسية',
+        [..._crud, PermAction.print, PermAction.export, PermAction.import]),
+    PermEntry('suppliers', 'الموردون', PermSection.supply, 'البيانات الأساسية', [..._crud, PermAction.export]),
+    PermEntry('units', 'الوحدات المستفيدة', PermSection.supply, 'البيانات الأساسية',
+        [..._crud, PermAction.print, PermAction.export]),
+    PermEntry('stores', 'المستودعات', PermSection.supply, 'البيانات الأساسية', [..._crud, PermAction.export]),
+    PermEntry('kitchens', 'المطابخ والأفران', PermSection.supply, 'البيانات الأساسية', _crud),
+    PermEntry('assets', 'الأصول الثابتة', PermSection.supply, 'البيانات الأساسية', _crud),
+    PermEntry('supplyAuthorities', 'جهات الاعتمادات', PermSection.supply, 'البيانات الأساسية', _crud),
+
+    PermEntry('receive', 'الاستلام', PermSection.supply, 'العمليات المخزنية', _doc),
+    PermEntry('issue', 'الصرف', PermSection.supply, 'العمليات المخزنية', _doc),
+    PermEntry('transfer', 'التحويل المخزني', PermSection.supply, 'العمليات المخزنية', _doc),
+    PermEntry('returns', 'المرتجعات', PermSection.supply, 'العمليات المخزنية', _doc),
+    PermEntry('opening', 'الأرصدة الافتتاحية', PermSection.supply, 'العمليات المخزنية',
+        [PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print]),
+    PermEntry('rationOrders', 'طلبيات الإعاشة', PermSection.supply, 'العمليات المخزنية', _doc),
+    // اعتماد المحضر يُخرج الكميات من الرصيد، والحذف هنا إلغاؤه (يعيدها).
+    PermEntry('destruction', 'الإتلاف (محاضر الإتلاف)', PermSection.supply, 'العمليات المخزنية', _doc),
+    PermEntry('pendingOrders', 'أوامر التوريد المعلقة', PermSection.supply, 'العمليات المخزنية',
+        [PermAction.view, PermAction.approve, PermAction.delete, PermAction.print]),
+    PermEntry('documents', 'سجل المستندات (السندات المحفوظة)', PermSection.supply, 'العمليات المخزنية',
+        [PermAction.view, PermAction.print, PermAction.edit, PermAction.delete]),
+
+    PermEntry('feeding', 'التفريدة اليومية (التغذية / القوة)', PermSection.supply, 'التشغيل اليومي',
+        [..._crud, PermAction.print, PermAction.export]),
+    PermEntry('mealPlans', 'خطط الوجبات', PermSection.supply, 'التشغيل اليومي',
+        [..._crud, PermAction.approve, PermAction.print, PermAction.export]),
+    PermEntry('kitchenLog', 'سجل التشغيل والطهي', PermSection.supply, 'التشغيل اليومي',
+        [..._crud, PermAction.print, PermAction.export]),
+    PermEntry('ratios', 'نسب الاستحقاق', PermSection.supply, 'التشغيل اليومي',
+        [PermAction.view, PermAction.edit, PermAction.print, PermAction.export]),
+
+    PermEntry('balances', 'الأرصدة الحالية', PermSection.supply, 'الأرصدة والتقارير',
+        [PermAction.view, PermAction.export, PermAction.print]),
+    PermEntry('reports', 'مركز التقارير', PermSection.supply, 'الأرصدة والتقارير',
+        [PermAction.view, PermAction.export, PermAction.print]),
+    PermEntry('actualEntitlement', 'حساب الاستحقاق الفعلي', PermSection.supply, 'الأرصدة والتقارير',
+        [PermAction.view, PermAction.print, PermAction.export]),
+    PermEntry('campLedger', 'سجل حساب المعسكر', PermSection.supply, 'الأرصدة والتقارير',
+        [PermAction.view, PermAction.create, PermAction.edit, PermAction.print, PermAction.export]),
+    PermEntry('campSettlement', 'تصفية الشهر', PermSection.supply, 'الأرصدة والتقارير',
+        [PermAction.view, PermAction.approve]),
+    PermEntry('campDashboard', 'لوحة المعسكرات', PermSection.supply, 'الأرصدة والتقارير', _v),
+
+    PermEntry('stocktake', 'الجرد', PermSection.supply, 'الجرد', [..._doc, PermAction.export]),
+
+    PermEntry('cables', 'البرقيات', PermSection.supply, 'البرقيات والأرشيف', [..._crud, PermAction.print]),
+    // تصريح الاطلاع بدرجة السرية (M-18): السرية لا يرثها المدير — منحٌ صريح.
+    PermEntry('cables.view.normal', 'البرقيات العادية — اطلاع', PermSection.supply, 'البرقيات والأرشيف', _v),
+    PermEntry('cables.view.secret', 'البرقيات السرية — اطلاع', PermSection.supply, 'البرقيات والأرشيف', _v),
+    PermEntry('cables.view.topsecret', 'البرقيات السرية للغاية — اطلاع', PermSection.supply, 'البرقيات والأرشيف', _v),
+    // بلاها يرى المستخدم برقيات فرع جهازه وحده (`CableRepo.ownBranchOnly`، v30).
+    PermEntry('cables.view.allBranches', 'البرقيات — كل الفروع', PermSection.supply, 'البرقيات والأرشيف', _v),
+    PermEntry('archive', 'الأرشيف الإلكتروني', PermSection.supply, 'البرقيات والأرشيف', [..._crud, PermAction.print]),
+
+    PermEntry('personnel', 'القوة البشرية للإمداد والتموين', PermSection.supply, 'الارتباطات',
+        [..._crud, PermAction.print, PermAction.export]),
+    // «approve»: اعتماد الإخلاء المالي وحذف المُعتمد منه. «import»: استيراد مسيرات العهد.
+    PermEntry('linkages', 'الارتباطات (المالية والتسليح)', PermSection.supply, 'الارتباطات',
+        [..._doc, PermAction.export, PermAction.import]),
+
+    PermEntry('auditTrail', 'سجل التدقيق', PermSection.supply, 'الرقابة',
+        [PermAction.view, PermAction.export, PermAction.print]),
+    PermEntry('activityIntel', 'ذكاء النشاط', PermSection.supply, 'الرقابة', [PermAction.view, PermAction.export]),
+    PermEntry('executiveCmd', 'القيادة التنفيذية', PermSection.supply, 'الرقابة',
+        [PermAction.view, PermAction.export, PermAction.print]),
+    PermEntry('sensitiveOps', 'المراجعة الحساسة', PermSection.supply, 'الرقابة', [PermAction.view, PermAction.approve]),
+    PermEntry('healthOps', 'صحة النظام والعمليات', PermSection.supply, 'الرقابة', _v),
+
+    // ───────── المحروقات ─────────
+    PermEntry('fuelDashboard', 'لوحة المحروقات', PermSection.fuel, 'الرئيسية', _v),
+    PermEntry('fuelMoves', 'حركة المحروقات (صرف/توريد/تحويل/افتتاحي)', PermSection.fuel, 'الحركة',
+        [..._crud, PermAction.print]),
+    PermEntry('fuelAllocations', 'تفريدة المحروقات', PermSection.fuel, 'الحركة', [..._crud, PermAction.print]),
+    PermEntry('fuelWarehouses', 'مستودعات المحروقات', PermSection.fuel, 'البيانات الأساسية', _crud),
+    PermEntry('fuelUnits', 'وحدات المحروقات', PermSection.fuel, 'البيانات الأساسية', _crud),
+    PermEntry('fuelVehicles', 'سجل المركبات', PermSection.fuel, 'البيانات الأساسية', _v),
+    PermEntry('fuelReports', 'تقارير المحروقات (الرسمي والأرصدة والكشف)', PermSection.fuel, 'التقارير',
+        [PermAction.view, PermAction.print]),
+    PermEntry('fuelConsumption', 'تقرير استهلاك المحروقات', PermSection.fuel, 'التقارير',
+        [PermAction.view, PermAction.print]),
+    // «إضافة» فتح أمر جرد، و«تعديل» تسجيل العدّ — تفحصهما الشاشة، فكانا
+    // لا يُمنحان لأحدٍ غير المدير (بلاغ 2026-10-26).
+    PermEntry('fuelStocktake', 'جرد المحروقات', PermSection.fuel, 'الجرد',
+        [PermAction.view, PermAction.create, PermAction.edit, PermAction.approve, PermAction.print]),
+    PermEntry('fuelSettings', 'إعدادات المحروقات', PermSection.fuel, 'الإعدادات', [PermAction.view, PermAction.edit]),
+
+    // ───────── الإدارة ─────────
+    PermEntry('settings', 'الإعدادات والهوية', PermSection.admin, 'الإدارة', [PermAction.view, PermAction.edit]),
+    PermEntry('usersAccess', 'المستخدمون والصلاحيات', PermSection.admin, 'الإدارة',
+        [PermAction.view, PermAction.edit, PermAction.approve]),
+    // «اعتماد» = توقيع السندات المحفوظة باسم القائد في الوضع اليدوي. لا يرثها
+    // المدير ضمنًا (انظر `ESignPolicy.canSign`).
+    PermEntry('esign', 'التوقيع الإلكتروني للسندات (القائد)', PermSection.admin, 'الإدارة',
+        [PermAction.view, PermAction.approve]),
+  ];
+
+  static final Map<String, PermEntry> byKey = {for (final e in entries) e.key: e};
+
+  static final Map<String, String> labels = {for (final e in entries) e.key: e.label};
+
+  /// أسماء بنود القائمة التي لا صلاحية خاصة بها: تتبع صلاحية صفحةٍ أخرى أو
+  /// باب (انظر `_permPage` في الصفحة الرئيسية و`kMenuDoors`). تبقى لها أسماءٌ
+  /// تُقرأ في رسائل الرفض والاختبارات.
+  static const Map<String, String> aliasLabels = {
+    'fuelData': 'البيانات الأساسية للمحروقات',
+    'fuelIssue': 'صرف المحروقات',
+    'fuelSupply': 'توريد المحروقات',
+    'fuelTransfer': 'تحويل المحروقات',
+    'fuelOpening': 'الرصيد الافتتاحي للمحروقات',
+  };
+
+  /// مدخلات قسمٍ مجمَّعةً بحسب مجموعة العرض، بترتيب الظهور.
+  static Map<String, List<PermEntry>> groupsOf(String section) {
+    final out = <String, List<PermEntry>>{};
+    for (final e in entries) {
+      if (e.section == section) (out[e.group] ??= []).add(e);
+    }
+    return out;
+  }
+}
+// ==================== END FILE: lib/domain/perm_catalog.dart ====================
+
+// ==================== FILE: lib/domain/password_policy.dart ====================
+/// سياسة قوة كلمة المرور (2026-10-26).
+///
+/// كان الشرط الطول وحده (٨)، فتُقبل `12345678` و`aaaaaaaa` و`password` — أول ما
+/// يُجرَّب في التخمين. الآن، إلى الطول: نوعان من الحروف على الأقل (حروف عربية أو
+/// لاتينية، أرقام، رموز ومسافات)، ولا حرفٌ واحد مكرر، ولا تسلسلٌ بسيط، ولا كلمةٌ
+/// شائعة، ولا اسم الدخول نفسه. **تُطبَّق على كلمةٍ جديدة أو مغيَّرة فقط** — لا
+/// تُقفل حسابًا قائمًا؛ وكلمةٌ قائمةٌ لا تحققها تُنبَّه بالتغيير بعد الدخول.
+library;
+
+class PasswordPolicy {
+  const PasswordPolicy._();
+
+  static const int minLength = 8;
+
+  /// كلماتٌ شائعة (بالحروف الصغيرة، بلا ما يصلها من أرقام في آخرها).
+  static const Set<String> _common = {
+    'password', 'passw0rd', 'qwerty', 'qwertyuiop', 'asdfghjkl', 'iloveyou', 'admin', 'administrator',
+    'welcome', 'letmein', 'imdad', 'emdad', 'changeme', 'default',
+  };
+
+  /// سبب رفض [password]، أو `null` إن قُبلت. [username] اسم الدخول إن عُرف.
+  static String? problem(String password, {String username = ''}) {
+    if (password.length < minLength) return 'كلمة المرور $minLength أحرف على الأقل';
+    final letters = RegExp(r'\p{L}', unicode: true).hasMatch(password);
+    final digits = RegExp(r'\p{Nd}', unicode: true).hasMatch(password);
+    final others = RegExp(r'[^\p{L}\p{Nd}]', unicode: true).hasMatch(password);
+    if ([letters, digits, others].where((x) => x).length < 2) {
+      return 'كلمة المرور تجمع نوعين على الأقل: حروفًا وأرقامًا أو رموزًا';
+    }
+    final runes = password.runes.toList();
+    if (runes.toSet().length <= 2) return 'كلمة المرور لا تكون حرفًا أو حرفين مكررين';
+    if (_sequential(runes)) return 'كلمة المرور لا تكون تسلسلًا (12345678، abcdefgh)';
+    final lower = password.toLowerCase();
+    final stem = lower.replaceAll(RegExp(r'[\d\W_]+$', unicode: true), '');
+    if (_common.contains(lower) || _common.contains(stem)) return 'كلمة المرور شائعة يسهل تخمينها';
+    final u = username.trim().toLowerCase();
+    if (u.length >= 3 && lower.contains(u)) return 'كلمة المرور لا تحوي اسم الدخول';
+    return null;
+  }
+
+  /// هل [password] تحقق السياسة؟
+  static bool ok(String password, {String username = ''}) => problem(password, username: username) == null;
+
+  /// تسلسلٌ صاعد أو هابط بخطوة واحدة على طوله كله.
+  static bool _sequential(List<int> r) {
+    bool step(int d) {
+      for (var i = 1; i < r.length; i++) {
+        if (r[i] - r[i - 1] != d) return false;
+      }
+      return true;
+    }
+
+    return step(1) || step(-1);
+  }
+}
+// ==================== END FILE: lib/domain/password_policy.dart ====================
+
+// ==================== FILE: lib/domain/maker_checker.dart ====================
+/// فصل المهام (المُنشئ لا يعتمد ما أنشأه) — طلب المالك 2026-10-26.
+///
+/// يُطبَّق على ثلاثة اعتماداتٍ تحرّك المخزون أو تُقرّه: طلبيات الإعاشة، وتسوية
+/// الجرد، ومحضر الإتلاف. من يملك «إضافة» و«اعتماد» معًا كان يُنشئ الطلبية
+/// ويعتمدها، ويفتح الجرد ويعتمد تسويته، ويحرّر الإتلاف ويخرج كمياته — بلا عينٍ
+/// ثانية. الآن يعتمدها شخصٌ آخر.
+///
+/// **المدير والمالك مستثنيان** ([exempt]): جهةٌ صغيرة يعمل فيها شخصٌ واحد لا
+/// تتوقف، والحساب المميَّز مسؤولٌ ومدقَّق أصلًا. وسجلٌّ بلا مُنشئٍ معروف (أقدم من
+/// تسجيله) لا يُحكم عليه.
+library;
+
+class MakerChecker {
+  const MakerChecker._();
+
+  /// رسالة الرفض، أو `null` إن جاز الاعتماد.
+  static String? violation({
+    required String createdBy,
+    required String actor,
+    required bool exempt,
+    required String doc,
+  }) {
+    if (exempt) return null;
+    final c = createdBy.trim().toLowerCase();
+    final a = actor.trim().toLowerCase();
+    if (c.isEmpty || a.isEmpty || c != a) return null;
+    return 'لا يعتمد مُنشئ $doc ما أنشأه — يعتمده شخصٌ آخر يملك صلاحية الاعتماد (فصل المهام)';
+  }
+}
+
+/// رفض الاعتماد لفصل المهام — لمسارٍ لا يعيد نتيجةً تحمل الخطأ (تسوية الجرد).
+class ApprovalBlocked implements Exception {
+  const ApprovalBlocked(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+// ==================== END FILE: lib/domain/maker_checker.dart ====================
+
+// ==================== FILE: lib/domain/section_block.dart ====================
+import 'dart:convert';
+
+/// حجب الأقسام عن مستخدم: قسم الإمداد، وقسم المحروقات، وخمسة أقسامٍ إداريةٍ فرعية.
+///
+/// **طبقةٌ فوق الصلاحيات لا بديلٌ عنها:** الصلاحيات تقول ماذا يفعل المستخدم في
+/// كل صفحة؛ الحجب يقول إن هذا القسم **كله** ليس له — مهما كانت صلاحياته (ومنها
+/// المدير الذي يملك كل الصفحات). والمالك وحده لا يُحجب عنه شيء.
+///
+/// **فشلٌ مغلق:** قيمةٌ تالفة (JSON لا يُقرأ، أو ليست قائمة) تُعامل حجبًا للكل
+/// ([parse])؛ فتلفٌ بالمزامنة أو بتعديلٍ يدويٍّ لا يفتح قسمًا كان مغلقًا.
+class SectionBlock {
+  const SectionBlock._();
+
+  static const String supply = 'supply';
+  static const String fuel = 'fuel';
+  static const String adminSettings = 'admin.settings';
+  static const String adminUsers = 'admin.users';
+  static const String adminAudit = 'admin.audit';
+  static const String adminSync = 'admin.sync';
+  static const String adminDevices = 'admin.devices';
+
+  /// كل الأقسام القابلة للحجب، بترتيب عرضها.
+  static const List<String> all = [
+    supply,
+    fuel,
+    adminSettings,
+    adminUsers,
+    adminAudit,
+    adminSync,
+    adminDevices,
+  ];
+
+  static const Map<String, String> labels = {
+    supply: 'قسم الإمداد والتموين',
+    fuel: 'قسم المحروقات',
+    adminSettings: 'الإعدادات العامة (الهوية، النماذج، التوقيع الإلكتروني، النسخ الاحتياطي)',
+    adminUsers: 'المستخدمون',
+    adminAudit: 'سجل التدقيق والرقابة',
+    adminSync: 'المزامنة',
+    adminDevices: 'تفعيل الأجهزة',
+  };
+
+  /// أقسام شاشة الإعدادات الداخلية ← القسم الذي يحجبها.
+  ///
+  /// «نظرة عامة» والمخزون والطباعة وغيرها لا تتبع حجبًا: شاشة الإعدادات نفسها تبقى
+  /// متاحةً، وما يُخفى هو أقسامها المحجوبة فقط.
+  static const Map<String, String> settingsSections = {
+    'company': adminSettings,
+    'forms': adminSettings,
+    'verify': adminSettings,
+    'backup': adminSettings,
+    'users': adminUsers,
+    'sync': adminSync,
+    'devices': adminDevices,
+  };
+
+  /// صفحاتٌ إدارية مباشرة (تفتح الإعدادات على قسمٍ بعينه أو تدقّق).
+  static const Map<String, String> _adminPages = {
+    'branding': adminSettings,
+    'formsDesigner': adminSettings,
+    'verifySign': adminSettings,
+    'usersAccess': adminUsers,
+    'lanSync': adminSync,
+    'deviceActivation': adminDevices,
+    'supplyAudit': adminAudit,
+    'auditTrail': adminAudit,
+    'activityIntel': adminAudit,
+    'executiveCmd': adminAudit,
+    'sensitiveOps': adminAudit,
+    'healthOps': adminAudit,
+    'audit': adminAudit,
+  };
+
+  /// صفحاتٌ محايدة: الرئيسية تتبع القسم المفتوح، والإعدادات تُرشَّح أقسامها.
+  static const Set<String> _neutral = {'dash', 'dashboard', 'settings'};
+
+  /// القسم الذي تنتمي إليه [page]، أو `null` لصفحةٍ محايدة.
+  ///
+  /// تُمرَّر **هوية الصفحة الأصلية** لا المطبَّعة: `lanSync` تُطبَّع إلى صلاحيةٍ
+  /// نظامية، فيضيع انتماؤها الإداري لو طُبِّعت قبل السؤال.
+  static String? sectionOf(String page) {
+    if (_neutral.contains(page)) return null;
+    final admin = _adminPages[page];
+    if (admin != null) return admin;
+    if (page.startsWith('fuel')) return fuel;
+    return supply;
+  }
+
+  // ───────────────────────── القراءة والكتابة
+
+  /// قائمة الأقسام المحجوبة من JSON المخزَّن. التالف ⇒ **كل الأقسام** (فشل مغلق).
+  static Set<String> parse(String? json) {
+    final text = (json ?? '').trim();
+    if (text.isEmpty) return <String>{};
+    try {
+      final v = jsonDecode(text);
+      if (v is! List) return {...all};
+      return {for (final e in v) if (e is String && all.contains(e)) e};
+    } catch (_) {
+      return {...all};
+    }
+  }
+
+  /// يرمّز مجموعةً إلى JSON مرتّب بلا تكرار وبلا أقسامٍ مجهولة — ترميزٌ **حتميّ**
+  /// لأن التوقيع يُحسب على نصّه.
+  static String encode(Iterable<String> sections) {
+    final set = {for (final s in sections) if (all.contains(s)) s};
+    return jsonEncode([for (final s in all) if (set.contains(s)) s]);
+  }
+
+  // ───────────────────────── الفحص
+
+  /// هل تُحجب [page] عن حسابٍ بدور [role] وحجبه [blockedJson]؟
+  /// المالك لا يُحجب عنه شيء.
+  static bool blocksPage({required String? role, required String? blockedJson, required String page}) {
+    if (role == 'owner') return false;
+    final section = sectionOf(page);
+    if (section == null) return false;
+    return parse(blockedJson).contains(section);
+  }
+
+  /// هل [section] (من [all]) محجوبٌ عن هذا الحساب؟ المالك لا.
+  static bool blocksSection({required String? role, required String? blockedJson, required String section}) {
+    if (role == 'owner') return false;
+    return parse(blockedJson).contains(section);
+  }
+}
+// ==================== END FILE: lib/domain/section_block.dart ====================
+
+// ==================== FILE: lib/data/repos/users_repo.dart ====================
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+
+import '../../domain/password_policy.dart';
+import '../db/app_database.dart';
+import '../../core/security/device_activation.dart';
+import '../../core/security/owner_signature.dart';
+import '../../core/security/password_hash.dart';
+import '../../core/security/warehouse_scope.dart';
+import '../../domain/access_control.dart';
+import '../../domain/section_block.dart';
+import 'audit_repo.dart';
+import '../../core/error_log.dart';
+
+/// إدارة المستخدمين والأدوار ونطاق المستودعات.
+/// كل عمليات هذه الفئة مقصورة على من يملك صلاحية إدارة المستخدمين —
+/// الشاشة هي التي تفرض ذلك قبل استدعائها، ولا تُعرض لغيرهم أصلًا.
+class UsersRepo {
+  UsersRepo(this.db);
+
+  final AppDatabase db;
+
+  /// كل الحسابات بلا فرز — لشاشات التحليل.
+  Future<List<User>> allUsers() => db.select(db.users).get();
+
+  Future<User?> byId(String id) => (db.select(db.users)..where((t) => t.id.equals(id))).getSingleOrNull();
+
+  /// يعتمد حسابًا معلَّقًا (التوقيع/التدقيق على المستدعي كما كان في الشاشة).
+  Future<void> markApproved(String id) =>
+      (db.update(db.users)..where((t) => t.id.equals(id))).write(const UsersCompanion(approved: Value(true)));
+
+  Future<List<User>> users() async {
+    final rows = await db.select(db.users).get();
+    rows.sort((a, b) => a.username.compareTo(b.username));
+    return rows;
+  }
+
+  static List<String> rolesOf(User user) {
+    try {
+      final v = jsonDecode(user.roles);
+      if (v is List) return v.map((e) => e.toString()).toList();
+    } catch (err, stack) {
+      ErrorLogger.log('users.rolesJson', err, stack);
+    }
+    return const [];
+  }
+
+  /// نطاق المستودعات: `null` ⇒ كل المستودعات. التالف يُرجع قائمةً فارغة
+  /// (فشل مغلق) — انظر [parseWarehouseScope].
+  static List<String>? scopeOf(User user) =>
+      parseWarehouseScope(user.warehouseScope, source: 'users.scopeJson');
+
+  static String scopeLabel(User user) {
+    final scope = scopeOf(user);
+    if (UserRole.isAdmin(user.role)) return 'كل المستودعات (${UserRole.label(user.role)})';
+    if (scope == null) return 'كل المستودعات';
+    return scope.isEmpty ? 'بدون مستودعات' : scope.join('، ');
+  }
+
+  /// صلاحيات مشتقة من قوالب الأدوار المختارة.
+  static PermissionMap permissionsForRoles(List<String> roleIds) => AccessControl.merge([
+        for (final id in roleIds)
+          if (AccessControl.roles[id] != null) AccessControl.roles[id]!.permissions,
+      ]);
+
+  /// قواعد من يفعل ماذا في إدارة الحسابات — تُطبَّق حين يُمرَّر [actorRole].
+  ///
+  /// • **المالك:** كل شيء (ما عدا المساس بحساب مالكٍ — يحميه الفحص أدناه).
+  /// • **المدير:** ينشئ مستخدمين بدور `user` بقالبٍ جاهز فقط، ويعدّل بياناتهم
+  ///   العادية ويفعّلهم. **لا** يمنح دور مدير، **ولا** يعدّل مصفوفة صلاحيات أحد
+  ///   ولا نطاقه، **ولا** يعطّل حسابًا، **ولا** يمسّ حساب مديرٍ أو مالك.
+  /// • غيرهما: لا شيء.
+  ///
+  /// `actorRole == null` ⇒ استدعاءٌ داخليٌّ موثوق (تهيئة، ترحيل، اختبارات) لا
+  /// يخضع للقواعد. الشاشات تمرّر دور المستخدم الحالي دائمًا.
+  static void _requireActor(String? actorRole, {bool owner = false, String why = ''}) {
+    if (actorRole == null) return;
+    final ok = owner ? UserRole.isOwner(actorRole) : UserRole.isAdmin(actorRole);
+    if (!ok) {
+      throw ArgumentError(owner ? '✖ هذا الإجراء للمالك وحده${why.isEmpty ? '' : ' — $why'}' : '✖ لا تملك صلاحية إدارة الحسابات');
+    }
+  }
+
+  Future<String> createUser({
+    required String username,
+    required String password,
+    required String name,
+    List<String> roleIds = const [],
+    PermissionMap? permissions,
+    List<String>? warehouseScope,
+    bool isAdmin = false,
+    String actorEmail = '',
+    String? actorRole,
+    /// حقنٌ للاختبارات (مفتاح مالكٍ غير المدفون)، كما في [resign].
+    DeviceActivation? activation,
+  }) async {
+    _requireActor(actorRole);
+    if (actorRole != null && !UserRole.isOwner(actorRole)) {
+      // المدير: مستخدمٌ عاديٌّ بقالبٍ جاهز — لا مدير، ولا مصفوفة صلاحياتٍ مخصَّصة، ولا نطاق.
+      if (isAdmin) _requireActor(actorRole, owner: true, why: 'منح دور مدير النظام');
+      if (permissions != null) _requireActor(actorRole, owner: true, why: 'تخصيص الصلاحيات');
+      if (warehouseScope != null) _requireActor(actorRole, owner: true, why: 'تحديد نطاق المستودعات');
+      if (roleIds.any((r) => !AccessControl.roles.containsKey(r))) {
+        throw ArgumentError('✖ قالب صلاحيات غير معروف');
+      }
+    }
+    final u = username.trim().toLowerCase();
+    if (!RegExp(r'^[a-z0-9._-]{3,40}$').hasMatch(u)) {
+      throw ArgumentError('اسم المستخدم بالإنجليزية أو الأرقام أو النقاط، 3 أحرف فأكثر');
+    }
+    final weak = PasswordPolicy.problem(password, username: u);
+    if (weak != null) throw ArgumentError(weak);
+    final exists = await (db.select(db.users)..where((t) => t.username.equals(u))).get();
+    if (exists.isNotEmpty) throw ArgumentError('اسم المستخدم مستخدم بالفعل');
+
+    final ph = await PasswordHash.create(password);
+    final id = 'local-$u';
+    await db.into(db.users).insert(UsersCompanion.insert(
+          id: id,
+          username: u,
+          name: Value(name.trim().isEmpty ? u : name.trim()),
+          email: Value('$u@imdad.local'),
+          role: Value(isAdmin ? 'admin' : 'user'),
+          roles: Value(jsonEncode(roleIds)),
+          permissions: Value(jsonEncode(permissions ?? permissionsForRoles(roleIds))),
+          warehouseScope: Value(warehouseScope == null ? 'ALL' : jsonEncode(warehouseScope)),
+          saltHex: Value(ph.saltHex),
+          hashHex: Value(ph.hashHex),
+          iterations: Value(ph.iterations),
+          // مديرٌ جديد يُختم بثوانٍ كاملة ليُوقَّع دورُه (بصمة التوقيع تضمّ `updatedAt`).
+          updatedAt: isAdmin
+              ? Value(DateTime.fromMillisecondsSinceEpoch(OwnerSignature.seconds(DateTime.now()) * 1000))
+              : const Value.absent(),
+        ));
+    if (isAdmin) await resign(id, activation: activation, actorEmail: actorEmail);
+
+    await AuditRepo(db).log(
+      action: 'user.create',
+      entityType: 'مستخدم',
+      summary: 'إنشاء حساب «$u»${isAdmin ? ' بصلاحيات مدير نظام' : ''}',
+      details: {'username': u, 'roles': roleIds, 'admin': isAdmin, 'scope': warehouseScope},
+      risk: isAdmin ? AuditRepo.riskHigh : AuditRepo.riskNormal,
+      actorEmail: actorEmail,
+    );
+    return id;
+  }
+
+  Future<void> updateUser({
+    required String id,
+    String? name,
+    List<String>? roleIds,
+    PermissionMap? permissions,
+    List<String>? warehouseScope,
+    bool? allWarehouses,
+    bool? isAdmin,
+    bool? active,
+    String actorEmail = '',
+    String? actorRole,
+  }) async {
+    _requireActor(actorRole);
+    // حساب المالك محميّ: لا يتغيّر دوره ولا يُعطَّل من هذا المسار.
+    final target = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingleOrNull();
+    if (target != null && UserRole.isOwner(target.role)) {
+      if (isAdmin != null) throw ArgumentError('✖ حساب المالك لا يتغيّر دوره');
+      if (active == false) throw ArgumentError('✖ حساب المالك لا يُعطَّل');
+    }
+    if (actorRole != null && !UserRole.isOwner(actorRole)) {
+      // المدير لا يمسّ حساب مديرٍ أو مالك، ولا يرفع ولا يعدّل صلاحيات ولا يعطّل.
+      if (target != null && UserRole.isAdmin(target.role)) {
+        throw ArgumentError('✖ لا يعدّل حسابَ مديرٍ أو مالكٍ إلا المالك');
+      }
+      if (isAdmin != null) _requireActor(actorRole, owner: true, why: 'تغيير دور الحساب');
+      if (permissions != null) _requireActor(actorRole, owner: true, why: 'تعديل مصفوفة الصلاحيات');
+      if (allWarehouses != null || warehouseScope != null) {
+        _requireActor(actorRole, owner: true, why: 'تعديل نطاق المستودعات');
+      }
+      if (active == false) _requireActor(actorRole, owner: true, why: 'تعطيل الحسابات');
+    }
+    await (db.update(db.users)..where((t) => t.id.equals(id))).write(UsersCompanion(
+      name: name == null ? const Value.absent() : Value(name),
+      roles: roleIds == null ? const Value.absent() : Value(jsonEncode(roleIds)),
+      permissions: permissions == null ? const Value.absent() : Value(jsonEncode(permissions)),
+      warehouseScope: allWarehouses == true
+          ? const Value('ALL')
+          : warehouseScope == null
+              ? const Value.absent()
+              : Value(jsonEncode(warehouseScope)),
+      role: isAdmin == null ? const Value.absent() : Value(isAdmin ? 'admin' : 'user'),
+      active: active == null ? const Value.absent() : Value(active),
+      updatedAt: Value(DateTime.now()),
+    ));
+
+    // `updatedAt` تغيّر: توقيعات هذا الحساب (إن وُجدت ومفتاح المالك هنا) تُجدَّد، وإلا
+    // سقطت بأول تعديل فلم يقبله جهازٌ جديد بالمزامنة.
+    await resign(id, actorEmail: actorEmail);
+
+    await AuditRepo(db).log(
+      action: 'user.update',
+      entityType: 'مستخدم',
+      summary: 'تعديل صلاحيات أو نطاق الحساب $id',
+      details: {
+        'roles': roleIds,
+        'admin': isAdmin,
+        'allWarehouses': allWarehouses,
+        'scope': warehouseScope,
+        'active': active,
+      },
+      risk: isAdmin == true ? AuditRepo.riskHigh : AuditRepo.riskNormal,
+      actorEmail: actorEmail,
+    );
+  }
+
+  /// تعيين كلمة مرور الحساب [id] — **بفحص المنفِّذ** (M-12).
+  ///
+  /// كانت الدالة بلا أي فحص، فأي مسارٍ ينادِها يغيّر كلمة مرور أي حساب. الآن:
+  /// • صاحب الحساب نفسه ([actorId] == [id]) — بعد أن يُثبت كلمته الحالية في الواجهة.
+  /// • مديرٌ يعيد تعيين كلمة مستخدمٍ عادي (نسي كلمته).
+  /// • المالك وحده يعيد تعيين كلمة مديرٍ أو مالكٍ آخر.
+  /// وما سوى ذلك يرمي [StateError]. وكل إعادة تعيينٍ لغير النفس تُدقَّق عاليةً.
+  Future<void> resetPassword({
+    required String id,
+    required String password,
+    required String actorId,
+    required String actorRole,
+    String actorEmail = '',
+  }) async {
+    final target = await byId(id);
+    if (target == null) throw StateError('الحساب غير موجود');
+    final weak = PasswordPolicy.problem(password, username: target.username);
+    if (weak != null) throw ArgumentError(weak);
+    final self = actorId == id;
+    if (!self) {
+      if (!UserRole.isAdmin(actorRole)) throw StateError('إعادة تعيين كلمة مرور غيرك للمدير وحده');
+      if (UserRole.isAdmin(target.role) && !UserRole.isOwner(actorRole)) {
+        throw StateError('كلمة مرور مديرٍ أو مالك لا يعيد تعيينها إلا المالك');
+      }
+    }
+    // الأعمدة الثلاثة معًا: لو بقي `iterations` القديم (حساب مُرحَّل بعدد مختلف)
+    // لما طابقت البصمة الجديدة أبدًا وأُغلق الحساب بعد إعادة التعيين.
+    final ph = await PasswordHash.create(password);
+    await (db.update(db.users)..where((t) => t.id.equals(id))).write(UsersCompanion(
+      saltHex: Value(ph.saltHex),
+      hashHex: Value(ph.hashHex),
+      iterations: Value(ph.iterations),
+      failedAttempts: const Value(0),
+      lockedUntil: const Value(null),
+      updatedAt: Value(DateTime.now()),
+    ));
+    await resign(id);
+    if (!self) {
+      await AuditRepo(db).log(
+        action: 'user.password_reset',
+        entityType: 'مستخدم',
+        summary: 'أُعيد تعيين كلمة مرور «${target.username}»',
+        details: {'userId': id, 'username': target.username},
+        risk: AuditRepo.riskHigh,
+        actorEmail: actorEmail,
+      );
+    }
+  }
+
+  /// يجدّد توقيعات المالك على حسابٍ بعد أن تغيّر `updatedAt` (وهو جزءٌ من بصمة كل
+  /// توقيع): توقيع الدور `r` إن كان الحساب مديرًا/مالكًا، وتوقيع الأقسام `s` إن كان
+  /// عليه توقيعٌ سابق. **لا يمسّ `updatedAt`** (تغييره يُبطل ما وُقِّع للتوّ).
+  ///
+  /// لا يفعل شيئًا بلا مفتاح المالك الخاص على هذا الجهاز. يعيد `true` إن وُقِّع شيء.
+  Future<bool> resign(String id, {DeviceActivation? activation, String actorEmail = ''}) async {
+    final act = activation ?? DeviceActivation(db);
+    if (!await act.canIssue()) return false;
+    final row = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingleOrNull();
+    final stamp = row?.updatedAt;
+    if (row == null || stamp == null) return false;
+
+    final sec = OwnerSignature.seconds(stamp);
+    final sigs = OwnerSignature.parse(row.ownerSig);
+    final purposes = <String>[];
+
+    // الحساب المميَّز **أو الذي كان مميَّزًا** (يحمل توقيع `r` سابقًا — والتوقيع لا
+    // يُسحب). الأجهزة الأخرى ما زالت تراه مديرًا، وحارسها يشترط توقيع المالك على
+    // خفضه وعلى ما يتغيّر فيه معه؛ فبلا هذا لا ينتشر خفضٌ شرعيٌّ أجراه المالك.
+    final vouched = OwnerSignature.rank(row.role) > 0 || sigs.containsKey(OwnerSignature.roleKey);
+
+    if (vouched) {
+      final r = await OwnerSignature.signRole(act, userId: id, role: row.role, updatedAtSec: sec);
+      if (r != null) {
+        sigs[OwnerSignature.roleKey] = r;
+        purposes.add('role');
+      }
+    }
+    if (vouched) {
+      final c = await OwnerSignature.signCreds(
+        act,
+        userId: id,
+        role: row.role,
+        saltHex: row.saltHex,
+        hashHex: row.hashHex,
+        permissions: row.permissions,
+        warehouseScope: row.warehouseScope,
+        active: row.active,
+        approved: row.approved,
+        updatedAtSec: sec,
+      );
+      if (c != null) {
+        sigs[OwnerSignature.credsKey] = c;
+        purposes.add('creds');
+      }
+    }
+    // توقيع الدور `r` لا يُسحب من أي صف أبدًا (حتى لو نزل الدور): السحب يفقد الأثر.
+    if (sigs.containsKey(OwnerSignature.sectionsKey)) {
+      final s = await OwnerSignature.signSections(act, userId: id, blockedJson: row.sectionBlocked, updatedAtSec: sec);
+      if (s != null) {
+        sigs[OwnerSignature.sectionsKey] = s;
+        purposes.add('sections');
+      }
+    }
+    final encoded = OwnerSignature.encode(sigs);
+    if (encoded == row.ownerSig) return false;
+
+    await (db.update(db.users)..where((t) => t.id.equals(id))).write(UsersCompanion(ownerSig: Value(encoded)));
+    if (purposes.isNotEmpty) {
+      await AuditRepo(db).log(
+        action: 'sys.sign.used',
+        entityType: 'مستخدم',
+        summary: 'استُعمل مفتاح المالك الخاص لتجديد توقيع «${row.username}» (${purposes.join('، ')})',
+        details: {'purpose': purposes, 'userId': id},
+        risk: AuditRepo.riskHigh,
+        actorEmail: actorEmail,
+      );
+    }
+    return true;
+  }
+
+  /// يوقّع كل المديرين والمالكين الحاليين بمفتاح المالك (لمرةٍ بعد الترقية إلى v25:
+  /// حساباتهم قبلها بلا توقيع فلا يقبلها جهازٌ جديد بالمزامنة). يعيد عدد من وُقِّع.
+  Future<int> signPrivilegedUsers({String? actorRole, String actorEmail = '', DeviceActivation? activation}) async {
+    _requireActor(actorRole, owner: true, why: 'توقيع المديرين');
+    var n = 0;
+    for (final u in await db.select(db.users).get()) {
+      if (OwnerSignature.rank(u.role) == 0) continue;
+      // `updatedAt` الفارغ (حسابٌ قديم) يُختم الآن: لا توقيع على لا شيء.
+      if (u.updatedAt == null) {
+        await (db.update(db.users)..where((t) => t.id.equals(u.id))).write(UsersCompanion(
+          updatedAt: Value(DateTime.fromMillisecondsSinceEpoch(OwnerSignature.seconds(DateTime.now()) * 1000)),
+        ));
+      }
+      if (await resign(u.id, activation: activation, actorEmail: actorEmail)) n++;
+    }
+    return n;
+  }
+
+  /// يضبط الأقسام المحجوبة عن مستخدم — **للمالك وحده**، ولا يُحجب عن المالك شيء.
+  ///
+  /// • **الإضافة** (حجبُ قسمٍ جديد) بلا توقيع: تضييقٌ لا يضرّ لو أُسيء استعماله.
+  /// • **الإلغاء** (فكُّ قسم) يُوقَّع بمفتاح المالك الخاص إن كان على هذا الجهاز،
+  ///   فتقبله الأجهزة الأخرى بالمزامنة. بلا المفتاح يُفكّ **محليًّا** فقط
+  ///   ([SectionBlockResult.unsignedUnblock]) ولا ينتشر حتى يُوقَّع من جهاز الإدارة.
+  ///   التغيير المحلي على هذا الجهاز نافذٌ في الحالين.
+  ///
+  /// كل تغييرٍ يُسجَّل بخطورة عالية، وكل استخدامٍ للمفتاح الخاص يُسجَّل `sys.sign.used`.
+  Future<SectionBlockResult> setSectionBlocked({
+    required String id,
+    required Set<String> blocked,
+    String? actorRole,
+    String actorEmail = '',
+    DeviceActivation? activation,
+  }) async {
+    _requireActor(actorRole, owner: true, why: 'حجب الأقسام');
+    final target = await (db.select(db.users)..where((t) => t.id.equals(id))).getSingleOrNull();
+    if (target == null) throw ArgumentError('✖ المستخدم غير موجود');
+    if (UserRole.isOwner(target.role)) throw ArgumentError('✖ لا يُحجب عن المالك أي قسم');
+
+    final before = SectionBlock.parse(target.sectionBlocked);
+    final next = {for (final s in blocked) if (SectionBlock.all.contains(s)) s};
+    final added = next.difference(before);
+    final removed = before.difference(next);
+    if (added.isEmpty && removed.isEmpty) return const SectionBlockResult();
+
+    final nextJson = SectionBlock.encode(next);
+    // بثوانٍ كاملة: هي دقة تخزين `updatedAt`، فيتطابق ما وُقِّع عليه مع ما يُقرأ.
+    final stamp = DateTime.fromMillisecondsSinceEpoch(OwnerSignature.seconds(DateTime.now()) * 1000);
+
+    // التوقيع القديم غطّى محتوىً قديمًا: يسقط. توقيع الدور (`r`) لا علاقة له.
+    final sigs = OwnerSignature.parse(target.ownerSig)..remove(OwnerSignature.sectionsKey);
+    var signed = false;
+    if (removed.isNotEmpty) {
+      final sig = await OwnerSignature.signSections(
+        activation ?? DeviceActivation(db),
+        userId: id,
+        blockedJson: nextJson,
+        updatedAtSec: OwnerSignature.seconds(stamp),
+      );
+      if (sig != null) {
+        sigs[OwnerSignature.sectionsKey] = sig;
+        signed = true;
+      }
+    }
+
+    await (db.update(db.users)..where((t) => t.id.equals(id))).write(UsersCompanion(
+      sectionBlocked: Value(nextJson),
+      ownerSig: Value(OwnerSignature.encode(sigs)),
+      updatedAt: Value(stamp),
+    ));
+
+    final audit = AuditRepo(db);
+    if (signed) {
+      await audit.log(
+        action: 'sys.sign.used',
+        entityType: 'مستخدم',
+        summary: 'استُعمل مفتاح المالك الخاص لتوقيع فكّ حجب أقسام «${target.username}»',
+        details: {'purpose': 'sections', 'userId': id, 'removed': removed.toList()..sort()},
+        risk: AuditRepo.riskHigh,
+        actorEmail: actorEmail,
+      );
+    }
+    await audit.log(
+      action: 'user.section_blocked.changed',
+      entityType: 'مستخدم',
+      summary: 'تغيير الأقسام المحجوبة عن «${target.username}»'
+          '${added.isEmpty ? '' : ' — حُجب: ${added.map((s) => SectionBlock.labels[s] ?? s).join('، ')}'}'
+          '${removed.isEmpty ? '' : ' — فُكّ: ${removed.map((s) => SectionBlock.labels[s] ?? s).join('، ')}'}',
+      details: {
+        'userId': id,
+        'added': added.toList()..sort(),
+        'removed': removed.toList()..sort(),
+        'signed': signed,
+        'unsignedUnblock': removed.isNotEmpty && !signed,
+      },
+      risk: AuditRepo.riskHigh,
+      actorEmail: actorEmail,
+    );
+    // الدور تغيّر ختمه الزمني مع هذه الكتابة: يُجدَّد توقيعه (إلا إن وُقِّع للتوّ).
+    if (!signed) await resign(id, activation: activation, actorEmail: actorEmail);
+    return SectionBlockResult(
+      changed: true,
+      added: added,
+      removed: removed,
+      signed: signed,
+      unsignedUnblock: removed.isNotEmpty && !signed,
+    );
+  }
+
+  /// فك القفل بعد تجاوز محاولات الدخول.
+  Future<void> unlock(String id) =>
+      (db.update(db.users)..where((t) => t.id.equals(id))).write(const UsersCompanion(
+        failedAttempts: Value(0),
+        lockedUntil: Value(null),
+      ));
+
+  /// لا يجوز حذف آخر مدير نظام حتى لا يُغلق النظام على نفسه.
+  ///
+  /// **المدير لا يُحذف من أول مرة بل يُقاعَد:** يُعطَّل ويُخفض إلى `user` بتوقيع
+  /// المالك ويبقى صفُّه، ويُعاد `true`. السبب أن الأجهزة الأخرى ترفض شاهدَ حذفِ
+  /// حسابٍ مميَّز عندها (`LegacyImporter._tombstoneRejection`)، والحذف لا يحمل
+  /// إلا شاهده — فلو حُذف الصفُّ مباشرة لبقي المدير فعّالًا في كل فرع. أما
+  /// المُقاعَد فيصلها صفًّا موقَّعًا فيتعطّل فيها، و**الحذف الثاني** بعد المزامنة
+  /// يحذفه حسابًا عاديًّا ينتشر شاهده كأي حذف.
+  ///
+  /// بلا مفتاح المالك على هذا الجهاز يتعطّل الحساب هنا وحده (كتغيير كلمة مرور
+  /// مدير على جهازٍ غير جهاز المالك، CLAUDE.md §4).
+  Future<bool> deleteUser(String id, {String? actorRole, String actorEmail = ''}) async {
+    _requireActor(actorRole, owner: true, why: 'حذف المستخدمين');
+    final rows = await db.select(db.users).get();
+    final target = rows.where((u) => u.id == id).toList();
+    if (target.isEmpty) return false;
+    // المالك لا يُحذف أبدًا، وآخر مدير (أو مالك) لا يُحذف حتى لا يُغلق النظام على نفسه.
+    if (UserRole.isOwner(target.first.role)) return false;
+    if (UserRole.isAdmin(target.first.role) && rows.where((u) => UserRole.isAdmin(u.role)).length <= 1) {
+      return false;
+    }
+    if (UserRole.isAdmin(target.first.role)) {
+      await (db.update(db.users)..where((t) => t.id.equals(id))).write(UsersCompanion(
+        role: const Value(UserRole.user),
+        active: const Value(false),
+        updatedAt: Value(DateTime.now()),
+      ));
+      final signed = await resign(id, actorEmail: actorEmail);
+      await AuditRepo(db).log(
+        action: 'USER_RETIRED',
+        entityType: 'مستخدم',
+        summary: 'تقاعد حساب المدير «${target.first.username}»: عُطِّل وخُفض${signed ? '' : ' (هنا وحده — لا مفتاح مالك على الجهاز)'}؛ '
+            'يُحذف نهائيًّا بحذفه مرة ثانية بعد المزامنة',
+        details: {'userId': id, 'username': target.first.username, 'signed': signed},
+        risk: AuditRepo.riskHigh,
+        actorEmail: actorEmail,
+      );
+      return true;
+    }
+    await (db.delete(db.users)..where((t) => t.id.equals(id))).go();
+    return true;
+  }
+}
+
+/// نتيجة [UsersRepo.setSectionBlocked].
+class SectionBlockResult {
+  const SectionBlockResult({
+    this.changed = false,
+    this.added = const {},
+    this.removed = const {},
+    this.signed = false,
+    this.unsignedUnblock = false,
+  });
+
+  final bool changed;
+  final Set<String> added;
+  final Set<String> removed;
+
+  /// وُقِّع فكُّ الحجب بمفتاح المالك (فينتشر بالمزامنة).
+  final bool signed;
+
+  /// فُكّ حجبٌ **محليًّا** بلا توقيع: لن ينتشر للأجهزة الأخرى حتى يُوقَّع من جهاز الإدارة.
+  final bool unsignedUnblock;
+}
+// ==================== END FILE: lib/data/repos/users_repo.dart ====================
+
+// ==================== FILE: lib/data/permission_impact.dart ====================
+import 'dart:convert';
+
+import '../core/error_log.dart';
+import 'db/app_database.dart';
+import '../domain/access_control.dart';
+
+/// بند في تقرير الأثر: مجموعةُ مستخدمين وما يتغيّر عليهم.
+class ImpactItem {
+  const ImpactItem(this.id, this.title, this.effect, this.users);
+
+  final String id;
+  final String title;
+
+  /// ماذا يحدث لهؤلاء المستخدمين بعد نقل الصلاحيات الخاصة إلى المالك.
+  final String effect;
+  final List<User> users;
+}
+
+/// تقرير أثر نقل الصلاحيات الخاصة (`sys.*`) إلى المالك — **قراءةٌ فقط**.
+///
+/// يجيب قبل أي ترحيل نهائي: من سيفقد ماذا؟ لا يغيّر شيئًا في أي حساب، وقرار
+/// ما يُفعل بكل مجموعة (إبقاء، ترقية، سحب) للمالك.
+class PermissionImpact {
+  const PermissionImpact._();
+
+  static Map<String, dynamic> _perms(User u) {
+    try {
+      final v = jsonDecode(u.permissions);
+      if (v is Map) return v.cast<String, dynamic>();
+    } catch (e, st) {
+      // مصفوفةُ صلاحياتٍ تالفة تُعامل «بلا صلاحيات» في التقرير؛ يُسجَّل العطب لا يُبتلع.
+      ErrorLogger.log('permission_impact', e, st);
+    }
+    return const {};
+  }
+
+  static bool _has(User u, String page, String action) {
+    final p = _perms(u)[page];
+    return p is Map && p[action] == true;
+  }
+
+  static bool _isUser(User u) => !UserRole.isAdmin(u.role);
+
+  /// يبني التقرير من قائمة المستخدمين.
+  static List<ImpactItem> build(List<User> all) {
+    final nonAdmins = all.where(_isUser).toList();
+    return [
+      ImpactItem(
+        'admins',
+        'مديرو النظام الحاليون',
+        'يفقدون النسخ الاحتياطي والاستعادة، وتفعيل الأجهزة، والمزامنة والاقتران، '
+            'والإعدادات الحساسة (قواعد المحرك ومفتاح التوقيع والأرشفة التلقائية)، '
+            'ومنح دور المدير وتعطيل الحسابات وتعديل الصلاحيات — فتصير للمالك وحده.',
+        [for (final u in all) if (u.role == UserRole.admin) u],
+      ),
+      ImpactItem(
+        'settingsEditors',
+        'مستخدمون عاديون يملكون «الإعدادات: تعديل»',
+        'كانوا يستعيدون النسخ ويحفظون قواعد المحرك ويديرون مفتاح التوقيع ويقترنون '
+            'بالمزامنة. يفقدون هذه الإجراءات؛ ويبقى لهم الهوية والنماذج والطباعة واستيراد Excel.',
+        [for (final u in nonAdmins) if (_has(u, 'settings', PermAction.edit)) u],
+      ),
+      ImpactItem(
+        'usersAccess',
+        'مستخدمون عاديون يملكون «المستخدمون والصلاحيات»',
+        'لا تُفتح لهم شاشة المستخدمين أصلًا (للمديرين)، لكن صلاحيتهم المخزَّنة لا أثر لها '
+            'بعد الآن: تعديل الصلاحيات وإدارة الحسابات للمالك والمدير فقط.',
+        [
+          for (final u in nonAdmins)
+            if (_has(u, 'usersAccess', PermAction.view) ||
+                _has(u, 'usersAccess', PermAction.edit) ||
+                _has(u, 'usersAccess', PermAction.approve))
+              u,
+        ],
+      ),
+      ImpactItem(
+        'suppliersCreateOnly',
+        'مستخدمون يملكون «الموردون: إضافة» بلا «تعديل»',
+        'صارت الحراسة بصلاحية الموردين نفسها (بدل المدير وحده). لا رفعٌ تلقائي: يضيفون '
+            'موردين جددًا ولا يعدّلون القائم — راجع إن كان ذلك مقصودًا.',
+        [
+          for (final u in nonAdmins)
+            if (_has(u, 'suppliers', PermAction.create) && !_has(u, 'suppliers', PermAction.edit)) u,
+        ],
+      ),
+      ImpactItem(
+        'storesCreateOnly',
+        'مستخدمون يملكون «المستودعات: إضافة» بلا «تعديل»',
+        'كما في الموردين: الحراسة بصلاحية المستودعات نفسها، بلا رفعٍ تلقائي.',
+        [
+          for (final u in nonAdmins)
+            if (_has(u, 'stores', PermAction.create) && !_has(u, 'stores', PermAction.edit)) u,
+        ],
+      ),
+      ImpactItem(
+        'importInherit',
+        'مستخدمون يرثون «استيراد» من «إضافة»',
+        'لم يُحدَّد لهم `import` صراحةً، فيرثون «إضافة» على الأصناف والارتباطات '
+            '(توافقٌ لئلا يفقدوا ما كان لهم). حدّد لكلٍّ منهم `import` صراحةً إن أردت التمييز.',
+        [
+          for (final u in nonAdmins)
+            if (['items', 'linkages'].any((p) {
+              final m = _perms(u)[p];
+              return m is Map && m['create'] == true && !m.containsKey(PermAction.import);
+            }))
+              u,
+        ],
+      ),
+    ];
+  }
+}
+// ==================== END FILE: lib/data/permission_impact.dart ====================
+
+// ==================== FILE: lib/features/auth/login_screen.dart ====================
+import '../../domain/access_control.dart' show UserRole;
+import 'dart:io' show Platform;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:window_manager/window_manager.dart';
+
+import '../../core/security/auth_service.dart';
+import '../../core/security/biometric_service.dart';
+import '../../core/security/sys_notice.dart';
+import '../../core/ui/widgets/imd_tap.dart';
+import '../../data/db/app_database.dart';
+import 'change_password_dialog.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_window.dart';
+
+part 'login/login_inputs.dart';
+part 'login/login_buttons.dart';
+part 'login/login_bio_dialog.dart';
+
+
+/// شاشة الدخول: الشعار والعنوان، رسالة الخطأ، اسم المستخدم، كلمة المرور بزر
+/// الإظهار، ثم «دخول» و«خروج» جنبًا إلى جنب.
+///
+/// على ويندوز تُعرض في نافذة صغيرة بمقاس البطاقة بلا شريط عنوان ([ImdWindow.login])،
+/// فتُسحب النافذة من منطقة الشعار، ويغلق «خروج» التطبيق.
+/// الشاشة تتبع سمة التطبيق (فاتح/داكن/تلقائي) كبقية الشاشات.
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key, required this.onSignedIn});
+
+  final VoidCallback onSignedIn;
+
+  /// يُظهر زر «خروج» على منصة لا يظهر فيها (الاختبارات وأداة اللقطات على لينكس).
+  @visibleForTesting
+  static bool? debugShowExit;
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _user = TextEditingController();
+  final _pass = TextEditingController();
+
+  bool _showPass = false;
+  bool _busy = false;
+  bool _remember = false;
+  String _error = '';
+
+  /// الدخول بالبصمة: مفعَّلةٌ على هذا الجهاز ومتاحةٌ الآن (أندرويد فقط).
+  bool _bioReady = false;
+  late final BiometricService _bio;
+
+  /// زر «خروج» حيث يمكن للتطبيق أن يغلق نفسه (ويندوز وأندرويد).
+  static bool get _canExit =>
+      LoginScreen.debugShowExit ?? (Platform.isWindows || Platform.isAndroid);
+
+  static const _rememberedUserKey = 'imdad.login.rememberedUsername';
+
+  @override
+  void initState() {
+    super.initState();
+    _bio = BiometricService(context.read<AppDatabase>(), context.read<AuthService>());
+    _restoreRememberedUser();
+    _initBiometric();
+  }
+
+  /// يفحص جاهزية البصمة ثم يعرض نافذتها تلقائيًّا مرةً واحدة عند فتح الشاشة.
+  Future<void> _initBiometric() async {
+    if (await _bio.availability() != BiometricAvailability.available) return;
+    if (await _bio.enrolledUserId() == null) return;
+    if (!mounted) return;
+    setState(() => _bioReady = true);
+    // بعد أول إطار فتظهر الشاشة خلف نافذة البصمة لا فراغًا أسود.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loginWithBiometric();
+    });
+  }
+
+  Future<void> _loginWithBiometric() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    final res = await _bio.signIn();
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (res.isOk) {
+      widget.onSignedIn();
+      return;
+    }
+    // الاعتماد أُبطل (تغيّرت كلمة المرور مثلًا): يختفي الزر ويبقى الدخول بالكلمة.
+    if (await _bio.enrolledUserId() == null && mounted) setState(() => _bioReady = false);
+    _lErr(res.message);
+  }
+
+  /// بعد دخولٍ ناجح بكلمة المرور: يعرض تفعيل البصمة إن كانت متاحةً ولم تُفعَّل
+  /// لهذا الحساب ولم يرفض المستخدم العرض من قبل.
+  Future<void> _offerBiometric(User user, String password, ScaffoldMessengerState? messenger) async {
+    if (await _bio.availability() != BiometricAvailability.available) return;
+    if (await _bio.enrolledUserId() == user.id) return;
+    if (await _bio.declinedPrompt()) return;
+    if (!mounted) return;
+    final choice = await showDialog<_BioChoice>(
+      context: context,
+      builder: (_) => const _BioOfferDialog(),
+    );
+    if (choice == _BioChoice.never) {
+      await _bio.rememberDeclined();
+    } else if (choice == _BioChoice.enable) {
+      final ok = await _bio.enroll(user, password);
+      messenger?.showSnackBar(SnackBar(
+        behavior: SnackBarBehavior.floating,
+        content: Text(ok ? 'تم تفعيل الدخول بالبصمة' : 'لم يُفعَّل الدخول بالبصمة'),
+      ));
+    }
+  }
+
+  /// اسم المستخدم المحفوظ من دخولٍ سابق — كلمة المرور لا تُحفظ أبدًا.
+  Future<void> _restoreRememberedUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_rememberedUserKey);
+    if (!mounted || saved == null || saved.isEmpty) return;
+    setState(() {
+      _user.text = saved;
+      _remember = true;
+    });
+  }
+
+  @override
+  void dispose() {
+    _user.dispose();
+    _pass.dispose();
+    super.dispose();
+  }
+
+
+  void _lErr(String m) => setState(() => _error = m);
+
+
+
+  /// تسجيل الدخول — المسار الوحيد للدخول إلى النظام.
+  /// إنشاء الحسابات لم يعد من هنا: يُنشئها المدير على جهازه وتصل بالمزامنة.
+  Future<void> _login() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    final res = await context.read<AuthService>().login(_user.text.trim(), _pass.text);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (res.isOk) {
+      final prefs = await SharedPreferences.getInstance();
+      if (_remember) {
+        await prefs.setString(_rememberedUserKey, _user.text.trim());
+      } else {
+        await prefs.remove(_rememberedUserKey);
+      }
+      if (!mounted) return;
+      // قبل الانتقال: المرسِل والقاعدة يُلتقطان الآن، فالشاشة تُستبدل بعد قليل.
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      final db = context.read<AppDatabase>();
+      final laterColor = Theme.of(context).colorScheme.inversePrimary;
+      final user = res.user;
+      // لا مالك وأكثر من مدير: يُنبَّه المدير ليحدّد المالك (مرة في كل دخول حتى يُحدَّد).
+      final ownerPending = user != null &&
+          UserRole.isAdmin(user.role) &&
+          await context.read<AuthService>().ownerSelectionNeeded();
+      if (!mounted) return;
+      // مرحلة الانتقال: مرةً واحدة لكل مدير غير مالك.
+      final sysNotice = SysTransitionNotice(db);
+      final showSysNotice = user != null && await sysNotice.shouldShow(user);
+      if (showSysNotice) await sysNotice.markSeen(user);
+      if (!mounted) return;
+      final weak = user != null &&
+          AuthService.shouldSuggestPasswordChange(role: user.role, password: _pass.text, username: user.username);
+      if (user != null) await _offerBiometric(user, _pass.text, messenger);
+      if (!mounted) return;
+      widget.onSignedIn();
+      if (showSysNotice && messenger != null) {
+        messenger.showSnackBar(const SnackBar(
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 15),
+          content: Text(SysTransitionNotice.message),
+        ));
+      }
+      if (ownerPending && messenger != null) {
+        messenger.showSnackBar(const SnackBar(
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 12),
+          content: Text('لم يُحدَّد مالك للنظام — حدّد المالك من الإعدادات ← نظرة عامة.'),
+        ));
+      }
+      if (weak && messenger != null) _offerPasswordUpgrade(messenger, db, user.id, laterColor);
+      return;
+    }
+    _lErr(res.message);
+  }
+
+  /// تنبيه لا يمنع الدخول: كلمة المرور أقصر من الحد الجديد (٨ أحرف).
+  /// «غيّرها الآن» يفتح نافذة التغيير، و«لاحقًا» يُغلق التنبيه.
+  void _offerPasswordUpgrade(ScaffoldMessengerState messenger, AppDatabase db, String userId, Color laterColor) {
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 15),
+        // «لاحقًا» داخل المحتوى لأن SnackBar يقبل إجراءً واحدًا فقط.
+        content: Row(children: [
+          const Expanded(
+            child: Text('كلمة مرورك أقصر من ${AuthService.minPasswordLength} أحرف — يُنصح بتغييرها.'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: laterColor),
+            onPressed: messenger.hideCurrentSnackBar,
+            child: const Text('لاحقًا'),
+          ),
+        ]),
+        action: SnackBarAction(
+          label: 'غيّرها الآن',
+          onPressed: () => showChangePasswordDialog(db: db, userId: userId),
+        ),
+      ));
+  }
+
+  Future<void> _exit() async {
+    await ImdWindow.exit();
+    if (!ImdWindow.supported) await SystemNavigator.pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final narrow = MediaQuery.sizeOf(context).width <= 520;
+    final c = context.imd;
+    // خطّ البطاقة ثابتٌ (Cairo) بصرف النظر عن خط الواجهة المختار في
+    // الإعدادات — أما ألوانها فتتبع سمة التطبيق كبقية الشاشات.
+    return Theme(
+      data: Theme.of(context).copyWith(
+        textTheme: Theme.of(context).textTheme.apply(fontFamily: 'Cairo'),
+      ),
+      child: Scaffold(
+        backgroundColor: narrow ? c.surface : c.bg,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              Center(
+                child: SingleChildScrollView(
+                  padding: narrow ? EdgeInsets.zero : const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: narrow ? double.infinity : 420),
+                    child: Container(
+                      padding: narrow
+                          ? const EdgeInsets.fromLTRB(20, 22, 20, 18)
+                          : const EdgeInsets.fromLTRB(32, 36, 32, 24),
+                      decoration: narrow
+                          ? null
+                          : BoxDecoration(
+                              color: c.surface,
+                              border: Border.all(color: c.line),
+                              borderRadius: BorderRadius.circular(20),
+                              boxShadow: [
+                                BoxShadow(
+                                    color: c.shadowXs,
+                                    blurRadius: 2,
+                                    offset: const Offset(0, 1)),
+                                BoxShadow(
+                                    color: c.shadowSm,
+                                    blurRadius: 40,
+                                    offset: const Offset(0, 16)),
+                              ],
+                            ),
+                      child: _card(narrow),
+                    ),
+                  ),
+                ),
+              ),
+              // النافذة بلا شريط عنوان، فلا زرّ إغلاقٍ أصليّ من ويندوز —
+              // هذا بديله: علامة إغلاقٍ نهائي عند الزاوية العليا اليمنى دومًا،
+              // بصرف النظر عن اتجاه النص.
+              if (_canExit)
+                Positioned(top: 10, right: 10, child: _CornerCloseBtn(onTap: _exit)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _card(bool narrow) {
+    final c = context.imd;
+    final inputH = narrow ? 44.0 : 48.0;
+    final inputFs = narrow ? 15.0 : 15.0;
+    final header = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Center(
+          child: SizedBox(
+            width: narrow ? 84 : 132,
+            height: narrow ? 72 : 112,
+            child: Image.asset('assets/logo.png', fit: BoxFit.contain),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text('نظام الإمداد والتموين',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                fontSize: narrow ? 19 : 24, fontWeight: FontWeight.w700, color: c.text, height: 1.3)),
+        SizedBox(height: narrow ? 12 : 22),
+      ],
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // نافذة الدخول بلا شريط عنوان: تُسحب من منطقة الشعار.
+        ImdWindow.supported ? DragToMoveArea(child: header) : header,
+        // #lErr
+        if (_error.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: c.dangerSoft,
+              border: Border.all(color: c.danger.withValues(alpha: .35)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: ImdEmojiText(_error,
+                style: TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w500, color: c.danger, height: 1.5)),
+          ),
+        _label('اسم المستخدم'),
+        _input(
+          controller: _user,
+          icon: 'user',
+          height: inputH,
+          fontSize: inputFs,
+          onSubmitted: (_) => _login(),
+          bottom: 10,
+        ),
+        _label('كلمة المرور'),
+        _input(
+          controller: _pass,
+          icon: 'lock',
+          height: inputH,
+          fontSize: inputFs,
+          obscure: !_showPass,
+          ltr: true,
+          onSubmitted: (_) => _login(),
+          eye: true,
+          bottom: 2,
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: ImdCheckbox(
+            value: _remember,
+            label: 'تذكّر اسم المستخدم',
+            onChanged: (v) => setState(() => _remember = v),
+          ),
+        ),
+        Row(children: [
+          Expanded(
+            flex: 3,
+            child: _PrimaryBtn(
+              label: _busy ? 'جارٍ التحقق…' : 'دخول',
+              icon: 'log-in',
+              busy: _busy,
+              height: inputH,
+              fontSize: inputFs,
+              onTap: _login,
+            ),
+          ),
+          if (_canExit) ...[
+            const SizedBox(width: 10),
+            Expanded(
+              flex: 2,
+              child: _ExitBtn(height: inputH, fontSize: inputFs, onTap: _exit),
+            ),
+          ],
+        ]),
+        if (_bioReady) ...[
+          const SizedBox(height: 10),
+          _BioBtn(height: inputH, fontSize: inputFs, busy: _busy, onTap: _loginWithBiometric),
+        ],
+      ],
+    );
+  }
+
+  Widget _label(String t) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Text(t,
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: context.imd.text2)),
+      );
+
+  Widget _input({
+    required TextEditingController controller,
+    String? hint,
+    String? icon,
+    required double height,
+    required double fontSize,
+    bool obscure = false,
+    bool ltr = false,
+    bool eye = false,
+    double bottom = 16,
+    ValueChanged<String>? onSubmitted,
+  }) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottom),
+      child: SizedBox(
+        height: height,
+        child: _LgInput(
+          controller: controller,
+          hint: hint,
+          icon: icon,
+          fontSize: fontSize,
+          obscure: obscure,
+          ltr: ltr,
+          onSubmitted: onSubmitted,
+          eye: eye
+              ? _EyeBtn(on: _showPass, onTap: () => setState(() => _showPass = !_showPass))
+              : null,
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/auth/login_screen.dart ====================
+
+// ==================== FILE: lib/features/auth/login/login_buttons.dart ====================
+part of '../login_screen.dart';
+
+/// زرّ الدخول الأساسي — يعرض مؤشر انتظارٍ أثناء التحقق.
+class _PrimaryBtn extends StatefulWidget {
+  const _PrimaryBtn({
+    required this.label,
+    this.icon,
+    required this.busy,
+    required this.height,
+    required this.fontSize,
+    required this.onTap,
+  });
+
+  final String label;
+  final String? icon;
+  final bool busy;
+  final double height;
+  final double fontSize;
+  final VoidCallback onTap;
+
+  @override
+  State<_PrimaryBtn> createState() => _PrimaryBtnState();
+}
+
+class _PrimaryBtnState extends State<_PrimaryBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Padding(
+      padding: EdgeInsets.zero,
+      child: MouseRegion(
+        cursor: widget.busy ? SystemMouseCursors.progress : ImdCursor.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: ImdTap(
+          onTap: widget.busy ? null : widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            height: widget.height,
+            decoration: BoxDecoration(
+              color: (_hover && !widget.busy ? c.accentHover : c.accent)
+                  .withValues(alpha: widget.busy ? .85 : 1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (widget.busy) ...[
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: c.onAccent,
+                        backgroundColor: c.onAccent.withValues(alpha: .4)),
+                  ),
+                  const SizedBox(width: 8),
+                ] else if (widget.icon != null) ...[
+                  ImdIcon(widget.icon!, size: widget.fontSize + 2, color: c.onAccent),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(
+                  child: Text(widget.label,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: widget.fontSize, fontWeight: FontWeight.w600, color: c.onAccent)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// علامة الإغلاق عند الزاوية — دائرةٌ صغيرة تحمرّ عند المرور، بنفس دلالة
+/// «خروج»: تغلق التطبيق نهائيًّا، لا تُخفي النافذة فحسب.
+class _CornerCloseBtn extends StatefulWidget {
+  const _CornerCloseBtn({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_CornerCloseBtn> createState() => _CornerCloseBtnState();
+}
+
+class _CornerCloseBtnState extends State<_CornerCloseBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      // عنصرٌ من إطار النافذة كزرّ الإغلاق الأصلي: خارج ترتيب Tab (كان آخر محطةٍ
+      // فيقفز التركيز من «دخول» إلى أعلى الشاشة)، وزرّ «خروج» في البطاقة يؤدّي
+      // عمله للوحة المفاتيح. ويبقى مسمًّى لقارئ الشاشة.
+      child: ExcludeFocus(
+        child: ImdTap(
+        label: 'إغلاق التطبيق',
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 28,
+          height: 28,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _hover ? c.dangerSoft : Colors.transparent,
+            shape: BoxShape.circle,
+          ),
+          child: ImdIcon('x', size: 15, color: _hover ? c.danger : c.text2),
+        ),
+      ),
+      ),
+    );
+  }
+}
+
+/// زر «خروج»: ثانوي بإطار، ويتلوّن بلون التحذير عند المرور لأنه يغلق التطبيق.
+class _ExitBtn extends StatefulWidget {
+  const _ExitBtn({required this.height, required this.fontSize, required this.onTap});
+  final double height;
+  final double fontSize;
+  final VoidCallback onTap;
+
+  @override
+  State<_ExitBtn> createState() => _ExitBtnState();
+}
+
+class _ExitBtnState extends State<_ExitBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final fg = _hover ? c.danger : c.text2;
+    return Semantics(
+      label: 'إغلاق النظام',
+      child: MouseRegion(
+        cursor: ImdCursor.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: ImdTap(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            height: widget.height,
+            decoration: BoxDecoration(
+              color: _hover ? c.dangerSoft : c.surface,
+              border: Border.all(color: _hover ? c.danger.withValues(alpha: .35) : c.lineStrong),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              ImdIcon('log-out', size: widget.fontSize + 2, color: fg),
+              const SizedBox(width: 8),
+              Text('خروج', style: TextStyle(fontSize: widget.fontSize, fontWeight: FontWeight.w600, color: fg)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// زرّ «الدخول بالبصمة»: ثانويٌّ بإطارٍ بلون التمييز تحت زر «دخول».
+class _BioBtn extends StatelessWidget {
+  const _BioBtn({required this.height, required this.fontSize, required this.busy, required this.onTap});
+  final double height;
+  final double fontSize;
+  final bool busy;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Semantics(
+      button: true,
+      label: 'الدخول بالبصمة',
+      child: InkWell(
+        onTap: busy ? null : onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: height,
+          decoration: BoxDecoration(
+            color: c.accent.withValues(alpha: .08),
+            border: Border.all(color: c.accent.withValues(alpha: .5)),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            ImdIcon('fingerprint', size: fontSize + 5, color: c.accent),
+            const SizedBox(width: 8),
+            Text('الدخول بالبصمة',
+                style: TextStyle(fontSize: fontSize, fontWeight: FontWeight.w600, color: c.accent)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/auth/login/login_buttons.dart ====================
+
+// ==================== FILE: lib/features/auth/login/login_inputs.dart ====================
+part of '../login_screen.dart';
+
+/// حقل الدخول: أيقونة يمينًا وزر إظهار يسارًا، ولون الأيقونة يتحول للأساسي عند التركيز.
+class _LgInput extends StatefulWidget {
+  const _LgInput({
+    required this.controller,
+    required this.fontSize,
+    this.hint,
+    this.icon,
+    this.obscure = false,
+    this.ltr = false,
+    this.eye,
+    this.onSubmitted,
+  });
+
+  final TextEditingController controller;
+  final double fontSize;
+  final String? hint;
+  final String? icon;
+  final bool obscure;
+  final bool ltr;
+  final Widget? eye;
+  final ValueChanged<String>? onSubmitted;
+
+  @override
+  State<_LgInput> createState() => _LgInputState();
+}
+
+class _LgInputState extends State<_LgInput> {
+  final _focus = FocusNode();
+  bool _hover = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = _focus.hasFocus;
+    final c = context.imd;
+    final accent = c.accent;
+    final border =
+        focused ? accent : (_hover ? Color.lerp(c.lineStrong, c.faint, .45)! : c.lineStrong);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border.all(color: border),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: focused ? [BoxShadow(color: accent.withValues(alpha: .18), spreadRadius: 3)] : null,
+        ),
+        child: Row(
+          children: [
+            if (widget.icon != null)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(start: 14, end: 12),
+                child: ImdIcon(widget.icon!, size: 18, color: focused ? accent : c.faint),
+              )
+            else
+              const SizedBox(width: 14),
+            Expanded(
+              child: TextField(
+                controller: widget.controller,
+                focusNode: _focus,
+                obscureText: widget.obscure,
+                textDirection: widget.ltr ? TextDirection.ltr : null,
+                textAlign: TextAlign.start,
+                onSubmitted: widget.onSubmitted,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: TextStyle(fontSize: widget.fontSize, color: c.text),
+                cursorColor: accent,
+                decoration: InputDecoration(
+                  isCollapsed: true,
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  hintText: widget.hint,
+                  hintTextDirection: TextDirection.rtl,
+                  hintStyle: TextStyle(fontSize: widget.fontSize, color: c.faint),
+                ),
+              ),
+            ),
+            if (widget.eye != null) Padding(padding: const EdgeInsetsDirectional.only(end: 6), child: widget.eye)
+            else const SizedBox(width: 14),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EyeBtn extends StatefulWidget {
+  const _EyeBtn({required this.on, required this.onTap});
+  final bool on;
+  final VoidCallback onTap;
+
+  @override
+  State<_EyeBtn> createState() => _EyeBtnState();
+}
+
+class _EyeBtnState extends State<_EyeBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(
+        // أيقونةٌ بلا نص: اسمها يصف ما يفعله النقر الآن.
+        label: widget.on ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور',
+        onTap: widget.onTap,
+        child: Container(
+          width: 36,
+          height: 36,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _hover ? c.hover : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: ImdIcon(
+            'eye',
+            size: 18,
+            color: widget.on ? c.accent : (_hover ? c.text : c.muted),
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/auth/login/login_inputs.dart ====================
+
+// ==================== FILE: lib/features/auth/change_password_dialog.dart ====================
+import 'package:flutter/material.dart';
+
+import '../../core/print/print_preview.dart' show imdNavigatorKey;
+import '../../core/security/password_hash.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/audit_repo.dart';
+import '../../data/repos/users_repo.dart';
+import '../../domain/password_policy.dart';
+
+/// نافذة «تغيير كلمة المرور» للمستخدم نفسه: يُثبت كلمته الحالية ثم يضع جديدة
+/// تحقق [PasswordPolicy] (٨ أحرف فأكثر، نوعان من الحروف، غير شائعة). تُفتح من بطاقة المستخدم في الشريط العلوي، ومن تنبيه
+/// الترقية بعد الدخول.
+///
+/// تُفتح بسياق الملاحة العام ([imdNavigatorKey]) لأنها تُستدعى من SnackBar يبقى
+/// بعد انتقال الواجهة من شاشة الدخول إلى الرئيسية.
+Future<void> showChangePasswordDialog({
+  required AppDatabase db,
+  required String userId,
+}) async {
+  final context = imdNavigatorKey.currentContext;
+  if (context == null || !context.mounted) return;
+
+  final current = TextEditingController();
+  final next = TextEditingController();
+  final confirm = TextEditingController();
+  final error = ValueNotifier<String>('');
+
+  Future<bool> submit() async {
+    final me = await UsersRepo(db).byId(userId);
+    final weak = PasswordPolicy.problem(next.text, username: me?.username ?? '');
+    if (weak != null) {
+      error.value = '✖ $weak';
+      return false;
+    }
+    if (next.text != confirm.text) {
+      error.value = '✖ كلمتا المرور غير متطابقتين';
+      return false;
+    }
+    final user = await UsersRepo(db).byId(userId);
+    if (user == null) {
+      error.value = '✖ تعذّر العثور على الحساب';
+      return false;
+    }
+    final ok = await PasswordHash.verify(current.text, user.saltHex, user.hashHex, user.iterations);
+    if (!ok) {
+      error.value = '✖ كلمة المرور الحالية غير صحيحة';
+      return false;
+    }
+    try {
+      await UsersRepo(db).resetPassword(id: userId, password: next.text, actorId: userId, actorRole: user.role);
+      await AuditRepo(db).log(
+        action: 'user.password_change',
+        entityType: 'مستخدم',
+        summary: 'غيّر المستخدم ${user.username} كلمة مروره بنفسه',
+        actorEmail: user.email,
+      );
+    } catch (e) {
+      error.value = '✖ ${e is ArgumentError ? e.message : (e is StateError ? e.message : e)}';
+      return false;
+    }
+    return true;
+  }
+
+  final saved = await showImdModal<bool>(
+    context,
+    title: 'تغيير كلمة المرور',
+    icon: 'user',
+    maxWidth: 440,
+    builder: (ctx) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      ImdLabeled('كلمة المرور الحالية', ImdFld(controller: current, obscure: true)),
+      const SizedBox(height: 10),
+      ImdLabeled(
+        'كلمة المرور الجديدة',
+        ImdFld(controller: next, obscure: true, hint: '٨ أحرف فأكثر'),
+      ),
+      const SizedBox(height: 10),
+      ImdLabeled('تأكيد كلمة المرور الجديدة', ImdFld(controller: confirm, obscure: true)),
+      ValueListenableBuilder<String>(
+        valueListenable: error,
+        builder: (_, msg, __) => msg.isEmpty
+            ? const SizedBox.shrink()
+            : Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(msg, style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+              ),
+      ),
+    ]),
+    actions: (ctx) => [
+      ImdButton.outline(label: 'إلغاء', onPressed: () => Navigator.of(ctx).pop(false)),
+      ImdButton(
+        label: 'حفظ',
+        icon: 'save',
+        onPressed: () async {
+          final ok = await submit();
+          if (ok && ctx.mounted) Navigator.of(ctx).pop(true);
+        },
+      ),
+    ],
+  );
+
+  if (saved == true && context.mounted) showImdToast(context, '✔ غُيّرت كلمة المرور');
+  for (final c in [current, next, confirm]) {
+    c.dispose();
+  }
+  error.dispose();
+}
+// ==================== END FILE: lib/features/auth/change_password_dialog.dart ====================
+
+// ==================== FILE: lib/features/auth/idle_lock_host.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/security/auth_service.dart';
+import '../../core/security/idle_lock.dart';
+import '../../core/ui/imd_form.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_widgets.dart';
+
+/// يلفّ التطبيق: يرصد نشاط المستخدم (لمس/فأرة) ويُظهر غطاء القفل فوق كل شيء
+/// حين يقفل [IdleLock]. المحتوى يبقى مبنيًّا خلف الغطاء فلا تضيع حالته، لكنه
+/// معزول عن اللمس والتركيز (لا تُكتب فيه مفاتيح ولا تعمل اختصاراته).
+class IdleLockHost extends StatelessWidget {
+  const IdleLockHost({
+    super.key,
+    required this.lock,
+    required this.auth,
+    required this.onSignOut,
+    required this.child,
+  });
+
+  final IdleLock lock;
+  final AuthService auth;
+  final Future<void> Function() onSignOut;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: lock,
+        builder: (context, _) => Stack(textDirection: TextDirection.rtl, children: [
+          Positioned.fill(
+            child: ExcludeFocus(
+              excluding: lock.locked,
+              child: IgnorePointer(
+                ignoring: lock.locked,
+                child: Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: (_) => lock.touch(),
+                  onPointerMove: (_) => lock.touch(),
+                  onPointerHover: (_) => lock.touch(),
+                  onPointerSignal: (_) => lock.touch(),
+                  child: child,
+                ),
+              ),
+            ),
+          ),
+          if (lock.locked)
+            Positioned.fill(
+              child: _LockOverlay(
+                child: IdleLockScreen(lock: lock, auth: auth, onSignOut: onSignOut),
+              ),
+            ),
+        ]),
+      );
+}
+
+/// هذا الغلاف يقع فوق الـ Navigator فلا يوجد Overlay فوقه، وحقول النص تحتاجه
+/// (مقابض التحديد وقائمة القص/اللصق). بدونه يرمي كل تغيير تركيز استثناءً
+/// فتبقى عمليات التحرير معلّقة ويعود النص المحذوف. لذلك نعطي القفل Overlay خاصًا.
+class _LockOverlay extends StatefulWidget {
+  const _LockOverlay({required this.child});
+  final Widget child;
+
+  @override
+  State<_LockOverlay> createState() => _LockOverlayState();
+}
+
+class _LockOverlayState extends State<_LockOverlay> {
+  late final OverlayEntry _entry = OverlayEntry(builder: (_) => widget.child);
+
+  @override
+  void didUpdateWidget(covariant _LockOverlay old) {
+    super.didUpdateWidget(old);
+    if (old.child != widget.child) _entry.markNeedsBuild();
+  }
+
+  @override
+  void dispose() {
+    _entry.remove();
+    _entry.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Overlay(initialEntries: [_entry]);
+}
+
+/// غطاء القفل: كلمة المرور لفتح الشاشة، أو تسجيل الخروج.
+class IdleLockScreen extends StatefulWidget {
+  const IdleLockScreen({super.key, required this.lock, required this.auth, required this.onSignOut});
+
+  final IdleLock lock;
+  final AuthService auth;
+  final Future<void> Function() onSignOut;
+
+  @override
+  State<IdleLockScreen> createState() => _IdleLockScreenState();
+}
+
+class _IdleLockScreenState extends State<IdleLockScreen> with WidgetsBindingObserver {
+  final _pass = TextEditingController();
+  bool _busy = false;
+  String _error = '';
+
+  /// يتغيّر عند العودة من الخلفية أو بعد فشل الفتح فيُبنى حقل كلمة المرور من
+  /// جديد باتصال لوحة مفاتيحٍ جديد.
+  int _fieldGen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || _busy) return;
+    setState(() {
+      _pass.value = TextEditingValue.empty;
+      _fieldGen++;
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _pass.dispose();
+    super.dispose();
+  }
+
+  Future<void> _unlock() async {
+    if (_busy) return;
+    final user = widget.auth.currentUser;
+    if (user == null) {
+      await widget.onSignOut();
+      return;
+    }
+    if (_pass.text.isEmpty) {
+      setState(() => _error = '✖ أدخل كلمة المرور');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    // بمعرّف صاحب الجلسة لا باسمه (M-13)، بعدّاد المحاولات والقفل المؤقت نفسيهما.
+    final res = await widget.auth.unlock(_pass.text);
+    if (!mounted) return;
+    if (res.isOk) {
+      _pass.value = TextEditingValue.empty;
+      widget.lock.unlock();
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _error = res.message;
+      _pass.value = TextEditingValue.empty;
+      _fieldGen++;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final user = widget.auth.currentUser;
+    final name = user == null ? '' : (user.name.isNotEmpty ? user.name : user.username);
+    return Material(
+      color: c.bg,
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: CallbackShortcuts(
+              bindings: {const SingleActivator(LogicalKeyboardKey.enter): _unlock},
+              child: Container(
+                padding: const EdgeInsets.all(28),
+                decoration: BoxDecoration(
+                  color: c.surface,
+                  border: Border.all(color: c.line),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Center(child: ImdIcon('lock', size: 36, color: c.accent)),
+                  const SizedBox(height: 12),
+                  Text('الشاشة مقفلة',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: c.text)),
+                  const SizedBox(height: 6),
+                  Text('قُفل النظام لخمولٍ طويل${name.isEmpty ? '' : ' — $name'}',
+                      textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: c.muted)),
+                  const SizedBox(height: 18),
+                  ImdLabeled(
+                    'كلمة المرور',
+                    ImdFld(
+                      key: ValueKey('lock-pass-$_fieldGen'),
+                      controller: _pass,
+                      obscure: true,
+                      enabled: !_busy,
+                      autofocus: true,
+                      onSubmitted: (_) => _unlock(),
+                    ),
+                  ),
+                  if (_error.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4, bottom: 4),
+                      child: Text(_error, style: TextStyle(fontSize: 13, color: c.danger)),
+                    ),
+                  const SizedBox(height: 10),
+                  ImdButton(label: 'فتح', icon: 'lock', busy: _busy, onPressed: _unlock),
+                  const SizedBox(height: 8),
+                  ImdButton.outline(label: 'تسجيل الخروج', onPressed: _busy ? null : widget.onSignOut),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/auth/idle_lock_host.dart ====================

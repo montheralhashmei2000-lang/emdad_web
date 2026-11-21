@@ -1,0 +1,5451 @@
+// المرحلة 2 — مكونات الواجهة (الأزرار والحقول والنوافذ والتخطيط) — الشيفرة المصدرية (Dart)
+// عدد الملفات: 27
+// فهرس الملفات:
+//   - lib/core/ui/widgets/imd_buttons.dart (261 سطر)
+//   - lib/core/ui/widgets/imd_chips.dart (136 سطر)
+//   - lib/core/ui/widgets/imd_dialogs.dart (164 سطر)
+//   - lib/core/ui/widgets/imd_fields.dart (377 سطر)
+//   - lib/core/ui/widgets/imd_tabs.dart (150 سطر)
+//   - lib/core/ui/widgets/imd_tap.dart (112 سطر)
+//   - lib/core/ui/widgets/imd_page_chrome.dart (280 سطر)
+//   - lib/core/ui/widgets/imd_column_filter.dart (106 سطر)
+//   - lib/core/ui/imd_form.dart (613 سطر)
+//   - lib/core/ui/imd_layout.dart (500 سطر)
+//   - lib/core/ui/imd_icon.dart (128 سطر)
+//   - lib/core/ui/imd_icon_data.dart (268 سطر)
+//   - lib/core/ui/imd_empty_state.dart (120 سطر)
+//   - lib/core/ui/imd_shimmer.dart (130 سطر)
+//   - lib/core/ui/imd_toolbar.dart (167 سطر)
+//   - lib/core/ui/imd_menu_bar.dart (114 سطر)
+//   - lib/core/ui/imd_status_bar.dart (196 سطر)
+//   - lib/core/ui/imd_page_tabs.dart (221 سطر)
+//   - lib/core/ui/imd_tabs_shell.dart (111 سطر)
+//   - lib/core/ui/imd_context_menu.dart (89 سطر)
+//   - lib/core/ui/imd_key_scroll.dart (143 سطر)
+//   - lib/core/ui/imd_page_dirty.dart (34 سطر)
+//   - lib/core/ui/imd_screen_actions.dart (87 سطر)
+//   - lib/core/ui/imd_occupancy_bar.dart (82 سطر)
+//   - lib/core/ui/imd_bulk.dart (273 سطر)
+//   - lib/core/ui/imd_charts.dart (490 سطر)
+//   - lib/core/ui/imd_widgets.dart (15 سطر)
+
+
+// ==================== FILE: lib/core/ui/widgets/imd_buttons.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_tap.dart';
+import '../imd_icon.dart';
+import '../imd_tokens.dart';
+import 'imd_fields.dart';
+
+enum ImdBtnKind { primary, outline, danger, blue, warn, purple, dark }
+
+/// زر قائمة للإجراءات الثانوية في الشاشات التشغيلية.
+class ImdMenuButton<T> extends StatelessWidget {
+  const ImdMenuButton({
+    super.key,
+    required this.label,
+    required this.items,
+    required this.onSelected,
+    this.icon = 'menu',
+    this.small = false,
+    this.dense = false,
+  });
+
+  final String label;
+  final String icon;
+  final bool small;
+
+  /// أصغر من [small]: لشريط التطبيق العلوي (ارتفاع 28).
+  final bool dense;
+  final List<PopupMenuEntry<T>> Function(BuildContext) items;
+  final ValueChanged<T> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return PopupMenuButton<T>(
+      tooltip: label,
+      onSelected: onSelected,
+      itemBuilder: items,
+      child: Container(
+        constraints: BoxConstraints(minHeight: dense ? 28 : (small ? 34 : ImdSizes.touchMin)),
+        padding: EdgeInsets.symmetric(
+            horizontal: dense ? 9 : (small ? 12 : 16), vertical: dense ? 3 : (small ? 6 : 9)),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border.all(color: c.lineStrong),
+          borderRadius: BorderRadius.circular(ImdSizes.radius),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          ImdIcon(icon, size: small || dense ? 13 : 15, color: c.text),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(fontSize: dense ? 12 : (small ? 12.5 : 13.5), fontWeight: FontWeight.w600, color: c.text)),
+          const SizedBox(width: 4),
+          ImdIcon('chevron-down', size: 13, color: c.muted),
+        ]),
+      ),
+    );
+  }
+}
+
+/// زرّ النظام بأنواعه: أساسي، مُحاط، خطر، أزرق، تحذير، بنفسجي، داكن — وبمقاسٍ صغير.
+class ImdButton extends StatefulWidget {
+  const ImdButton({
+    super.key,
+    required this.label,
+    this.icon,
+    this.onPressed,
+    this.kind = ImdBtnKind.primary,
+    this.small = false,
+    this.expand = false,
+    this.busy = false,
+    this.height,
+    this.semanticLabel,
+  });
+
+  const ImdButton.outline({
+    super.key,
+    required this.label,
+    this.icon,
+    this.onPressed,
+    this.small = false,
+    this.expand = false,
+    this.busy = false,
+    this.height,
+    this.semanticLabel,
+  }) : kind = ImdBtnKind.outline;
+
+  final String label;
+  final String? icon;
+  final VoidCallback? onPressed;
+  final ImdBtnKind kind;
+  final bool small;
+  final bool expand;
+  final bool busy;
+  final double? height;
+
+  /// اسم الزرّ لقارئ الشاشة حين لا نصّ فيه (زرّ أيقونة) — يُعلَّق على عقدة النقر
+  /// نفسها لا على أبٍ لها، وإلا أُعلن زرٌّ بلا اسم (M-24، `labeledTapTargetGuideline`).
+  final String? semanticLabel;
+
+  @override
+  State<ImdButton> createState() => _ImdButtonState();
+}
+
+class _ImdButtonState extends State<ImdButton> {
+  bool _hover = false;
+  bool _down = false;
+
+  /// زر بعرض محتواه ما لم يُطلب التمدد (inline-flex في CSS).
+  Widget _maybeIntrinsic(Widget child) => widget.expand ? child : IntrinsicWidth(child: child);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final enabled = widget.onPressed != null && !widget.busy;
+    Color bg;
+    Color fg;
+    Color? border;
+    switch (widget.kind) {
+      case ImdBtnKind.primary:
+        bg = _hover ? c.accentHover : c.accent;
+        fg = c.onAccent;
+      case ImdBtnKind.outline:
+        bg = _hover ? c.hover : c.surface;
+        fg = c.text;
+        border = _hover ? c.lineHover : c.lineStrong;
+      case ImdBtnKind.danger:
+        bg = _hover ? c.dangerHover : c.dangerSoft;
+        fg = c.danger;
+      case ImdBtnKind.blue:
+        bg = c.info;
+        fg = c.isDark ? c.bg : c.surface;
+      case ImdBtnKind.warn:
+        bg = _hover ? c.warn.withValues(alpha: .88) : c.warn;
+        fg = c.isDark ? c.bg : c.surface;
+      case ImdBtnKind.purple:
+        bg = c.info;
+        fg = c.isDark ? c.bg : c.surface;
+      case ImdBtnKind.dark:
+        bg = _hover ? c.text2 : c.text;
+        fg = c.onText;
+    }
+    // داخل [ImdCompact] (نماذج السندات وجداول الإدخال) يأخذ الزرّ ارتفاع الحقل
+    // المدمج وزواياه نفسها، فلا يعلو أخاه الحقل بجواره: زرّ «+» بجانب قائمة
+    // المستودع كان ٤٤ والقائمة ٣٤، فيتّسع الصفّ كلّه به.
+    final compact = ImdCompact.of(context);
+    final flush = ImdCompact.flushOf(context);
+    final h = widget.height ?? (compact ? ImdSizes.compactField : null);
+    final iconOnly = widget.label.isEmpty;
+    final fs = (widget.small || compact) ? 12.5 : 13.5;
+    final pad = compact
+        ? EdgeInsets.symmetric(horizontal: iconOnly ? 0 : 10)
+        : widget.small
+            ? const EdgeInsets.symmetric(horizontal: 12, vertical: 6)
+            : const EdgeInsets.symmetric(horizontal: 16, vertical: 9);
+    final content = Row(
+      mainAxisSize: widget.expand ? MainAxisSize.max : MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (widget.busy)
+          SizedBox(
+            width: fs + 2,
+            height: fs + 2,
+            child: CircularProgressIndicator(strokeWidth: 2, color: fg),
+          )
+        else if (widget.icon != null)
+          ImdIcon(widget.icon!, size: fs * 1.1, color: fg),
+        if ((widget.busy || widget.icon != null) && widget.label.isNotEmpty) const SizedBox(width: 6),
+        if (widget.label.isNotEmpty)
+          Flexible(
+            child: Text(widget.label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: fs, fontWeight: FontWeight.w600, color: fg, height: 1.3)),
+          ),
+      ],
+    );
+    return MouseRegion(
+      cursor: enabled ? ImdCursor.click : SystemMouseCursors.basic,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(
+        label: widget.semanticLabel,
+        onTapDown: enabled ? (_) => setState(() => _down = true) : null,
+        onTapUp: enabled ? (_) => setState(() => _down = false) : null,
+        onTapCancel: () => setState(() => _down = false),
+        onTap: enabled ? widget.onPressed : null,
+        child: AnimatedScale(
+          scale: _down ? .98 : 1,
+          duration: const Duration(milliseconds: 80),
+          child: Opacity(
+            opacity: widget.onPressed == null ? .5 : 1,
+            child: _maybeIntrinsic(AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              height: h,
+              // زرّ أيقونةٍ وحدها في الكثافة المدمجة مربّعٌ بضلع الحقل.
+              width: compact && iconOnly && h != null ? h : null,
+              constraints: h == null ? BoxConstraints(minHeight: ImdSizes.touchMin) : null,
+              padding: pad,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: bg,
+                borderRadius: flush
+                    ? BorderRadius.zero
+                    : BorderRadius.circular(
+                        compact ? ImdSizes.compactRadius : (widget.small ? 8 : 10)),
+                border: (border == null || flush) ? null : Border.all(color: border),
+                // رفعٌ خفيف عند تمرير الفأرة، ويزول عند الضغط — إحساس زرٍّ
+                // مادّي لا مسطّحٍ كصفحات الويب.
+                boxShadow: enabled && _hover && !_down && !flush
+                    ? [
+                        BoxShadow(
+                          color: c.shadowMd,
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ]
+                    : null,
+              ),
+              child: content,
+            )),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// أزرار أيقونة فقط بإطار (`btn btn-o btn-sm` بأيقونة).
+class ImdIconButton extends StatelessWidget {
+  const ImdIconButton({super.key, required this.icon, this.onPressed, this.tooltip, this.kind = ImdBtnKind.outline, this.dense = false});
+
+  final String icon;
+  final VoidCallback? onPressed;
+  final String? tooltip;
+  final ImdBtnKind kind;
+
+  /// ارتفاع 28 لشريط التطبيق العلوي.
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final hint = tooltip?.trim() ?? '';
+    final button = ImdButton(
+        label: '',
+        icon: icon,
+        onPressed: onPressed,
+        kind: kind,
+        small: true,
+        height: dense ? 28 : null,
+        semanticLabel: hint.isEmpty ? null : hint);
+    if (hint.isEmpty) return button;
+    // زرٌّ بأيقونةٍ بلا نصّ: [tooltip] هو اسمُه الوحيد. كان الوسيط يُستقبَل
+    // ويُهمَل، فلا تظهر تلميحةٌ على سطح المكتب ولا يجد قارئُ الشاشة ما ينطق به
+    // في ١١٤ موضعًا من الشاشات.
+    //
+    // والاثنان لازمان لا أحدهما: `Tooltip` يُظهر النصّ عند الوقوف بالمؤشّر لكنه
+    // لا يُسمّي الزرَّ نفسه في شجرة الدلالات (الرسالة تلحق بالطبقة العائمة حين
+    // تظهر)، و`Semantics` يُسمّيه لقارئ الشاشة ولا يُظهر شيئًا للمُبصر.
+    // الاسم على عقدة النقر نفسها (`semanticLabel`)، والتلميحة للمُبصر وحده.
+    return Tooltip(message: hint, excludeFromSemantics: true, child: button);
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_buttons.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_chips.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_tap.dart';
+import '../imd_icon.dart';
+import '../imd_tokens.dart';
+
+enum ImdTone { ok, off, pend, code, err, info }
+
+/// شارة حالة: نصٌّ قصير بخلفيةٍ ولونٍ يحدّدهما [ImdTone].
+class ImdChip extends StatefulWidget {
+  const ImdChip(this.label,
+      {super.key, this.tone = ImdTone.off, this.icon, this.onTap, this.deriveBackgroundFromText = false});
+
+  final String label;
+  final ImdTone tone;
+  final String? icon;
+  final VoidCallback? onTap;
+
+  /// الخلفية = لون النص بشفافية 0.15 بدل لون `*Soft` من القالب.
+  /// تضمن تطابق الخلفية مع النص في أي سمة (فاتحة أو داكنة أو وقود).
+  final bool deriveBackgroundFromText;
+
+  static (Color, Color) colors(ImdColors c, ImdTone tone) {
+    switch (tone) {
+      case ImdTone.ok:
+        return (c.successSoft, c.success);
+      case ImdTone.off:
+        return (c.subtle, c.text2);
+      case ImdTone.pend:
+        return (c.warnSoft, c.warn);
+      case ImdTone.code:
+      case ImdTone.info:
+        return (c.infoSoft, c.info);
+      case ImdTone.err:
+        return (c.dangerSoft, c.danger);
+    }
+  }
+
+  @override
+  State<ImdChip> createState() => _ImdChipState();
+}
+
+class _ImdChipState extends State<ImdChip> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final (soft, fg) = ImdChip.colors(context.imd, widget.tone);
+    final bg = widget.deriveBackgroundFromText ? fg.withValues(alpha: .15) : soft;
+    final hoverBg = widget.onTap != null && _hover ? Color.alphaBlend(fg.withValues(alpha: .1), bg) : bg;
+    // الشارة لا يلتفّ نصّها، فأصغر عرضٍ لها هو عرض نصّها كاملًا،
+    // فلا يضغطها عمود الجدول إلى ما دونه (IntrinsicWidth يجعل الأصغر = الأكبر).
+    final chip = IntrinsicWidth(
+        child: AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      decoration: BoxDecoration(color: hoverBg, borderRadius: BorderRadius.circular(999)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (widget.icon != null) ...[ImdIcon(widget.icon!, size: 13, color: fg), const SizedBox(width: 6)],
+        // الرموز التعبيرية داخل الشارات تُحوَّل أيقوناتٍ من مكتبة النظام.
+        //
+        // و[Flexible] هنا ليس زينة: [IntrinsicWidth] أعلاه يجعل أصغر عرضٍ
+        // للشارة عرضَ نصها كاملًا، فإن ضاق أبوها عن ذلك — شارةٌ طويلة في
+        // عمودٍ ثابت العرض مثلًا — رسمت نفسها خارجه بفارق العرض بالضبط.
+        // فبه يتقلّص النص ويُقصّ بنقاط بدل أن يفيض على جاره.
+        Flexible(
+          child: ImdEmojiText(widget.label,
+              iconSize: 13,
+              gap: 4,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w600, color: fg, height: 1.6)),
+        ),
+      ]),
+    ));
+    if (widget.onTap == null) return chip;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(onTap: widget.onTap, child: chip),
+    );
+  }
+}
+
+/// اسمٌ بديل لـ[ImdChip] لعرض الحالات: `ImdTone.pend` «لم يُضبط بعد» برتقالي،
+/// `ok` «مضبوط» أخضر، `off` «قيد الانتظار» رمادي، `err` أحمر، `info` أزرق.
+typedef StatusBadge = ImdChip;
+
+/// صندوق ملاحظة أصفر.
+class ImdNote extends StatelessWidget {
+  const ImdNote(this.text, {super.key, this.child, this.margin = EdgeInsets.zero});
+
+  final String? text;
+  final Widget? child;
+  final EdgeInsets margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Container(
+      margin: margin,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: c.noteBg,
+        border: Border.all(color: c.noteBorder),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: child ??
+          ImdEmojiText(text ?? '',
+              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: c.noteText, height: 1.6)),
+    );
+  }
+}
+
+/// شريط تنبيه: خطأ أو تحذير أو نجاح أو معلومة، بنبرة [ImdTone].
+class ImdAlert extends StatelessWidget {
+  const ImdAlert(this.text, {super.key, this.tone = ImdTone.err, this.margin = const EdgeInsets.only(bottom: 12)});
+
+  final String text;
+  final ImdTone tone;
+  final EdgeInsets margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final (bg, fg) = ImdChip.colors(context.imd, tone);
+    return Container(
+      margin: margin,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
+      child: ImdEmojiText(text, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: fg, height: 1.6)),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_chips.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_dialogs.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import '../imd_icon.dart';
+import '../imd_tokens.dart';
+import 'imd_buttons.dart';
+import 'imd_fields.dart';
+
+/// رسالة سوداء عائمة.
+void showImdToast(BuildContext context, String message, {bool error = false}) {
+  final c = context.imd;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
+  // أقصى عرض 420 يتقلّص على الشاشة الضيقة: الهامش الجانبي يُحسب من العرض المتاح
+  // (`SnackBar` لا يقبل `width` و`margin` معًا، ولا يقبل قيدًا أقصى مباشرًا).
+  final side = ((MediaQuery.sizeOf(context).width - 420) / 2).clamp(16.0, double.infinity);
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(
+      behavior: SnackBarBehavior.floating,
+      margin: EdgeInsets.fromLTRB(side, 0, side, 12),
+      backgroundColor: c.inverse,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      duration: const Duration(milliseconds: 3200),
+      content: ImdEmojiText(
+        error && !message.startsWith('✖') ? '✖ $message' : message,
+        // الإشعار يُعرض في طبقة فوق الشاشة فلا يرث خط التطبيق تلقائيًا،
+        // فيُؤخذ من القالب صراحةً ليتبع الخط المختار في الإعدادات.
+        style: TextStyle(
+          color: c.onInverse,
+          fontWeight: FontWeight.w500,
+          fontSize: 14,
+          fontFamily: Theme.of(context).textTheme.bodyMedium?.fontFamily,
+        ),
+      ),
+    ));
+}
+
+/// نافذة بزوايا 16.
+Future<T?> showImdModal<T>(
+  BuildContext context, {
+  required String title,
+  String? icon,
+  required Widget Function(BuildContext) builder,
+  List<Widget> Function(BuildContext)? actions,
+  double maxWidth = 560,
+
+  /// يُبنى بسياق الحوار الداخلي (كـ[actions]) ويُستدعى عند Enter/Numpad Enter
+  /// — لحوارات التأكيد البسيطة ذات إجراءٍ أساسيٍّ واحد لا لبس فيه. يُترك
+  /// `null` (الافتراضي) لحوارات النماذج التي قد تحوي حقول نصٍّ متعددة
+  /// الأسطر، فلا يُصادَر Enter منها.
+  VoidCallback Function(BuildContext)? onEnter,
+
+  /// `false` ⇒ الجسم بلا تمريرٍ خاصٍّ به ويملأ ارتفاع الحوار: لمحتوىً يُمرَّر
+  /// بنفسه (معاينة PDF). تمريرٌ داخل تمريرٍ يُظهر شريطين متراكبين لا يُعرف
+  /// أيّهما يحرّك ماذا — وهذا ما كانت عليه معاينة الطباعة.
+  bool scrollBody = true,
+}) {
+  return showDialog<T>(
+    context: context,
+    barrierColor: context.imd.scrim,
+    builder: (ctx) {
+      final c = ctx.imd;
+      Widget dialog = Dialog(
+        backgroundColor: c.surface,
+        elevation: 10,
+        shadowColor: c.shadowBase,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth, maxHeight: MediaQuery.sizeOf(ctx).height * .9),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(children: [
+                  if (icon != null) ...[ImdIcon(icon, size: 18, color: c.accent), const SizedBox(width: 8)],
+                  Expanded(
+                    child: Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.text)),
+                  ),
+                  ImdIconButton(icon: 'x', tooltip: 'إغلاق', onPressed: () => Navigator.of(ctx).pop()),
+                ]),
+                const SizedBox(height: 14),
+                if (scrollBody)
+                  Flexible(child: SingleChildScrollView(child: builder(ctx)))
+                else
+                  Expanded(child: builder(ctx)),
+                if (actions != null) ...[
+                  const SizedBox(height: 14),
+                  Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.end, children: actions(ctx)),
+                ],
+              ],
+            ),
+          ),
+        ),
+      );
+      if (onEnter != null) {
+        final enterAction = onEnter(ctx);
+        dialog = CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.enter): enterAction,
+            const SingleActivator(LogicalKeyboardKey.numpadEnter): enterAction,
+          },
+          child: Focus(autofocus: true, child: dialog),
+        );
+      }
+      return dialog;
+    },
+  );
+}
+
+/// حوار تأكيدٍ بسؤالٍ وزرَّي موافقة وإلغاء.
+Future<bool> imdConfirm(
+  BuildContext context,
+  String message, {
+  String ok = 'تأكيد',
+  String cancel = 'إلغاء',
+  bool danger = false,
+}) async {
+  final r = await showImdModal<bool>(
+    context,
+    title: 'تأكيد',
+    icon: danger ? 'alert' : 'info',
+    maxWidth: 440,
+    builder: (ctx) => Text(message, style: TextStyle(fontSize: 14, color: ctx.imd.text, height: 1.7)),
+    actions: (ctx) => [
+      ImdButton.outline(label: cancel, onPressed: () => Navigator.of(ctx).pop(false)),
+      ImdButton(
+        label: ok,
+        kind: danger ? ImdBtnKind.danger : ImdBtnKind.primary,
+        onPressed: () => Navigator.of(ctx).pop(true),
+      ),
+    ],
+    onEnter: (ctx) => () => Navigator.of(ctx).pop(true),
+  );
+  return r ?? false;
+}
+
+/// حوار إدخال نصٍّ واحد.
+Future<String?> imdPrompt(BuildContext context, String message, {String ok = 'تأكيد', String initial = ''}) async {
+  final ctrl = TextEditingController(text: initial);
+  final r = await showImdModal<String>(
+    context,
+    title: message,
+    icon: 'edit',
+    maxWidth: 460,
+    builder: (ctx) => TextField(
+      controller: ctrl,
+      autofocus: true,
+      maxLines: 3,
+      minLines: 1,
+      style: TextStyle(fontSize: 14, color: ctx.imd.text),
+      decoration: imdFieldDecoration(ctx),
+      onSubmitted: (v) => Navigator.of(ctx).pop(v),
+    ),
+    actions: (ctx) => [
+      ImdButton.outline(label: 'إلغاء', onPressed: () => Navigator.of(ctx).pop()),
+      ImdButton(label: ok, onPressed: () => Navigator.of(ctx).pop(ctrl.text)),
+    ],
+  );
+  ctrl.dispose();
+  return r;
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_dialogs.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_fields.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import '../imd_icon.dart';
+import '../imd_page_dirty.dart';
+import '../imd_tokens.dart';
+import 'imd_dialogs.dart';
+
+/// زخرفة حقول الإدخال الموحّدة.
+/// وسمٌ يُعلن أن ما تحته نمطٌ مدمج.
+///
+/// **تُكتب مرةً حول الجدول فتتبعها حقوله كلها** — بديلًا عن تمرير `compact:`
+/// إلى كل حقلٍ في خمس شاشات، وهو ما يُنسى في أوّل حقلٍ يُضاف بعده.
+class ImdCompact extends InheritedWidget {
+  const ImdCompact({super.key, this.on = true, this.flush = false, required super.child});
+
+  final bool on;
+
+  /// حقولٌ ملتصقةٌ بحدود خليّتها: بلا زوايا مدوَّرة ولا حدٍّ خاص — الفاصل بين
+  /// الخلايا خطُّ الشبكة وحده (جداول الإدخال ومجموعات الإدخال [ImdInputGroup]).
+  final bool flush;
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ImdCompact>()?.on ?? false;
+
+  static bool flushOf(BuildContext context) {
+    final w = context.dependOnInheritedWidgetOfExactType<ImdCompact>();
+    return (w?.on ?? false) && w!.flush;
+  }
+
+  @override
+  bool updateShouldNotify(ImdCompact old) => old.on != on || old.flush != flush;
+}
+
+InputDecoration imdFieldDecoration(
+  BuildContext context, {
+  String? hint,
+  String? prefixIcon,
+  Widget? suffix,
+  bool dense = false,
+  bool readOnly = false,
+  String? errorText,
+}) {
+  final c = context.imd;
+  final compact = ImdCompact.of(context);
+  final flush = ImdCompact.flushOf(context);
+  final hasError = errorText != null && errorText.isNotEmpty;
+  // رسالة الخطأ من `colorScheme.error`، وحدّ الحقل يوافقها فلا يختلف لونان.
+  final err = Theme.of(context).colorScheme.error;
+  // الملتصق: بلا زوايا، وبلا حدٍّ في الحالة العادية (خطّ الشبكة يفصل الخلايا)؛
+  // يظهر حدّ التركيز والخطأ فقط.
+  OutlineInputBorder b(Color col, [double w = 1, bool quiet = false]) => OutlineInputBorder(
+        borderRadius: flush
+            ? BorderRadius.zero
+            : BorderRadius.circular(compact ? ImdSizes.compactRadius : 10),
+        borderSide: flush && quiet ? BorderSide.none : BorderSide(color: col, width: w),
+      );
+  return InputDecoration(
+    isDense: true,
+    hintText: hint,
+    errorText: hasError ? errorText : null,
+    errorStyle: TextStyle(fontSize: 12, height: 1.4, color: err),
+    errorMaxLines: 2,
+    hintStyle: TextStyle(color: c.faint, fontSize: compact ? 12.5 : 14),
+    filled: true,
+    fillColor: readOnly ? c.bg : c.surface,
+    contentPadding: EdgeInsets.symmetric(
+      horizontal: compact ? ImdSizes.compactPadH : 12,
+      vertical: compact ? ImdSizes.compactPadV : (dense ? 8 : 12),
+    ),
+    prefixIcon: prefixIcon == null
+        ? null
+        : Padding(
+            padding: const EdgeInsetsDirectional.only(start: 12, end: 8),
+            child: ImdIcon(prefixIcon, size: 16, color: c.faint),
+          ),
+    prefixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+    // `suffix` يقع عند نهاية الحقل: يسار الحقل في RTL ويمينه في LTR.
+    suffixIcon: suffix == null
+        ? null
+        : Padding(padding: const EdgeInsetsDirectional.only(end: 10), child: suffix),
+    suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+    border: b(c.lineStrong, 1, true),
+    enabledBorder: b(c.lineStrong, 1, true),
+    disabledBorder: b(c.lineStrong, 1, true),
+    focusedBorder: b(c.accent, 1),
+    errorBorder: b(hasError ? err : c.danger),
+    focusedErrorBorder: b(hasError ? err : c.danger),
+  );
+}
+
+/// عنوان فوق الحقل (13/600) ثم الحقل.
+class ImdField extends StatelessWidget {
+  const ImdField({
+    super.key,
+    required this.label,
+    this.controller,
+    this.hint,
+    this.child,
+    this.required = false,
+    this.readOnly = false,
+    this.keyboardType,
+    this.onChanged,
+    this.maxLines = 1,
+    this.obscure = false,
+    this.inputFormatters,
+    this.textAlign = TextAlign.start,
+    this.onSubmitted,
+    this.prefixIcon,
+    this.focusNode,
+    this.autofocus = false,
+    this.errorText,
+    this.suffix,
+  });
+
+  final String label;
+  final TextEditingController? controller;
+  final String? hint;
+
+  /// رسالة خطأ تظهر تحت الحقل بلون `colorScheme.error`.
+  final String? errorText;
+
+  /// عنصر عند نهاية الحقل (يسار الحقل في RTL). لا يُطبَّق مع [child] المخصص.
+  final Widget? suffix;
+  final Widget? child;
+  final bool required;
+  final bool readOnly;
+  final TextInputType? keyboardType;
+  final ValueChanged<String>? onChanged;
+  final int maxLines;
+  final bool obscure;
+  final List<TextInputFormatter>? inputFormatters;
+  final TextAlign textAlign;
+  final ValueChanged<String>? onSubmitted;
+  final String? prefixIcon;
+  final FocusNode? focusNode;
+  final bool autofocus;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 13),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (label.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text.rich(
+                TextSpan(children: [
+                  TextSpan(text: label),
+                  if (required) TextSpan(text: ' *', style: TextStyle(color: c.danger)),
+                ]),
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: c.text2),
+              ),
+            ),
+          child ??
+              TextField(
+                controller: controller,
+                focusNode: focusNode,
+                autofocus: autofocus,
+                readOnly: readOnly,
+                keyboardType: keyboardType,
+                onChanged: onChanged,
+                onSubmitted: onSubmitted,
+                maxLines: maxLines,
+                obscureText: obscure,
+                inputFormatters: inputFormatters,
+                textAlign: textAlign,
+                style: TextStyle(fontSize: 14, color: readOnly ? c.muted : c.text),
+                decoration: imdFieldDecoration(context,
+                    hint: hint,
+                    readOnly: readOnly,
+                    prefixIcon: prefixIcon,
+                    suffix: suffix,
+                    errorText: errorText),
+              ),
+          // الحقل المخصص يرسم ديكوره بنفسه، فتُعرض رسالة الخطأ تحته هنا.
+          if (child != null && errorText != null && errorText!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(errorText!,
+                  style: TextStyle(fontSize: 12, height: 1.4, color: Theme.of(context).colorScheme.error)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// قائمة اختيارٍ تُفتح كنافذةٍ كبيرة بها بحثٌ وقائمةُ خيارات — لا القائمة الصغيرة
+/// المنسدلة الافتراضية: على سطح المكتب تُقرأ عشرات الخيارات دفعةً واحدة، وعلى
+/// الجوال تُنقر بالإصبع بلا تصويبٍ على سطرٍ ضيّق.
+///
+/// الحقل نفسه يعرض القيمة المختارة بإطار الحقول المعتاد. [onChanged] `null` ⇒
+/// معطَّل.
+class ImdSelect<T> extends StatelessWidget {
+  const ImdSelect({
+    super.key,
+    required this.items,
+    required this.value,
+    required this.onChanged,
+    this.hint,
+    this.dense = false,
+    this.title,
+  });
+
+  final List<(T, String)> items;
+  final T? value;
+  final ValueChanged<T?>? onChanged;
+  final String? hint;
+  final bool dense;
+
+  /// عنوان النافذة — الافتراضي [hint] أو «اختر».
+  final String? title;
+
+  Future<void> _open(BuildContext context) async {
+    final dirty = ImdPageDirty.flagOf(context);
+    final picked = await showImdModal<_Pick<T>>(
+      context,
+      title: title ?? hint ?? 'اختر',
+      icon: 'search',
+      maxWidth: 460,
+      builder: (ctx) => ImdPickerBody<T>(items: items, value: value),
+    );
+    if (picked != null) {
+      dirty?.dirty = true;
+      onChanged?.call(picked.value);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final compact = ImdCompact.of(context);
+    final shown = [for (final e in items) if (e.$1 == value) e.$2];
+    final enabled = onChanged != null;
+    final fontSize = compact ? 13.0 : 14.0;
+    // سطر النص بمقاييس سطر [ImdFld] نفسها (حقل النص يفرض «دعامة» الخط على سطره):
+    // بلاها يقصر المنتقي عن الحقل بكسلين في كل مقاس خط، فيعلو أحدهما الآخر في الصف.
+    final strut = StrutStyle.fromTextStyle(
+        Theme.of(context).textTheme.bodyLarge?.copyWith(fontSize: fontSize) ?? TextStyle(fontSize: fontSize));
+    // الارتفاع **ثابتٌ** لا حدٌّ أدنى: يساوي الحقل المدمج تمامًا فلا يعلو زرّ «+»
+    // المجاور له ([ImdInputGroup]).
+    // عقدة دلالةٍ واحدة: اسمها عنوان المنتقي حين لا قيمة ولا تلميح، ويندمج فيها
+    // إجراء النقر — كان حقلٌ فارغٌ بلا تلميح يُعلَن هدفَ نقرٍ بلا اسم (M-24).
+    return Semantics(
+      container: true,
+      button: true,
+      label: shown.isEmpty && (hint ?? '').isEmpty ? (title ?? 'اختر') : null,
+      // وغير المدمج بالحدّ الأدنى نفسه الذي يأخذه [ImdFld] (هدف لمسٍ ٤٤/٤٦)، فيستوي معه.
+      child: ConstrainedBox(
+      constraints: compact
+          ? BoxConstraints.tightFor(height: ImdSizes.compactField)
+          : BoxConstraints(minHeight: dense ? 0 : ImdSizes.touchMin),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(compact ? ImdSizes.compactRadius : ImdSizes.radius),
+        onTap: enabled ? () => _open(context) : null,
+        child: InputDecorator(
+          isEmpty: shown.isEmpty,
+          decoration: imdFieldDecoration(context, dense: dense, readOnly: !enabled),
+          child: Row(children: [
+            Expanded(
+              child: shown.isEmpty
+                  ? Text(hint ?? '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      strutStyle: strut,
+                      style: TextStyle(color: c.faint, fontSize: compact ? 12.5 : 14))
+                  : Text(shown.first,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      strutStyle: strut,
+                      style: TextStyle(
+                          fontSize: fontSize,
+                          color: enabled ? c.text : c.muted,
+                          fontFamily: Theme.of(context).textTheme.bodyMedium?.fontFamily)),
+            ),
+            ImdIcon('chevron-down', size: 16, color: c.muted),
+          ]),
+        ),
+      ),
+      ),
+    );
+  }
+}
+
+/// اختيارٌ مُرجَع: يميّز «اختير عنصرٌ قيمته null» عن «أُغلقت النافذة بلا اختيار».
+class _Pick<T> {
+  const _Pick(this.value);
+  final T? value;
+}
+
+/// محتوى نافذة الاختيار: بحثٌ فوريّ وقائمةٌ تُمرَّر. Enter يختار أول المطابقات،
+/// والخيار الحالي معلَّمٌ بعلامة ✓.
+class ImdPickerBody<T> extends StatefulWidget {
+  const ImdPickerBody({super.key, required this.items, required this.value});
+
+  final List<(T, String)> items;
+  final T? value;
+
+  @override
+  State<ImdPickerBody<T>> createState() => _ImdPickerBodyState<T>();
+}
+
+class _ImdPickerBodyState<T> extends State<ImdPickerBody<T>> {
+  String _q = '';
+
+  List<(T, String)> get _list =>
+      _q.isEmpty ? widget.items : [for (final e in widget.items) if (e.$2.toLowerCase().contains(_q.toLowerCase())) e];
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final list = _list;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.items.length > 6) ...[
+          TextField(
+            autofocus: true,
+            onChanged: (v) => setState(() => _q = v.trim()),
+            onSubmitted: (_) {
+              if (list.isNotEmpty) Navigator.of(context).pop(_Pick<T>(list.first.$1));
+            },
+            style: TextStyle(fontSize: 13.5, color: c.text),
+            decoration: imdFieldDecoration(context, dense: true).copyWith(hintText: 'بحث…'),
+          ),
+          const SizedBox(height: 8),
+        ],
+        Flexible(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * .55),
+            child: list.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Center(child: Text('لا خيارات مطابقة', style: TextStyle(color: c.muted, fontSize: 13))),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: list.length,
+                    itemBuilder: (_, i) {
+                      final e = list[i];
+                      final on = e.$1 == widget.value;
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(6),
+                        onTap: () => Navigator.of(context).pop(_Pick<T>(e.$1)),
+                        child: Container(
+                          constraints: BoxConstraints(minHeight: ImdSizes.touchMin - 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: on ? c.accentSoft : null,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(children: [
+                            Expanded(
+                              child: Text(e.$2,
+                                  style: TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                                      color: on ? c.accent : c.text)),
+                            ),
+                            if (on) ImdIcon('check', size: 15, color: c.accent),
+                          ]),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_fields.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_tabs.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_tap.dart';
+import '../imd_icon.dart';
+import '../imd_tokens.dart';
+
+/// تبويبات كبسولية؛ النشط أسود.
+class ImdPillTabs<T> extends StatelessWidget {
+  const ImdPillTabs({super.key, required this.tabs, required this.value, required this.onChanged, this.wrap = true, this.gap = 8});
+
+  final List<ImdTab<T>> tabs;
+  final T value;
+  final ValueChanged<T> onChanged;
+
+  /// false ⇒ صف واحد بفجوة 6 قابل للتمرير أفقيًا.
+  final bool wrap;
+  final double gap;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [for (final t in tabs) _PillTab(tab: t, on: t.value == value, onTap: () => onChanged(t.value))];
+    if (!wrap) {
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        for (var i = 0; i < items.length; i++) ...[if (i > 0) const SizedBox(width: 6), items[i]],
+      ]);
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Wrap(spacing: gap, runSpacing: gap, children: items),
+    );
+  }
+}
+
+class ImdTab<T> {
+  const ImdTab(this.value, this.label, {this.icon});
+  final T value;
+  final String label;
+  final String? icon;
+}
+
+class _PillTab extends StatefulWidget {
+  const _PillTab({required this.tab, required this.on, required this.onTap});
+  final ImdTab tab;
+  final bool on;
+  final VoidCallback onTap;
+
+  @override
+  State<_PillTab> createState() => _PillTabState();
+}
+
+class _PillTabState extends State<_PillTab> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final on = widget.on;
+    final fg = on ? c.onText : c.text2;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          height: ImdSizes.barControl,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: on ? c.text : (_hover ? c.hover : c.surface),
+            border: Border.all(color: on ? c.text : c.line),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.tab.icon != null) ...[
+                ImdIcon(widget.tab.icon!, size: 13 * 1.1, color: fg),
+                const SizedBox(width: 6),
+              ],
+              Text(widget.tab.label,
+                  style: TextStyle(
+                      fontSize: 13, fontWeight: on ? FontWeight.w600 : FontWeight.w500, color: fg)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// مجموعة مقاطع بخلفية رمادية والنشط أبيض (مثل «وحدة مستفيدة / مطبخ / جهة»).
+class ImdSegmented<T> extends StatelessWidget {
+  const ImdSegmented({super.key, required this.tabs, required this.value, required this.onChanged});
+
+  final List<ImdTab<T>> tabs;
+  final T value;
+  final ValueChanged<T> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    // المقاطع الكثيرة تُمرَّر أفقيًّا في الشاشة الضيّقة بدل أن تفيض.
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(color: c.subtle, borderRadius: BorderRadius.circular(10)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final t in tabs)
+            ImdTap(
+              onTap: () => onChanged(t.value),
+              child: MouseRegion(
+                cursor: ImdCursor.click,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: t.value == value ? c.surface : Colors.transparent,
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: t.value == value
+                        ? [BoxShadow(color: c.shadowHairline, blurRadius: 3, offset: const Offset(0, 1))]
+                        : null,
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (t.icon != null) ...[
+                      ImdIcon(t.icon!, size: 14, color: t.value == value ? c.text : c.text2),
+                      const SizedBox(width: 6)
+                    ],
+                    Text(t.label,
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: t.value == value ? c.text : c.text2)),
+                  ]),
+                ),
+              ),
+            ),
+        ],
+      ),
+    ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_tabs.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_tap.dart ====================
+import 'package:flutter/material.dart';
+
+import '../imd_tokens.dart';
+
+/// سطحٌ قابل للنقر **يصل إليه لوحُ المفاتيح وقارئُ الشاشة** (M-24).
+///
+/// كانت عناصر النقر (ومنها `ImdButton` نفسه، والتبويبات، وأبواب القائمة، وصفوف
+/// الجداول) `GestureDetector` عاريًا: لا يأخذ التركيز بزر Tab، ولا يُفعَّل بـ
+/// Enter أو المسافة، ولا يُعلَن «زرًّا» لقارئ الشاشة. هذا بديلٌ بالواجهة نفسها:
+/// • عقدة `Semantics(button)` يندمج فيها نصّ ما بداخله، و[label] إن لزم اسمٌ أوضح.
+/// • تركيزٌ بلوح المفاتيح مع إطارٍ ظاهر حوله، وتفعيلٌ بـ Enter/المسافة
+///   (`ActivateIntent` من اختصارات التطبيق الافتراضية).
+/// • مؤشر الفأرة لا يُمسّ: يبقى لـ`MouseRegion` الذي يحيط به في كل موضع.
+///
+/// [focusable] = `false` للأسطح التي تملك تنقّلها بلوح المفاتيح أصلًا (قوائم
+/// المنتقيات بالأسهم)، فلا يُضاف إليها توقّفٌ زائد عند Tab.
+class ImdTap extends StatefulWidget {
+  const ImdTap({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.behavior,
+    this.label,
+    this.selected,
+    this.focusable = true,
+    this.radius = 8,
+    this.onTapDown,
+    this.onTapUp,
+    this.onTapCancel,
+    this.onSecondaryTapDown,
+    this.onTertiaryTapUp,
+    this.onLongPressStart,
+  });
+
+  final Widget child;
+  final VoidCallback? onTap;
+  final HitTestBehavior? behavior;
+  final String? label;
+  final bool? selected;
+  final bool focusable;
+  final double radius;
+  final GestureTapDownCallback? onTapDown;
+  final GestureTapUpCallback? onTapUp;
+  final GestureTapCancelCallback? onTapCancel;
+  final GestureTapDownCallback? onSecondaryTapDown;
+  final GestureTapUpCallback? onTertiaryTapUp;
+  final GestureLongPressStartCallback? onLongPressStart;
+
+  @override
+  State<ImdTap> createState() => _ImdTapState();
+}
+
+class _ImdTapState extends State<ImdTap> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.onTap != null;
+    Widget out = GestureDetector(
+      behavior: widget.behavior,
+      excludeFromSemantics: true,
+      onTap: widget.onTap,
+      onTapDown: widget.onTapDown,
+      onTapUp: widget.onTapUp,
+      onTapCancel: widget.onTapCancel,
+      onSecondaryTapDown: widget.onSecondaryTapDown,
+      onTertiaryTapUp: widget.onTertiaryTapUp,
+      onLongPressStart: widget.onLongPressStart,
+      child: widget.child,
+    );
+    if (widget.focusable) {
+      out = FocusableActionDetector(
+        enabled: enabled,
+        mouseCursor: MouseCursor.defer,
+        onShowFocusHighlight: (v) {
+          if (v != _focused) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(onInvoke: (_) {
+            widget.onTap?.call();
+            return null;
+          }),
+        },
+        // الإطار دائمًا في الشجرة (شفّافٌ بلا تركيز)، فلا تتبدّل بنيتها فيضيع
+        // حالُ ما بداخلها عند كل تركيز.
+        child: DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: _focused
+              ? BoxDecoration(
+                  border: Border.all(color: context.imd.accent, width: 2),
+                  borderRadius: BorderRadius.circular(widget.radius),
+                )
+              : const BoxDecoration(),
+          child: out,
+        ),
+      );
+    }
+    // عقدة دلالةٍ مستقلة (container): نصوص ما بداخلها تندمج فيها فتصير اسم
+    // الزر. و`MergeSemantics` هنا كان يتداخل مع دمجٍ في آبائه (صفوف الجداول
+    // والتبويبات) فيُسقط إطار الدلالات.
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: enabled,
+      selected: widget.selected,
+      label: widget.label,
+      onTap: widget.onTap,
+      child: out,
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_tap.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_page_chrome.dart ====================
+import 'package:flutter/material.dart';
+import '../imd_density.dart';
+import '../imd_icon.dart';
+import '../imd_tokens.dart';
+import 'imd_buttons.dart';
+
+/// عنوان الشاشة: أيقونةٌ وعنوانٌ وسطرٌ فرعي، ومكانٌ للإجراءات يمينه.
+/// يُحيط شاشةً **مضمَّنةً** داخل شاشةٍ أخرى (كأقسام الإعدادات).
+///
+/// الشاشة المضمَّنة لا تفتح صفحتها الخاصة: لا تمرير ولا حشوة (`ImdPage`)، ولا
+/// عنوان صفحة ولا زر «رجوع» — فالشاشة المضيفة هي التي تعرض العنوان والتنقل.
+class ImdEmbedScope extends InheritedWidget {
+  const ImdEmbedScope({super.key, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ImdEmbedScope>() != null;
+
+  @override
+  bool updateShouldNotify(ImdEmbedScope oldWidget) => false;
+}
+
+/// زر «رجوع إلى الإعدادات» أعلى الشاشات المفتوحة من الإعدادات؛ يختفي حين تكون
+/// الشاشة مضمَّنةً داخل الإعدادات نفسها.
+class ImdPageBack extends StatelessWidget {
+  const ImdPageBack({super.key, required this.onPressed, this.label = 'رجوع إلى الإعدادات'});
+
+  final VoidCallback onPressed;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    if (ImdEmbedScope.of(context)) return const SizedBox.shrink();
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: ImdButton.outline(label: label, icon: 'arrow-left', small: true, onPressed: onPressed),
+      ),
+    );
+  }
+}
+
+/// وسمٌ يُعلن أن ما تحته **صفّ إجراءات** في رأس الصفحة (تبويبات + أزرار): كل
+/// عنصرٍ فيه بارتفاع [ImdSizes.barControl] ومحاذاةٍ وسطيّة واحدة، فتقع كلها على
+/// خطٍّ أفقيٍّ واحد في كل الشاشات.
+class ImdActionRow extends InheritedWidget {
+  const ImdActionRow({super.key, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ImdActionRow>() != null;
+
+  /// يلفّ [children] في `Wrap` موحَّد المحاذاة والفجوات.
+  static Widget wrap(List<Widget> children, {WrapAlignment alignment = WrapAlignment.start}) => ImdActionRow(
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          alignment: alignment,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [for (final w in children) SizedBox(height: ImdSizes.barControl, child: Align(widthFactor: 1, child: w))],
+        ),
+      );
+
+  @override
+  bool updateShouldNotify(ImdActionRow old) => false;
+}
+
+class ImdPageTitle extends StatelessWidget {
+  const ImdPageTitle({super.key, required this.title, this.icon, this.subtitle, this.trailing, this.actions});
+
+  final String title;
+  final String? icon;
+  final String? subtitle;
+
+  /// عنصر واحد عند نهاية سطر العنوان في كل العروض (شارة، عدّاد…).
+  final Widget? trailing;
+
+  /// أزرار الإجراءات: عند نهاية سطر العنوان قبل [trailing] على العرض الواسع،
+  /// وتنزل تحت العنوان في صفٍّ يلتفّ (`Wrap`) على الجوال. [trailing] يبقى مكانه.
+  final List<Widget>? actions;
+
+  @override
+  Widget build(BuildContext context) {
+    // مضمَّنةٌ: العنوان للشاشة المضيفة، ويبقى ما يخصّ هذه الشاشة وحدها
+    // (أزرار الإجراءات وشارة الحالة) في سطرٍ مضغوط.
+    if (ImdEmbedScope.of(context)) {
+      final extra = [...?actions, if (trailing != null) trailing!];
+      if (extra.isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Align(
+          alignment: AlignmentDirectional.centerEnd,
+          child: ImdActionRow.wrap(extra),
+        ),
+      );
+    }
+    final c = context.imd;
+    final bp = ImdBp.of(context);
+    final mobile = bp.mobile;
+    final acts = actions ?? const <Widget>[];
+    final inline = acts.isNotEmpty && !mobile;
+    final below = acts.isNotEmpty && mobile;
+    final titleText = Text(title,
+        style: TextStyle(
+            fontSize: mobile ? 19 : 22,
+            fontWeight: FontWeight.w700,
+            color: c.text,
+            height: mobile ? 1.5 : 1.4));
+    return Padding(
+      padding: EdgeInsets.only(bottom: mobile ? 14 : 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              if (icon != null) ...[
+                ImdIcon(icon!, size: (mobile ? 19 : 22) * 1.15, color: c.accent),
+                const SizedBox(width: 8),
+              ],
+              // مع الإجراءات يأخذ العنوان كل المتبقي فتُدفع الأزرار إلى النهاية.
+              if (inline) Expanded(child: titleText) else Flexible(child: titleText),
+              if (inline) ...[
+                const SizedBox(width: 12),
+                // سقف العرض يمنع الأزرار الكثيرة من ابتلاع العنوان: تلتف بدل أن تفيض.
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: bp.width * .6),
+                  child: ImdActionRow.wrap(acts, alignment: WrapAlignment.end),
+                ),
+                if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+              ] else if (trailing != null) ...[const Spacer(), trailing!],
+            ],
+          ),
+          if (subtitle != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(subtitle!, style: TextStyle(fontSize: mobile ? 12 : 13.5, color: c.muted, height: 1.6)),
+            ),
+          if (below)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: ImdActionRow.wrap(acts),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// لوحةٌ بخلفية السطح وحدٍّ رفيع وزوايا 12 — الحاوية الأساسية لأقسام الشاشة.
+class ImdPanel extends StatelessWidget {
+  const ImdPanel({
+    super.key,
+    required this.child,
+    this.title,
+    this.icon,
+    this.padding,
+    this.margin = const EdgeInsets.only(bottom: 20),
+    this.actions,
+    this.color,
+    this.borderColor,
+    this.titleGap = 14,
+    this.centerVertically = false,
+  });
+
+  /// `display:flex; align-items:center` داخل البطاقة.
+  final bool centerVertically;
+
+  final Widget child;
+  final String? title;
+  final String? icon;
+  final EdgeInsets? padding;
+  final double titleGap;
+  final EdgeInsets margin;
+  final List<Widget>? actions;
+  final Color? color;
+  final Color? borderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Container(
+      margin: margin,
+      padding: padding ??
+          (ImdBp.of(context).mobile
+              ? const EdgeInsets.all(12)
+              : const EdgeInsets.symmetric(horizontal: 20, vertical: 18)),
+      decoration: BoxDecoration(
+        color: color ?? c.surface,
+        border: Border.all(color: borderColor ?? c.line),
+        borderRadius: BorderRadius.circular(ImdSizes.radius),
+        boxShadow: imdShadow(c),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: centerVertically ? MainAxisAlignment.center : MainAxisAlignment.start,
+        children: [
+          if (title != null)
+            Padding(
+              padding: EdgeInsets.only(bottom: titleGap),
+              child: Row(
+                children: [
+                  if (icon != null) ...[ImdIcon(icon!, size: 15 * 1.15, color: c.accent), const SizedBox(width: 6)],
+                  Expanded(
+                    child: Text(title!,
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: c.text)),
+                  ),
+                  ...?actions,
+                ],
+              ),
+            ),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+/// شبكة أعمدة متجاوبة (`grid-2/3/4`): عدد الأعمدة يقل مع ضيق العرض.
+class ImdGrid extends StatelessWidget {
+  const ImdGrid({
+    super.key,
+    required this.children,
+    this.columns = 2,
+    this.gap = 16,
+    this.minItemWidth = 220,
+  });
+
+  final List<Widget> children;
+  final int columns;
+  final double gap;
+  final double minItemWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, cons) {
+      var cols = columns;
+      while (cols > 1 && (cons.maxWidth - gap * (cols - 1)) / cols < minItemWidth) {
+        cols--;
+      }
+      final w = (cons.maxWidth - gap * (cols - 1)) / cols;
+      return Wrap(
+        spacing: gap,
+        runSpacing: gap,
+        children: [for (final ch in children) SizedBox(width: w, child: ch)],
+      );
+    });
+  }
+}
+
+/// منطقة المحتوى القابلة للتمرير، بحشوةٍ تتبع عرض الشاشة.
+class ImdPage extends StatelessWidget {
+  const ImdPage({super.key, required this.children, this.controller});
+
+  final List<Widget> children;
+  final ScrollController? controller;
+
+  static EdgeInsets paddingOf(BuildContext context) {
+    final bp = ImdBp.of(context);
+    if (bp.mobile) return ImdSizes.mainPaddingMobile;
+    if (bp.tablet) return ImdSizes.mainPaddingTablet;
+    final base = bp.wide ? ImdSizes.mainPadding : ImdSizes.mainPaddingMid;
+    // الكثافة العالية تضيّق حشوة الصفحة على سطح المكتب لتتّسع المساحة للبيانات.
+    final f = ImdDensity.spaceFactor;
+    return f == 1 ? base : EdgeInsets.symmetric(horizontal: base.horizontal / 2 * f, vertical: base.vertical / 2 * f);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // مضمَّنةٌ داخل شاشةٍ تمرّر نفسها: لا تمريرَ داخل تمرير ولا حشوةً مضاعفة.
+    if (ImdEmbedScope.of(context)) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children);
+    }
+    return SingleChildScrollView(
+      controller: controller,
+      padding: paddingOf(context),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_page_chrome.dart ====================
+
+// ==================== FILE: lib/core/ui/widgets/imd_column_filter.dart ====================
+import 'package:flutter/material.dart';
+import '../imd_tokens.dart';
+import 'imd_buttons.dart';
+import 'imd_fields.dart';
+
+/// محتوى حوار تصفية عمود: بحثٌ وقائمةُ قيمه المميّزة بمربّعات اختيار. يُرجع
+/// `Set<String>` بالقيم المسموحة (كل القيم = لا تصفية).
+class ImdColumnFilterBody extends StatefulWidget {
+  const ImdColumnFilterBody({super.key, required this.values, required this.selected, required this.shown});
+
+  final List<String> values;
+
+  /// المسموح حاليًّا، أو `null` فكلها مسموحة.
+  final Set<String>? selected;
+
+  /// نصّ العرض للقيمة (الفارغة «(فارغ)»).
+  final String Function(String) shown;
+
+  @override
+  State<ImdColumnFilterBody> createState() => _ImdColumnFilterBodyState();
+}
+
+class _ImdColumnFilterBodyState extends State<ImdColumnFilterBody> {
+  late final Set<String> _sel = {...(widget.selected ?? widget.values)};
+  String _q = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final list = [
+      for (final v in widget.values)
+        if (_q.isEmpty || widget.shown(v).contains(_q)) v,
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          autofocus: true,
+          onChanged: (v) => setState(() => _q = v.trim()),
+          style: TextStyle(fontSize: 13.5, color: c.text),
+          decoration: imdFieldDecoration(context).copyWith(hintText: 'بحث في القيم'),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          TextButton(
+            onPressed: () => setState(() => _sel.addAll(list)),
+            child: const Text('تحديد الكل', style: TextStyle(fontSize: 12)),
+          ),
+          TextButton(
+            onPressed: () => setState(() => _sel.removeAll(list)),
+            child: const Text('إلغاء الكل', style: TextStyle(fontSize: 12)),
+          ),
+        ]),
+        Flexible(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 280),
+            child: list.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Center(child: Text('لا قيم مطابقة', style: TextStyle(color: c.muted, fontSize: 13))),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: list.length,
+                    itemBuilder: (_, i) {
+                      final v = list[i];
+                      final on = _sel.contains(v);
+                      return InkWell(
+                        onTap: () => setState(() => on ? _sel.remove(v) : _sel.add(v)),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(children: [
+                            Checkbox(
+                              value: on,
+                              visualDensity: VisualDensity.compact,
+                              onChanged: (_) => setState(() => on ? _sel.remove(v) : _sel.add(v)),
+                            ),
+                            Expanded(
+                              child: Text(widget.shown(v),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 13, color: v.isEmpty ? c.muted : c.text)),
+                            ),
+                          ]),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+          ImdButton.outline(label: 'إلغاء', onPressed: () => Navigator.of(context).pop()),
+          const SizedBox(width: 8),
+          // لا يُسمح بتصفيةٍ فارغة: تُخفي كل الصفوف فلا يعرف المستخدم ما جرى.
+          ImdButton(
+            label: 'تطبيق',
+            onPressed: _sel.isEmpty ? null : () => Navigator.of(context).pop(Set<String>.of(_sel)),
+          ),
+        ]),
+      ],
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/widgets/imd_column_filter.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_form.dart ====================
+import 'package:flutter/material.dart';
+
+import '../../domain/iso_date.dart';
+
+import 'imd_format.dart';
+import 'imd_icon.dart';
+import 'imd_layout.dart';
+import 'imd_page_dirty.dart';
+import 'imd_tokens.dart';
+import 'imd_widgets.dart';
+
+// عناصر النماذج والبطاقات المتكررة: شريط التبويبات، البطاقة المعنونة، شبكات
+// الحقول بعمودين إلى أربعة، عنوان الحقل الصغير، الحقل النصي، صف الشارات،
+// ونص التحميل/الفراغ.
+
+/// صف تبويبات أفقي قابل للتمرير بفجوة 6.
+class ImdItabs extends StatelessWidget {
+  const ImdItabs(
+      {super.key,
+      required this.tabs,
+      required this.value,
+      required this.onChanged});
+  final List<ImdTab<String>> tabs;
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    // داخل صفّ إجراءات العنوان ([ImdActionRow]) بلا أيّ حشوةٍ سفلية، وإلا
+    // ارتفع التبويب عن الأزرار المجاورة وطفا عن خطّها الأفقي.
+    final inline = ImdActionRow.of(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: inline ? 0 : 14),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.only(bottom: inline ? 0 : 6),
+        child: ImdPillTabs<String>(
+            tabs: tabs, value: value, onChanged: onChanged, wrap: false),
+      ),
+    );
+  }
+}
+
+/// حشوة 16 وهامش 14 وعنوان h4.
+class ImdICard extends StatelessWidget {
+  const ImdICard(
+      {super.key, this.title, required this.child, this.icon, this.titleColor});
+  final String? title;
+  final String? icon;
+  final Color? titleColor;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border.all(color: c.line),
+        borderRadius: BorderRadius.circular(ImdSizes.radius),
+        boxShadow: imdShadow(c),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (title != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Row(children: [
+                if (icon != null) ...[
+                  ImdIcon(icon!, size: 17, color: c.accent),
+                  const SizedBox(width: 6)
+                ],
+                Expanded(
+                  child: Text(title!,
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: titleColor ?? c.text)),
+                ),
+              ]),
+            ),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+/// عمودان بفجوة 12، وعمود واحد ≤600.
+class ImdF2 extends StatelessWidget {
+  const ImdF2(
+      {super.key, required this.children, this.cols = 2, this.gap = 12});
+  final List<Widget> children;
+
+  /// عدد الأعمدة: ٢ أو ٣ أو ٤، وتنهار إلى عمودٍ واحد على الشاشات الضيّقة.
+  final int cols;
+  final double gap;
+
+  @override
+  Widget build(BuildContext context) {
+    // عمودٌ واحد على الجوال بنقطة الفصل الوحيدة (900) كبقية النظام.
+    final one = ImdBp.of(context).mobile;
+    final n = one ? 1 : cols;
+    final rows = <Widget>[];
+    for (var i = 0; i < children.length; i += n) {
+      if (i > 0) rows.add(SizedBox(height: gap));
+      final slice = children.sublist(i, (i + n).clamp(0, children.length));
+      rows.add(n == 1
+          ? slice.first
+          : ImdEqualRow(gap: gap, children: [
+              for (var j = 0; j < n; j++)
+                j < slice.length
+                    ? Align(alignment: Alignment.topCenter, child: slice[j])
+                    : const SizedBox.shrink(),
+            ]));
+    }
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: rows);
+  }
+}
+
+/// حقل بعنوان صغير (`label style="font-size:12px;font-weight:700"`).
+class ImdLabeled extends StatelessWidget {
+  const ImdLabeled(this.label, this.child, {super.key, this.size = 12});
+  final String label;
+  final Widget child;
+
+  /// 12 ⇒ عنوانٌ أبرز بوزن 700، و11 ⇒ عنوانٌ أصغر بوزن 600 بلون النص الثانوي.
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ImdEmojiText(label,
+            style: TextStyle(
+                fontSize: size,
+                fontWeight: size <= 11 ? FontWeight.w600 : FontWeight.w700,
+                color: size <= 11 ? c.text2 : c.text,
+                height: 1.6)),
+        const SizedBox(height: 2),
+        child,
+      ],
+    );
+  }
+}
+
+class ImdFld extends StatelessWidget {
+  const ImdFld({
+    super.key,
+    required this.controller,
+    this.hint,
+    this.readOnly = false,
+    this.number = false,
+    this.dense = false,
+    this.enabled = true,
+    this.onChanged,
+    this.maxLines = 1,
+    this.obscure = false,
+    this.suggestions = const [],
+    this.errorText,
+    this.suffix,
+    this.autofocus = false,
+    this.onSubmitted,
+  });
+  final TextEditingController controller;
+  final String? hint;
+
+  /// يأخذ التركيز عند أول بناء — لحقلٍ هو سبب فتح الحوار (كمدخل البحث العام)،
+  /// لا لحقول النماذج فيُسرق التركيز من أولها.
+  final bool autofocus;
+
+  /// ضغط Enter في الحقل (لا يُستدعى في الحقول متعددة الأسطر).
+  final ValueChanged<String>? onSubmitted;
+
+  /// رسالة خطأ تظهر تحت الحقل بلون `colorScheme.error`.
+  final String? errorText;
+
+  /// عنصر عند نهاية الحقل (يسار الحقل في RTL).
+  final Widget? suffix;
+  final bool readOnly;
+  final bool number;
+  final bool dense;
+  final bool enabled;
+  final ValueChanged<String>? onChanged;
+  final int maxLines;
+
+  /// حقل كلمة مرور — يُخفي النص المكتوب.
+  final bool obscure;
+
+  /// قيمٌ تُقترح ولا تُلزم — كـ`<datalist>`: الحقل يبقى نصًّا حرًّا، والقائمة
+  /// تختصر الكتابة وتوحّد الإملاء («مكتب القائد» لا «مكتب قائد»).
+  final List<String> suggestions;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final field = TextField(
+      controller: controller,
+      readOnly: readOnly,
+      enabled: enabled,
+      obscureText: obscure,
+      // حقل كلمة المرور: لا تصحيح ولا اقتراحات ولا تعلّم لوحة المفاتيح، واتجاهه
+      // من اليسار دائمًا (كحقل شاشة الدخول). لوحةٌ تُبقي نافذة تأليفٍ (composing)
+      // على ما كُتب ثم حُذف تُعيد المحذوف مع كل حرفٍ جديد — فتفسد كلمةً صحيحة
+      // بلا خطأٍ من المستخدم، والاتجاه العربي يزيد التباس أقنعة النقاط.
+      autocorrect: !obscure,
+      enableSuggestions: !obscure,
+      enableIMEPersonalizedLearning: !obscure,
+      textDirection: obscure ? TextDirection.ltr : null,
+      // كتابة المستخدم ترفع علامة الصفحة (انظر ImdPageDirty).
+      onChanged: (v) {
+        ImdPageDirty.mark(context);
+        onChanged?.call(v);
+      },
+      onSubmitted: onSubmitted,
+      autofocus: autofocus,
+      maxLines: maxLines,
+      textAlignVertical: ImdCompact.of(context) ? TextAlignVertical.center : null,
+      keyboardType:
+          number ? const TextInputType.numberWithOptions(decimal: true) : null,
+      style: TextStyle(
+          fontSize: ImdCompact.of(context) ? 13 : 14,
+          color: enabled ? c.text : c.muted),
+      decoration: imdFieldDecoration(context,
+          hint: hint,
+          readOnly: readOnly || !enabled,
+          dense: dense,
+          suffix: suffix,
+          errorText: errorText),
+    );
+    final compact = ImdCompact.of(context);
+    final fixed = compact && maxLines == 1 && (errorText == null || errorText!.isEmpty);
+    // مدمجٌ بسطرٍ واحد ⇒ ارتفاعٌ **مطابقٌ** لا حدٌّ أدنى، فلا يعلو حقلٌ أخاه.
+    final fieldBox = suggestions.isEmpty || readOnly || !enabled
+          ? field
+          : _ImdSuggestions(
+              controller: controller,
+              items: suggestions,
+              onPick: (v) {
+                ImdPageDirty.mark(context);
+                onChanged?.call(v);
+              },
+              child: field,
+            );
+    if (fixed && suggestions.isEmpty) {
+      return SizedBox(height: ImdSizes.compactField, child: fieldBox);
+    }
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: compact ? ImdSizes.compactField : ImdSizes.touchMin),
+      child: fieldBox,
+    );
+  }
+}
+
+/// قائمة اقتراحاتٍ تحت الحقل، تُفتح بالضغط على السهم وتُغلق بالاختيار.
+///
+/// لا تُبنى على [Autocomplete]: ذاك يملك متحكّمه الخاص، وحقولُ النظام كلها
+/// تُدار بمتحكّمٍ خارجي يُقرأ عند الحفظ.
+class _ImdSuggestions extends StatefulWidget {
+  const _ImdSuggestions({
+    required this.controller,
+    required this.items,
+    required this.child,
+    this.onPick,
+  });
+
+  final TextEditingController controller;
+  final List<String> items;
+  final Widget child;
+  final ValueChanged<String>? onPick;
+
+  @override
+  State<_ImdSuggestions> createState() => _ImdSuggestionsState();
+}
+
+class _ImdSuggestionsState extends State<_ImdSuggestions> {
+  final MenuController _menu = MenuController();
+
+  void _pick(String v) {
+    imdSetText(widget.controller, v);
+    widget.onPick?.call(v);
+    _menu.close();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    // The list floats in an overlay menu, so it never grows the field's own
+    // box (cells in entry tables have a fixed row height).
+    return Row(children: [
+      Expanded(child: widget.child),
+      const SizedBox(width: 6),
+      MenuAnchor(
+        controller: _menu,
+        alignmentOffset: const Offset(0, 4),
+        style: MenuStyle(
+          backgroundColor: WidgetStatePropertyAll(c.surface),
+          maximumSize: const WidgetStatePropertyAll(Size(320, 280)),
+        ),
+        menuChildren: [
+          for (final v in widget.items)
+            MenuItemButton(
+              onPressed: () => _pick(v),
+              child: Text(v, style: TextStyle(fontSize: 13, color: c.text2)),
+            ),
+        ],
+        builder: (context, controller, _) => ImdIconButton(
+          icon: controller.isOpen ? 'chevron-up' : 'chevron-down',
+          tooltip: 'اقتراحات',
+          onPressed: () =>
+              controller.isOpen ? controller.close() : controller.open(),
+        ),
+      ),
+    ]);
+  }
+}
+
+class ImdChipsRow extends StatelessWidget {
+  const ImdChipsRow({super.key, required this.children, this.bottom = 12});
+  final List<Widget> children;
+  final double bottom;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: Wrap(spacing: 8, runSpacing: 8, children: children),
+      );
+}
+
+/// نص تحميل/فراغ رمادي.
+class ImdLd extends StatelessWidget {
+  const ImdLd(this.text, {super.key, this.center = false});
+  final String text;
+  final bool center;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ImdLdText(text, center: center);
+    return Padding(padding: const EdgeInsets.symmetric(vertical: 10), child: t);
+  }
+}
+
+class ImdLdText extends StatelessWidget {
+  const ImdLdText(this.text, {super.key, this.center = false});
+  final String text;
+  final bool center;
+
+  @override
+  Widget build(BuildContext context) => ImdEmojiText(
+        text,
+        textAlign: center ? TextAlign.center : null,
+        style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+            color: context.imd.muted),
+      );
+}
+
+/// شريط أدواتٍ بحقل بحث: الحقل يأخذ عرض السطر كاملًا فتنزل الأزرار تحته،
+/// و`inline: true` ⇒ الحقل والأزرار في سطرٍ واحد.
+class ImdSearchBar extends StatelessWidget {
+  const ImdSearchBar({
+    super.key,
+    required this.controller,
+    required this.hint,
+    this.onChanged,
+    this.actions = const [],
+    this.inline = false,
+    this.leading = const [],
+  });
+
+  final TextEditingController controller;
+  final String hint;
+  final ValueChanged<String>? onChanged;
+  final List<Widget> actions;
+  final bool inline;
+
+  /// عناصر بجوار الحقل مباشرة (مثل زر الكاميرا).
+  final List<Widget> leading;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final field = ConstrainedBox(
+      constraints: BoxConstraints(minHeight: ImdSizes.touchMin),
+      child: TextField(
+        controller: controller,
+        onChanged: onChanged,
+        style: TextStyle(fontSize: 14, color: c.text),
+        decoration: imdFieldDecoration(context, hint: hint),
+      ),
+    );
+    if (inline && !ImdBp.of(context).mobile) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(children: [
+          Expanded(child: field),
+          for (final l in leading) ...[const SizedBox(width: 6), l],
+          for (final a in actions) ...[const SizedBox(width: 8), a],
+        ]),
+      );
+    }
+    return ImdRbar(fullFirst: true, children: [
+      Row(children: [
+        Expanded(child: field),
+        for (final l in leading) ...[const SizedBox(width: 6), l]
+      ]),
+      ...actions,
+    ]);
+  }
+}
+
+/// نقاط ملاحظات (`<div>• …</div>` بخط 13 وارتفاع سطر 2).
+class ImdBullets extends StatelessWidget {
+  const ImdBullets(this.lines, {super.key});
+  final List<String> lines;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final l in lines)
+          Text('• $l', style: TextStyle(fontSize: 13, height: 2, color: c.text))
+      ],
+    );
+  }
+}
+
+/// `input type=date` — قيمة YYYY-MM-DD مع منتقي التاريخ.
+class ImdDateField extends StatelessWidget {
+  const ImdDateField(
+      {super.key,
+      required this.value,
+      required this.onChanged,
+      this.enabled = true});
+  final String value;
+  final ValueChanged<String> onChanged;
+  final bool enabled;
+
+  static final DateTime _first = DateTime(2000), _last = DateTime(2100);
+
+  /// مستحيلٌ (`2026-02-30`) يُعرض فارغًا لا يومًا مدوَّرًا ([parseIsoDay]).
+  static String _display(String v) {
+    final d = parseIsoDay(v);
+    if (d == null) return 'سنة-شهر-يوم';
+    return arDateText(fmtDate(d));
+  }
+
+  /// بداية المنتقي: المحفوظ إن صحّ، **محصورًا في المدى** — تاريخٌ مستورد خارجه
+  /// (1999 مثلًا) كان يكسر شرط `showDatePicker` فلا يُفتح المنتقي أصلًا.
+  @visibleForTesting
+  static DateTime initialFor(String v, {DateTime? now}) {
+    final d = parseIsoDay(v) ?? now ?? DateTime.now();
+    return d.isBefore(_first) ? _first : (d.isAfter(_last) ? _last : d);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return MouseRegion(
+      cursor: enabled ? ImdCursor.click : SystemMouseCursors.basic,
+      child: ImdTap(
+        onTap: !enabled
+            ? null
+            : () async {
+                final init = initialFor(value);
+                final dirty = ImdPageDirty.flagOf(context);
+                final d = await showDatePicker(
+                  context: context,
+                  initialDate: init,
+                  firstDate: _first,
+                  lastDate: _last,
+                  locale: const Locale('ar'),
+                );
+                if (d != null) {
+                  dirty?.dirty = true;
+                  onChanged(isoDay(d));
+                }
+              },
+        child: SizedBox(
+          height: ImdCompact.of(context) ? ImdSizes.compactField : ImdSizes.touchMin,
+          child: InputDecorator(
+            expands: true,
+            textAlignVertical: TextAlignVertical.center,
+            decoration: imdFieldDecoration(context, readOnly: !enabled).copyWith(
+              suffixIcon: Padding(
+                padding: const EdgeInsetsDirectional.only(end: 10),
+                child: ImdIcon('calendar', size: 16, color: c.muted),
+              ),
+              suffixIconConstraints:
+                  const BoxConstraints(minWidth: 0, minHeight: 0),
+            ),
+            // عرض حقل date في كروم بالعربية: يوم/شهر/سنة بأرقام هندية.
+            child: Text(_display(value),
+                textAlign: TextAlign.start,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: ImdCompact.of(context) ? 12.5 : 14,
+                    color: value.isEmpty ? c.faint : c.text)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `<input type="checkbox">` مع نصه — مربع 18px بحدود السمة ووزن نص 500.
+class ImdCheckbox extends StatelessWidget {
+  const ImdCheckbox(
+      {super.key, required this.value, required this.label, this.onChanged});
+
+  final bool value;
+  final String label;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final on = onChanged != null;
+    return MouseRegion(
+      cursor: on ? ImdCursor.click : SystemMouseCursors.basic,
+      child: ImdTap(
+        onTap: on ? () => onChanged!(!value) : null,
+        behavior: HitTestBehavior.opaque,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: ImdSizes.touchMin),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: value ? c.accent : c.surface,
+                border:
+                    Border.all(color: value ? c.accent : c.line, width: 1.5),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: value
+                  // على خلفية التمييز، فلونه onAccent لا أبيضَ ثابتًا: في
+                  // الداكن التمييز فاتحٌ (#10B981) فالعلامة البيضاء تبهت عليه.
+                  ? ImdIcon('check', size: 13, color: c.onAccent)
+                  : null,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: ImdEmojiText(label,
+                  style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w500,
+                      color: on ? c.text : c.muted)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// إسناد نص إلى حقل موجود دون كسر موضع المؤشر.
+/// الإسناد المباشر (`controller.text = v`) يُبقي التحديد القديم فيصير خارج النص
+/// الجديد، فيرمي الإطار «editable.dart: 'isValid': is not true».
+void imdSetText(TextEditingController c, String value) {
+  if (c.text == value) return;
+  c.value = TextEditingValue(
+    text: value,
+    selection: TextSelection.collapsed(offset: value.length),
+  );
+}
+
+/// قائمةٌ أو حقلٌ + زرّ («+» إضافة سريعة) في **مجموعة إدخالٍ** واحدة: الاثنان
+/// بارتفاعٍ واحد، وحدودهما ملتصقة بفاصلٍ رفيعٍ واحد داخل إطارٍ واحدٍ مدوَّر.
+class ImdInputGroup extends StatelessWidget {
+  const ImdInputGroup({super.key, required this.field, required this.button});
+  final Widget field;
+  final Widget button;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    // المجموعة مدمجةٌ دائمًا: ارتفاعها ارتفاع الحقل المدمج، فتتساوى مع جيرانها
+    // في صفّ النموذج.
+    final h = ImdSizes.compactField;
+    return ImdCompact(
+      flush: true,
+      child: Container(
+        height: h,
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border.all(color: c.lineStrong),
+          borderRadius: BorderRadius.circular(ImdSizes.compactRadius),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Expanded(child: field),
+          VerticalDivider(width: 1, thickness: 1, color: c.lineStrong),
+          SizedBox(width: h, child: button),
+        ]),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_form.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_layout.dart ====================
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+import 'imd_icon.dart';
+import 'imd_tokens.dart';
+
+/// صندوقٌ بعرضٍ **مفضَّل** لا يتجاوز المتاح: `min(width, ما يتّسع له الأب)`.
+///
+/// بديلُ `SizedBox(width: 220, …)` في أشرطة الفلاتر والنماذج. القاعدة (CLAUDE.md)
+/// تمنع الأبعاد الثابتة؛ وهذا يُبقي العرض المعتاد على سطح المكتب ويتقلّص تلقائيًّا
+/// على الشاشة الضيقة بدل أن يفيض. في سياقٍ غير محدود العرض (صفّ بلا Flexible)
+/// يُستعمل [width] كما هو. لا يصلح داخل خلايا الجداول (تقيس أبعادها الذاتية)،
+/// ولا داخل `IntrinsicWidth` كحوارات AlertDialog.
+class ImdFit extends StatelessWidget {
+  const ImdFit({super.key, required this.width, required this.child});
+
+  final double width;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (context, cons) => SizedBox(
+          width: cons.hasBoundedWidth && cons.maxWidth < width ? cons.maxWidth : width,
+          child: child,
+        ),
+      );
+}
+
+/// المؤشرات.
+///
+/// **الافتراضي شريطٌ واحدٌ رفيع** (نحو ٤٠ بكسل): إطارٌ واحد وصفٌّ أفقيٌّ من
+/// «عنوان قيمة» بفواصل رأسية، يلتفّ على الشاشة الضيّقة. كانت كل شاشةٍ تبدأ
+/// بشبكة بطاقاتٍ كبيرة (رقمٌ بخط 28) تأكل نحو ٢٣٠ بكسل قبل جدولها، وأرقامها
+/// ملخّصٌ لا المحتوى.
+///
+/// [large] ⇒ الشبكة القديمة: auto-fit بحد أدنى 210، وأربعة أعمدة عند ≥1200،
+/// وعمودان بفجوة 8 على الجوال، وعمود واحد ≤420. للّوحات وحدها (الرئيسية،
+/// لوحة المحروقات، الرؤى، لوحة المستودع) حيث الأرقام هي المحتوى نفسه.
+class ImdKpis extends StatelessWidget {
+  const ImdKpis({super.key, required this.children, this.large = false});
+  final List<Widget> children;
+
+  /// البطاقات الكبيرة (ومعها خط الاتجاه `spark`) بدل الشريط المضغوط.
+  final bool large;
+
+  @override
+  Widget build(BuildContext context) {
+    final bp = ImdBp.of(context);
+    if (large) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 20),
+        child: LayoutBuilder(builder: (context, cons) {
+          final gap = bp.mobile ? 8.0 : 14.0;
+          int cols;
+          if (bp.tiny) {
+            cols = 1;
+          } else if (bp.mobile) {
+            cols = 2;
+          } else if (bp.wide) {
+            cols = 4;
+          } else {
+            cols = ((cons.maxWidth + gap) / (210 + gap)).floor().clamp(1, children.length);
+          }
+          return ImdGridRows(cols: cols, gap: gap, children: children);
+        }),
+      );
+    }
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: c.subtle,
+          border: Border.all(color: c.line),
+          borderRadius: BorderRadius.circular(ImdSizes.radius),
+        ),
+        child: _ImdKpiStrip(
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 2,
+            children: [
+              for (var i = 0; i < children.length; i++) ...[
+                if (i > 0) Container(width: 1, height: 18, color: c.line),
+                children[i],
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// يُعلِم [ImdKpi] أنه داخل الشريط المضغوط. خارج [ImdKpis] (أو داخل
+/// `ImdKpis(large: true)`) تبقى البطاقة الكبيرة كما كانت.
+class _ImdKpiStrip extends InheritedWidget {
+  const _ImdKpiStrip({required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_ImdKpiStrip>() != null;
+
+  @override
+  bool updateShouldNotify(_ImdKpiStrip oldWidget) => false;
+}
+
+/// بطاقة مؤشرٍ واحد: عنوانٌ ورقمٌ كبير، وإضافةٌ اختيارية تحتهما.
+class ImdKpi extends StatelessWidget {
+  const ImdKpi({super.key, required this.label, required this.value, this.color, this.extra, this.icon, this.spark});
+  final String label;
+  final String value;
+  final Color? color;
+
+  /// محتوى إضافي أسفل القيمة (مثل شارة الحالة).
+  final Widget? extra;
+
+  /// أيقونة اختيارية بجوار العنوان — لا تغيّر شيئًا في الاستخدامات القائمة
+  /// التي لا تمرّرها.
+  final String? icon;
+
+  /// سلسلة قيم (من الأقدم إلى الأحدث) تُرسم خطًّا صغيرًا أسفل القيمة — اتجاهٌ
+  /// بنظرة. لا تُرسم بأقل من نقطتين. بلا تمريرها لا يتغيّر شيء. في البطاقة
+  /// الكبيرة وحدها: الشريط المضغوط سطرٌ واحد لا يتّسع لها.
+  final List<double>? spark;
+
+  /// عنصر الشريط المضغوط: «أيقونة · عنوان **قيمة** [شارة]» في سطرٍ واحد.
+  Widget _compact(BuildContext context) {
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (icon != null) ...[
+          ImdIcon(icon!, size: 13, color: color ?? c.muted),
+          const SizedBox(width: 5),
+        ],
+        Flexible(
+          child: Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: c.muted)),
+        ),
+        const SizedBox(width: 6),
+        Text(value,
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: color ?? c.text, height: 1.2)),
+        if (extra != null) ...[const SizedBox(width: 6), extra!],
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_ImdKpiStrip.of(context)) return _compact(context);
+    final c = context.imd;
+    final mobile = ImdBp.of(context).mobile;
+    return Container(
+      padding: mobile ? const EdgeInsets.all(12) : const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+      decoration: BoxDecoration(
+        // `subtle` لا `surface`: رماديةٌ واضحة التباين عن خلفية الصفحة (`bg`)
+        // في كل سمة — فاتحة في الفاتحة وداكنة في الداكنة والمحروقات، بخلاف
+        // `surface` التي قد تُطابق لون الصفحة في بعض السمات فتذوب البطاقة فيها.
+        color: c.subtle,
+        border: Border.all(color: c.line),
+        borderRadius: BorderRadius.circular(ImdSizes.radius),
+        boxShadow: imdShadow(c),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(children: [
+            if (icon != null) ...[
+              ImdIcon(icon!, size: 13, color: color ?? c.muted),
+              const SizedBox(width: 5),
+            ],
+            Flexible(
+              child: Text(label,
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: c.muted, height: 1.6)),
+            ),
+          ]),
+          const SizedBox(height: 5),
+          Text(value,
+              style: TextStyle(
+                  fontSize: mobile ? 22 : 28, fontWeight: FontWeight.w700, color: color ?? c.text, height: 1)),
+          if (spark != null && spark!.length >= 2) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 22,
+              width: double.infinity,
+              child: CustomPaint(painter: ImdSparkPainter(spark!, color ?? c.accent)),
+            ),
+          ],
+          if (extra != null) ...[const SizedBox(height: 6), extra!],
+        ],
+      ),
+    );
+  }
+}
+
+/// خطٌّ مصغَّر (sparkline) بلا محاور — مقياسه من أدنى السلسلة إلى أعلاها، ونقطته
+/// الأخيرة معلَّمةٌ بدائرة. في RTL يُرسم الأحدث عند الطرف البدئي (اليمين).
+class ImdSparkPainter extends CustomPainter {
+  const ImdSparkPainter(this.values, this.color);
+
+  final List<double> values;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.length < 2) return;
+    var lo = values.first, hi = values.first;
+    for (final v in values) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    final span = (hi - lo) == 0 ? 1.0 : (hi - lo);
+    const pad = 3.0;
+    Offset at(int i) {
+      final x = pad + (size.width - 2 * pad) * i / (values.length - 1);
+      final y = size.height - pad - (size.height - 2 * pad) * ((values[i] - lo) / span);
+      return Offset(x, y);
+    }
+
+    final path = Path()..moveTo(at(0).dx, at(0).dy);
+    for (var i = 1; i < values.length; i++) {
+      path.lineTo(at(i).dx, at(i).dy);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color.withValues(alpha: .85)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeJoin = StrokeJoin.round,
+    );
+    canvas.drawCircle(at(values.length - 1), 2.5, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(ImdSparkPainter old) => old.color != color || !listEquals(old.values, values);
+}
+
+/// صفوف شبكة متساوية الأعمدة بارتفاع موحّد داخل كل صف (سلوك CSS grid: align-items: stretch).
+class ImdGridRows extends StatelessWidget {
+  const ImdGridRows({super.key, required this.children, required this.cols, this.gap = 16, this.runGap});
+  final List<Widget> children;
+  final int cols;
+  final double gap;
+  final double? runGap;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <Widget>[];
+    for (var i = 0; i < children.length; i += cols) {
+      final slice = children.sublist(i, (i + cols).clamp(0, children.length));
+      rows.add(ImdEqualRow(
+        gap: gap,
+        children: [for (var j = 0; j < cols; j++) j < slice.length ? slice[j] : const SizedBox.shrink()],
+      ));
+      if (i + cols < children.length) rows.add(SizedBox(height: runGap ?? gap));
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: rows);
+  }
+}
+
+/// صف بأعمدة متساوية العرض، يُمدَّد كل عمود لارتفاع أطول عمود.
+/// بديل لـ IntrinsicHeight يعمل مع LayoutBuilder: قياس أول بارتفاع حر ثم تخطيط نهائي بارتفاع ثابت.
+class ImdEqualRow extends MultiChildRenderObjectWidget {
+  const ImdEqualRow({super.key, required super.children, this.gap = 16});
+  final double gap;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      RenderEqualRow(gap, Directionality.of(context));
+
+  @override
+  void updateRenderObject(BuildContext context, RenderEqualRow renderObject) {
+    renderObject
+      ..gap = gap
+      ..textDirection = Directionality.of(context);
+  }
+}
+
+class _EqualRowParentData extends ContainerBoxParentData<RenderBox> {}
+
+class RenderEqualRow extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _EqualRowParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _EqualRowParentData> {
+  RenderEqualRow(this._gap, this._dir);
+
+  double _gap;
+  set gap(double v) {
+    if (v == _gap) return;
+    _gap = v;
+    markNeedsLayout();
+  }
+
+  TextDirection _dir;
+  set textDirection(TextDirection v) {
+    if (v == _dir) return;
+    _dir = v;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _EqualRowParentData) child.parentData = _EqualRowParentData();
+  }
+
+  @override
+  void performLayout() {
+    final n = childCount;
+    if (n == 0) {
+      size = constraints.smallest;
+      return;
+    }
+    final width = constraints.maxWidth;
+    final colW = ((width - _gap * (n - 1)) / n).clamp(0.0, double.infinity);
+    var maxH = 0.0;
+    var child = firstChild;
+    while (child != null) {
+      child.layout(BoxConstraints(minWidth: colW, maxWidth: colW), parentUsesSize: true);
+      if (child.size.height > maxH) maxH = child.size.height;
+      child = childAfter(child);
+    }
+    child = firstChild;
+    var i = 0;
+    while (child != null) {
+      // حد أدنى للارتفاع لا قيد ثابت: القيد الثابت يجعل الخلية حدًّا لإعادة التخطيط،
+      // فلا يصل تغيّر محتواها (بعد تحميل البيانات) إلى الصف فيحدث فيض.
+      child.layout(BoxConstraints(minWidth: colW, maxWidth: colW, minHeight: maxH), parentUsesSize: true);
+      final pd = child.parentData! as _EqualRowParentData;
+      final x = i * (colW + _gap);
+      pd.offset = Offset(_dir == TextDirection.rtl ? width - x - colW : x, 0);
+      child = childAfter(child);
+      i++;
+    }
+    size = constraints.constrain(Size(width, maxH));
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) => defaultPaint(context, offset);
+}
+
+/// عمودان متساويان بفجوة 16 وهامش سفلي 20؛ عمود واحد ≤920.
+class ImdGrid2 extends StatelessWidget {
+  const ImdGrid2({super.key, required this.children, this.cols = 2, this.gap = 16, this.bottom = 20});
+  final List<Widget> children;
+  final int cols;
+  final double gap;
+  final double bottom;
+
+  @override
+  Widget build(BuildContext context) {
+    final one = ImdBp.of(context).tablet;
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottom),
+      child: ImdGridRows(cols: one ? 1 : cols, gap: gap, children: children),
+    );
+  }
+}
+
+/// شريط أزرار ملتف بفجوة 8؛ على الجوال كل زر بعرض كامل.
+class ImdRbar extends StatelessWidget {
+  const ImdRbar({super.key, required this.children, this.bottom = 10, this.fullFirst = false});
+  final List<Widget> children;
+  final double bottom;
+
+  /// العنصر الأول بعرض كامل (حقل بحثٍ داخل الشريط) والباقي في سطر تحته.
+  final bool fullFirst;
+
+  @override
+  Widget build(BuildContext context) {
+    final mobile = ImdBp.of(context).mobile;
+    if (fullFirst && !mobile && children.isNotEmpty) {
+      return Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          children.first,
+          if (children.length > 1) ...[
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, runSpacing: 8, children: children.sublist(1)),
+          ],
+        ]),
+      );
+    }
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottom),
+      child: mobile
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var i = 0; i < children.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  children[i],
+                ],
+              ],
+            )
+          : Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.end, children: children),
+    );
+  }
+}
+
+/// قائمة حالات: لكل سطرٍ نقطةٌ ملوّنة وعنوانٌ ووصف.
+class ImdStatusList extends StatelessWidget {
+  const ImdStatusList({super.key, required this.items});
+
+  /// (الحالة: '' | 'warn' | 'err'، العنوان، الوصف)
+  final List<(String, String, String)> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < items.length; i++) ...[
+          if (i > 0) const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: c.surface,
+              border: Border.all(color: c.line),
+              borderRadius: BorderRadius.circular(ImdSizes.radius),
+              boxShadow: imdShadow(c),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  margin: const EdgeInsets.only(top: 5),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: items[i].$1 == 'err'
+                        ? c.danger
+                        : items[i].$1 == 'warn'
+                            ? c.warn
+                            : c.success,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(items[i].$2,
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: c.text, height: 1.6)),
+                      Text(items[i].$3, style: TextStyle(fontSize: 12.5, color: c.muted, height: 1.8)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// `repeat(auto-fit, minmax(<minItem>px, 1fr))` — شبكة تتكيّف بعدد الأعمدة حسب العرض.
+class ImdAutoGrid extends StatelessWidget {
+  const ImdAutoGrid({super.key, required this.children, this.minItem = 180, this.gap = 12, this.bottom = 0});
+  final List<Widget> children;
+  final double minItem;
+  final double gap;
+  final double bottom;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottom),
+      child: LayoutBuilder(builder: (context, cons) {
+        final cols = ((cons.maxWidth + gap) / (minItem + gap)).floor().clamp(1, children.isEmpty ? 1 : children.length);
+        return ImdGridRows(cols: cols, gap: gap, children: children);
+      }),
+    );
+  }
+}
+
+
+/// أعلى تكبيرٍ للخط يتحمّله التخطيط.
+///
+/// المستخدم يضبط حجم الخط من إعدادات الهاتف فيُضرب كل نصٍّ فيه. السقف ٢٠٠٪
+/// (WCAG 1.4.4، M-24) — كان ١٫٣ فلا يبلغ ضعيفُ البصر ما يحتاجه. مسحُ كل الشاشات
+/// على ٣٦٠ بكسل وعلى سطح المكتب بخطٍّ ٢٠٠٪ يمرّ بلا فيض (`mobile_layout_test`)؛
+/// ما فوق السقف يُقصّ إليه، وما دونه (بما فيه تصغير الخط) يُترك كما اختاره.
+const double kImdMaxTextScale = 2.0;
+
+MediaQueryData imdClampedMediaQuery(MediaQueryData mq) =>
+    mq.copyWith(textScaler: mq.textScaler.clamp(maxScaleFactor: kImdMaxTextScale));
+// ==================== END FILE: lib/core/ui/imd_layout.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_icon.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+
+import 'imd_icon_data.dart';
+import 'imd_tokens.dart';
+
+/// أيقونة من مكتبة النظام: مسار SVG بخط 2 داخل `viewBox 24`، بلون النص الحالي.
+class ImdIcon extends StatelessWidget {
+  const ImdIcon(this.name, {super.key, this.size, this.color, this.strokeWidth = 2});
+
+  final String name;
+  final double? size;
+  final Color? color;
+  final double strokeWidth;
+
+  /// النغمة اللونية المرافقة للرموز التعبيرية (`ic-success` …).
+  static Color? toneColor(BuildContext context, String? tone) {
+    final c = context.imd;
+    switch (tone) {
+      case 'success':
+        return c.success;
+      case 'danger':
+        return c.danger;
+      case 'warn':
+        return c.warn;
+      case 'accent':
+        return c.accent;
+    }
+    return null;
+  }
+
+  static final Map<String, String> _cache = {};
+
+  /// أيقونات تُضاف هنا يدويًا لأن `imd_icon_data.dart` مولَّد فلا يُعدَّل.
+  static const Map<String, String> _extra = {
+    'log-in': '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
+    'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+    // كانت تُرسم نقطةً بديلة لأنها غير موجودة في الجدول المولَّد.
+    'key': '<path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/>',
+    'copy': '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    'qr-code': '<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/>',
+    'list': '<line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/>',
+    'mail': '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+    'fingerprint': '<path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/>',
+    'archive': '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  };
+
+  static String _svg(String name, double stroke) {
+    final key = '$name@$stroke';
+    return _cache.putIfAbsent(key, () {
+      final body = kImdIconBodies[name] ?? _extra[name] ?? kImdIconBodies['dot'] ?? '';
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+          'stroke="#000" stroke-width="$stroke" stroke-linecap="round" stroke-linejoin="round">$body</svg>';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = DefaultTextStyle.of(context).style;
+    final fs = style.fontSize ?? 14;
+    // .ic { width: 1.15em; height: 1.15em }
+    final s = size ?? fs * 1.15;
+    final col = color ?? IconTheme.of(context).color ?? style.color ?? context.imd.text;
+    return SizedBox(
+      width: s,
+      height: s,
+      child: SvgPicture.string(
+        _svg(name, strokeWidth),
+        width: s,
+        height: s,
+        colorFilter: ColorFilter.mode(col, BlendMode.srcIn),
+      ),
+    );
+  }
+}
+
+/// نصٌّ قد يبدأ برمزٍ تعبيري ⇒ يُستبدل الرمز بأيقونة النظام المقابلة ويُعرض
+/// قبل النص، فتتوحّد الرموز في الواجهة بدل أن تتبع خطّ نظام التشغيل.
+class ImdEmojiText extends StatelessWidget {
+  const ImdEmojiText(this.text,
+      {super.key,
+      this.style,
+      this.gap = 6,
+      this.iconSize,
+      this.textAlign,
+      this.maxLines,
+      this.overflow});
+
+  final String text;
+  final TextStyle? style;
+  final double gap;
+  final double? iconSize;
+  final TextAlign? textAlign;
+
+  /// يمرّران إلى [Text.rich]: بهما يقصّ النص بدل أن يفيض حين يضيق أبوه.
+  final int? maxLines;
+  final TextOverflow? overflow;
+
+  static final RegExp _re = () {
+    final keys = kImdEmojiIcons.keys.toList()..sort((a, b) => b.length.compareTo(a.length));
+    return RegExp('(${keys.map(RegExp.escape).join('|')})️?\\s?');
+  }();
+
+  @override
+  Widget build(BuildContext context) {
+    final spans = <InlineSpan>[];
+    var last = 0;
+    for (final m in _re.allMatches(text)) {
+      if (m.start > last) spans.add(TextSpan(text: text.substring(last, m.start)));
+      final def = kImdEmojiIcons[m.group(1)]!;
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(end: gap),
+          child: ImdIcon(def[0], size: iconSize, color: def.length > 1 ? ImdIcon.toneColor(context, def[1]) : null),
+        ),
+      ));
+      last = m.end;
+    }
+    if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
+    return Text.rich(TextSpan(children: spans),
+        style: style,
+        textAlign: textAlign,
+        maxLines: maxLines,
+        overflow: overflow);
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_icon.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_icon_data.dart ====================
+// ملفٌّ مولَّد عبر tool/gen_icons.js — لا تعدّله يدويًا.
+// كل أيقونة: عناصر SVG داخل viewBox 24×24 بخط 2.
+
+const Map<String, String> kImdIconBodies = {
+  'x': '<path d="M18 6 6 18"/><path d="M6 6l12 12"/>',
+  'check': '<path d="M20 6 9 17l-5-5"/>',
+  'check-circle':
+      '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4 12 14.01l-3-3"/>',
+  'ban': '<circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/>',
+  'hourglass':
+      '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22"/><path d="M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/>',
+  'clock': '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  'save':
+      '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
+  'printer':
+      '<path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8" rx="1"/>',
+  'alert':
+      '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  'search': '<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>',
+  'clipboard':
+      '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 12h6"/><path d="M9 16h6"/>',
+  'eye':
+      '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  'users':
+      '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  'user':
+      '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  'warehouse':
+      '<path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35z"/><path d="M6 18h12"/><path d="M6 14h12"/><path d="M6 22V10h12v12"/>',
+  'building':
+      '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01"/><path d="M12 6h.01"/><path d="M16 6h.01"/><path d="M8 10h.01"/><path d="M12 10h.01"/><path d="M16 10h.01"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/>',
+  'target':
+      '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  'edit':
+      '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
+  'refresh':
+      '<path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  'rotate-ccw':
+      '<path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+  'repeat':
+      '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  'undo':
+      '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  'chart': '<path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>',
+  'trending': '<path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/>',
+  'file':
+      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+  'plus': '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  'plus-square':
+      '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8"/><path d="M8 12h8"/>',
+  'trash':
+      '<path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
+  'tent':
+      '<path d="M3.5 21 14 3"/><path d="M20.5 21 10 3"/><path d="M15.5 21 12 15l-3.5 6"/><path d="M2 21h20"/>',
+  'shield': '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  'bulb':
+      '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/>',
+  'package':
+      '<path d="M16.5 9.4 7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05"/><path d="M12 22.08V12"/>',
+  'upload':
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
+  'download':
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
+  'calculator':
+      '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8"/><path d="M8 10h.01"/><path d="M12 10h.01"/><path d="M16 10h.01"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>',
+  'settings':
+      '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  'sliders':
+      '<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/>',
+  'wrench':
+      '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  'bell':
+      '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  'zap': '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+  'arrow-left': '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
+  'arrow-right': '<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>',
+  'arrow-up': '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
+  'arrow-down': '<path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/>',
+  'arrow-down-right': '<path d="M7 7l10 10"/><path d="M17 7v10H7"/>',
+  'external':
+      '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/>',
+  'swap':
+      '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="M16 21l4-4-4-4"/><path d="M20 17H4"/>',
+  'chevron-down': '<path d="M6 9l6 6 6-6"/>',
+  'chevron-up': '<path d="M18 15l-6-6-6 6"/>',
+  'chevron-left': '<path d="M15 18l-6-6 6-6"/>',
+  'chevron-right': '<path d="M9 18l6-6-6-6"/>',
+  'eraser':
+      '<path d="M20 20H7L3 16l10-10 7 7-3.5 3.5"/><path d="M6.5 13.5l5 5"/>',
+  'info':
+      '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  'pin':
+      '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+  'truck':
+      '<rect x="1" y="3" width="15" height="13" rx="1"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>',
+  'utensils':
+      '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3z"/><path d="M21 15v7"/>',
+  'home':
+      '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>',
+  'folder':
+      '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  'tag':
+      '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/>',
+  'image':
+      '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>',
+  'lock':
+      '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  'unlock':
+      '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+  'calendar':
+      '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>',
+  'scale':
+      '<path d="M16 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1z"/><path d="M2 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
+  'phone':
+      '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  'monitor':
+      '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+  'compass':
+      '<circle cx="12" cy="12" r="10"/><path d="M16.24 7.76l-2.12 6.36-6.36 2.12 2.12-6.36z"/>',
+  'dot': '<circle cx="12" cy="12" r="5" fill="#000" stroke="none"/>',
+  'square': '<rect x="4" y="4" width="16" height="16" rx="2"/>',
+  'globe':
+      '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+  'database':
+      '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+  'link':
+      '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  'sun':
+      '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/>',
+  'moon': '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  'radio':
+      '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.94 0"/><path d="M12 20h.01"/>',
+  'activity': '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  'scan':
+      '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/>',
+  'camera':
+      '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
+  'flask':
+      '<path d="M9 3h6"/><path d="M10 3v6L4 20a1 1 0 0 0 .9 1.5h14.2a1 1 0 0 0 .9-1.5L14 9V3"/>',
+  'dollar':
+      '<path d="M12 1v22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+  'hash':
+      '<path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="M16 3l-2 18"/>',
+  'award':
+      '<circle cx="12" cy="8" r="7"/><path d="M8.21 13.89 7 23l5-3 5 3-1.21-9.12"/>',
+  'star':
+      '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
+  'menu': '<path d="M3 12h18"/><path d="M3 6h18"/><path d="M3 18h18"/>',
+};
+
+/// الرمز التعبيري ← [الأيقونة، النغمة اللونية]
+const Map<String, List<String>> kImdEmojiIcons = {
+  '✖': ['x', 'danger'],
+  '❌': ['x', 'danger'],
+  '⛔': ['ban', 'danger'],
+  '🔴': ['dot', 'danger'],
+  '🚨': ['alert', 'danger'],
+  '✔': ['check', 'success'],
+  '✅': ['check-circle', 'success'],
+  '👌': ['check', 'success'],
+  '🎉': ['check-circle', 'success'],
+  '🟢': ['dot', 'success'],
+  '⚠': ['alert', 'warn'],
+  '🚧': ['alert', 'warn'],
+  '⏳': ['hourglass'],
+  '🕘': ['clock'],
+  '💾': ['save'],
+  '🖨': ['printer'],
+  '🔍': ['search'],
+  '🔎': ['search'],
+  '📋': ['clipboard'],
+  '📑': ['file'],
+  '📜': ['file'],
+  '🧾': ['file'],
+  '📝': ['file'],
+  '👁': ['eye'],
+  '👥': ['users'],
+  '🤝': ['users'],
+  '👤': ['user'],
+  '👋': ['user'],
+  '👑': ['award'],
+  '⭐': ['star'],
+  '🏬': ['warehouse'],
+  '🏢': ['building'],
+  '🏫': ['building'],
+  '🏛': ['building'],
+  '🎯': ['target'],
+  '✏': ['edit'],
+  '✍': ['edit'],
+  '🔄': ['refresh'],
+  '🔁': ['repeat'],
+  '↺': ['rotate-ccw'],
+  '↩': ['undo'],
+  '📊': ['chart'],
+  '📈': ['trending'],
+  '➕': ['plus'],
+  '🆕': ['plus-square'],
+  '🗑': ['trash'],
+  '🏕': ['tent'],
+  '🌳': ['tent'],
+  '🛡': ['shield'],
+  '🔐': ['lock'],
+  '🔒': ['lock'],
+  '🔓': ['unlock'],
+  '🧠': ['bulb'],
+  '💡': ['bulb'],
+  '🔮': ['bulb'],
+  '📦': ['package'],
+  '🧊': ['package'],
+  '📤': ['upload'],
+  '📥': ['download'],
+  '⬆': ['arrow-up'],
+  '⬇': ['arrow-down'],
+  '↗': ['external'],
+  '↘': ['arrow-down-right'],
+  '🧮': ['calculator'],
+  '🔢': ['hash'],
+  '⚙': ['settings'],
+  '🎛': ['sliders'],
+  '🛠': ['wrench'],
+  '🔔': ['bell'],
+  '📢': ['bell'],
+  '⚡': ['zap'],
+  '🔥': ['zap'],
+  '💥': ['zap'],
+  '🚀': ['zap'],
+  '←': ['arrow-left'],
+  '→': ['arrow-right'],
+  '↔': ['swap'],
+  '▼': ['chevron-down'],
+  '▶': ['chevron-right'],
+  '◀': ['chevron-left'],
+  '🧹': ['eraser'],
+  'ℹ': ['info'],
+  '📌': ['pin'],
+  '🚚': ['truck'],
+  '🍴': ['utensils'],
+  '🍽': ['utensils'],
+  '🍲': ['utensils'],
+  '🏠': ['home'],
+  '🗂': ['folder'],
+  '🏷': ['tag'],
+  '🎨': ['image'],
+  '🖼': ['image'],
+  '📅': ['calendar'],
+  '⚖': ['scale'],
+  '📏': ['scale'],
+  '📱': ['phone'],
+  '🖥': ['monitor'],
+  '💻': ['monitor'],
+  '🧭': ['compass'],
+  '🔹': ['dot', 'accent'],
+  '⬜': ['square'],
+  '🌐': ['globe'],
+  '🛢': ['database'],
+  '🔗': ['link'],
+  '🌅': ['sun'],
+  '🌞': ['sun'],
+  '🌙': ['moon'],
+  '📡': ['radio'],
+  '🩺': ['activity'],
+  '🕵': ['scan'],
+  '📷': ['camera'],
+  '🧪': ['flask'],
+  '💰': ['dollar'],
+  '☰': ['menu'],
+};
+// ==================== END FILE: lib/core/ui/imd_icon_data.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_empty_state.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_icon.dart';
+
+/// حالة «لا شيء لعرضه»: أيقونة كبيرة فوق عنوان ونص مساعد وزر إجراء اختياري.
+///
+/// تصلح للشاشة كلها أو لقسمٍ صغير أو لجدولٍ فارغ. أمّا [ImdEmptyBox] فيبقى صفَّ
+/// نصٍّ داخل إطار جدول للاستعمالات القائمة.
+///
+/// الأيقونات من مكتبة `ImdIcon` لا من `Icons` في Material،
+/// وليس فيها `inbox` ولا `search_off`، فأقربُ بدائلها: `package` و`search`.
+class ImdEmptyState extends StatelessWidget {
+  const ImdEmptyState({
+    super.key,
+    required this.title,
+    required this.icon,
+    this.message,
+    this.action,
+  });
+
+  /// لا توجد بيانات بعد.
+  const ImdEmptyState.noData({
+    super.key,
+    this.title = 'لا توجد بيانات',
+    this.message,
+    this.action,
+  }) : icon = 'package';
+
+  /// بحثٌ أو تصفيةٌ لم تُرجع شيئًا.
+  const ImdEmptyState.noResults({
+    super.key,
+    this.title = 'لا توجد نتائج',
+    this.message = 'جرّب تغيير كلمات البحث أو إزالة عوامل التصفية.',
+    this.action,
+  }) : icon = 'search';
+
+  /// فشل تحميل أو عملية.
+  const ImdEmptyState.error({
+    super.key,
+    this.title = 'حدث خطأ',
+    this.message,
+    this.action,
+  }) : icon = 'alert';
+
+  /// المستخدم لا يملك صلاحية العرض.
+  const ImdEmptyState.noPermission({
+    super.key,
+    this.title = 'لا تملك صلاحية العرض',
+    this.message = 'تواصل مع مدير النظام إن كنت تحتاج هذا الوصول.',
+    this.action,
+  }) : icon = 'lock';
+
+  /// حالة مخصصة: أيّ أيقونةٍ من مكتبة `ImdIcon`.
+  const ImdEmptyState.custom({
+    super.key,
+    required this.title,
+    required this.icon,
+    this.message,
+    this.action,
+  });
+
+  final String title;
+
+  /// اسم أيقونة `ImdIcon`.
+  final String icon;
+  final String? message;
+
+  /// عادةً `ImdButton`.
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final hasMessage = message != null && message!.isNotEmpty;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        // سقفٌ لعرض النص كي لا تمتد الأسطر على شاشةٍ عريضة؛ ويضيق مع الشاشة الضيقة.
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              ImdIcon(icon, size: 64, color: scheme.onSurface.withValues(alpha: .4), strokeWidth: 1.5),
+              const SizedBox(height: 24),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: text.bodyMedium?.copyWith(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: scheme.onSurface,
+                ),
+              ),
+              if (hasMessage) ...[
+                const SizedBox(height: 8),
+                Text(
+                  message!,
+                  textAlign: TextAlign.center,
+                  style: text.bodyMedium?.copyWith(
+                    fontSize: 14,
+                    height: 1.6,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (action != null) ...[
+                const SizedBox(height: 16),
+                action!,
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_empty_state.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_shimmer.dart ====================
+import 'package:flutter/material.dart';
+import 'package:shimmer/shimmer.dart';
+
+import 'imd_layout.dart';
+import 'imd_tokens.dart';
+
+/// غلاف تحميل لامع (Skeleton) بألوان السمة.
+///
+/// يُلفّ حول أشكالٍ **مصمَتة** (حاويات بلون ما) تحاكي المحتوى القادم؛ فاللمعان
+/// يُرسم على شكلها فقط. مثال: صفوف `Container` بزوايا 12 بدل جدولٍ يُحمَّل.
+///
+/// الألوان مشتقّة من `colorScheme.onSurface` فوق `surface` فتصلح في الفاتح والداكن
+/// وسمة المحروقات. ويسير اللمعان مع اتجاه القراءة (يمين→يسار في RTL).
+class ImdShimmer extends StatelessWidget {
+  const ImdShimmer({super.key, required this.child, this.enabled = true});
+
+  final Widget child;
+
+  /// false ⇒ يُعرض [child] كما هو (للحالات التي يُستغنى فيها عن الحركة).
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    final scheme = Theme.of(context).colorScheme;
+    final rtl = Directionality.of(context) == TextDirection.rtl;
+    return Shimmer.fromColors(
+      baseColor: Color.alphaBlend(scheme.onSurface.withValues(alpha: .08), scheme.surface),
+      highlightColor: Color.alphaBlend(scheme.onSurface.withValues(alpha: .16), scheme.surface),
+      direction: rtl ? ShimmerDirection.rtl : ShimmerDirection.ltr,
+      child: child,
+    );
+  }
+}
+
+/// شريطٌ مصمَتٌ بزوايا 4 — الوحدة الأساسية لكل هياكل التحميل هنا. لونه غير
+/// مهم فعليًّا: `Shimmer` يعيد رسمه بتدرّجه فوق شكله فقط، لا لون ودجاته.
+Widget _imdShimmerBar(BuildContext context, {double? width, required double height}) => Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(color: context.imd.subtle, borderRadius: BorderRadius.circular(4)),
+    );
+
+/// هيكل تحميلٍ لصفّ `ImdKpis`: بطاقاتٌ بنفس حجم `ImdKpi` وحشوته، بشريطين
+/// مكان العنوان والقيمة، داخل `ImdAutoGrid` (نفس تكيّف الشبكة الحقيقية).
+class ImdShimmerKpis extends StatelessWidget {
+  const ImdShimmerKpis({super.key, this.count = 6});
+
+  /// عدد بطاقات الهيكل — يُستحسن مطابقته لعدد `ImdKpi` الحقيقية القادمة.
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: ImdShimmer(
+        child: ImdAutoGrid(minItem: 210, gap: 14, children: [
+          for (var i = 0; i < count; i++)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              decoration: BoxDecoration(
+                color: c.surface,
+                border: Border.all(color: c.line),
+                borderRadius: BorderRadius.circular(ImdSizes.radius),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _imdShimmerBar(context, width: 90, height: 10),
+                  const SizedBox(height: 11),
+                  _imdShimmerBar(context, width: 60, height: 22),
+                ],
+              ),
+            ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// هيكل تحميلٍ لـ `ImdTable`: نفس حاوية الجدول الحقيقية (حدّ وزوايا) برأسٍ
+/// وصفوفٍ من أشرطة بعدد الأعمدة المطلوب، بدل انتظار البيانات بلا شكل.
+class ImdShimmerTable extends StatelessWidget {
+  const ImdShimmerTable({super.key, this.rows = 5, this.columns = 4});
+
+  final int rows;
+  final int columns;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    Widget cells(double barHeight) => Row(children: [
+          for (var j = 0; j < columns; j++)
+            Expanded(
+              child: Padding(
+                padding: EdgeInsetsDirectional.only(end: j == columns - 1 ? 0 : 16),
+                child: _imdShimmerBar(context, height: barHeight),
+              ),
+            ),
+        ]);
+    return ImdShimmer(
+      child: Container(
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border.all(color: c.line),
+          borderRadius: BorderRadius.circular(ImdSizes.radius),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            decoration: BoxDecoration(color: c.tableHead, border: Border(bottom: BorderSide(color: c.line))),
+            child: cells(10),
+          ),
+          for (var i = 0; i < rows; i++)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+              decoration: BoxDecoration(
+                border: i == rows - 1 ? null : Border(bottom: BorderSide(color: c.tableRowLine)),
+              ),
+              child: cells(13),
+            ),
+        ]),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_shimmer.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_toolbar.dart ====================
+import 'dart:convert';
+
+import 'package:excel/excel.dart' hide Border, BorderStyle;
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../security/auth_service.dart';
+import '../security/perm.dart';
+import 'imd_files.dart';
+import 'imd_tokens.dart';
+import 'imd_widgets.dart';
+
+/// إعداد أدوات الجدول لكل شاشة — نفس `PM` و`IMP` في forms-ux.js:
+/// p طباعة، x تصدير Excel. الافتراضي يُعدَّل من الإعدادات ويُحفظ على الجهاز (imdad.toolbarCfg).
+class ImdToolbarMeta {
+  const ImdToolbarMeta(this.label, this.group, {this.table = false, this.p = false, this.x = false, this.doc = false, this.own = false});
+  final String label;
+  final String group;
+  final bool table; // meta.t: للشاشة جدول قابل للطباعة/التصدير
+  final bool p;
+  final bool x;
+  final bool doc;
+  final bool own;
+}
+
+class ImdToolbarCfg {
+  static const key = 'imdad.toolbarCfg';
+
+  static const pages = <String, ImdToolbarMeta>{
+    'items': ImdToolbarMeta('الأصناف', 'البيانات الأساسية', table: true, x: true),
+    'units': ImdToolbarMeta('الوحدات المستفيدة', 'البيانات الأساسية'),
+    'suppliers': ImdToolbarMeta('الموردون', 'البيانات الأساسية', table: true),
+    'stores': ImdToolbarMeta('المستودعات', 'البيانات الأساسية', table: true),
+    'kitchens': ImdToolbarMeta('المطابخ والأفران', 'البيانات الأساسية'),
+    'receive': ImdToolbarMeta('الاستلام (الواردات)', 'العمليات المخزنية', doc: true),
+    'issue': ImdToolbarMeta('الصرف', 'العمليات المخزنية', doc: true),
+    'transfer': ImdToolbarMeta('التحويل المخزني', 'العمليات المخزنية', doc: true),
+    'returns': ImdToolbarMeta('المرتجعات', 'العمليات المخزنية', doc: true),
+    'pendingOrders': ImdToolbarMeta('أوامر التوريد', 'العمليات المخزنية'),
+    'feeding': ImdToolbarMeta('التفريدة اليومية', 'التشغيل اليومي', own: true),
+    'kitchenLog': ImdToolbarMeta('سجل التشغيل', 'التشغيل اليومي'),
+    'ratios': ImdToolbarMeta('نسب الاستحقاق', 'التشغيل اليومي', table: true, own: true),
+    'balances': ImdToolbarMeta('الأرصدة الحالية', 'التقارير والجرد', table: true, own: true),
+    'stocktake': ImdToolbarMeta('جرد المخزون', 'التقارير والجرد', own: true),
+    'auditTrail': ImdToolbarMeta('سجل النشاط والتدقيق', 'التقارير والجرد', table: true, x: true),
+  };
+
+  static Future<Map<String, dynamic>> overrides() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return (jsonDecode(prefs.getString(key) ?? '{}') as Map).cast<String, dynamic>();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Future<void> set(String page, String flag, bool on) async {
+    final all = await overrides();
+    final m = ((all[page] as Map?) ?? {}).cast<String, dynamic>();
+    m[flag] = on;
+    all[page] = m;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, jsonEncode(all));
+  }
+
+  static Future<void> reset() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(key);
+  }
+
+  /// `tbFor(page)`
+  static Future<({bool p, bool x})> of(String page) async {
+    final m = pages[page];
+    if (m == null) return (p: false, x: false);
+    final o = ((await overrides())[page] as Map?) ?? const {};
+    bool v(String k, bool def) => o.containsKey(k) ? o[k] == true : def;
+    return (p: m.table && v('p', m.p), x: m.table && v('x', m.x));
+  }
+}
+
+/// `#imdTbar` — شريط الأدوات فوق الجدول.
+class ImdTableToolbar extends StatefulWidget {
+  const ImdTableToolbar({
+    super.key,
+    required this.page,
+    this.onPrint,
+    this.onExport,
+  });
+
+  final String page;
+  final VoidCallback? onPrint;
+  final VoidCallback? onExport;
+
+  @override
+  State<ImdTableToolbar> createState() => _ImdTableToolbarState();
+}
+
+class _ImdTableToolbarState extends State<ImdTableToolbar> {
+  ({bool p, bool x})? _cfg;
+
+  @override
+  void initState() {
+    super.initState();
+    ImdToolbarCfg.of(widget.page).then((v) {
+      if (mounted) setState(() => _cfg = v);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cfg = _cfg;
+    if (cfg == null) return const SizedBox.shrink();
+    // أدوات الشاشة تخضع لصلاحيات المستخدم: طباعة / تصدير / (استيراد = إضافة).
+    // بلا مزوّد مصادقة (الاختبارات المعزولة) لا تُقيَّد.
+    AuthService? auth;
+    try {
+      auth = context.read<AuthService>();
+    } on ProviderNotFoundException {
+      auth = null;
+    }
+    final perm = auth == null ? null : Perm(auth);
+    bool allowed(String action) => perm == null || perm.has(widget.page, action);
+    final t = (p: cfg.p && allowed('print'), x: cfg.x && allowed('export'));
+    if (!t.p && !t.x) return const SizedBox.shrink();
+    final c = context.imd;
+    return Container(
+      margin: const EdgeInsets.only(top: 4, bottom: 10),
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: c.toolbarFill,
+        border: Border.all(color: c.toolbarLine),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          if (t.p) ImdButton(label: 'طباعة / PDF', icon: 'printer', small: true, onPressed: widget.onPrint),
+          if (t.x) ImdButton.outline(label: 'تصدير Excel', icon: 'chart', small: true, onPressed: widget.onExport),
+        ],
+      ),
+    );
+  }
+}
+
+/// تصدير Excel بورقة واحدة «Sheet1». الاستيراد انتقل إلى قوالب `ExcelTemplates`.
+class ImdExcel {
+  static List<int> build(List<String> headers, List<List<String>> rows) {
+    final book = Excel.createExcel();
+    final def = book.getDefaultSheet();
+    final sheet = book['Sheet1'];
+    sheet.appendRow(headers.map<CellValue?>(TextCellValue.new).toList());
+    for (final r in rows) {
+      sheet.appendRow(r.map<CellValue?>(TextCellValue.new).toList());
+    }
+    if (def != null && def != 'Sheet1') book.delete(def);
+    return book.encode() ?? const [];
+  }
+
+  /// `jsonToXLSX(headers, rows, fn)` / `tableXLSX(tbl, fn)`
+  static Future<void> save(BuildContext context, String fileName, List<String> headers, List<List<String>> rows) async {
+    await ImdFiles.saveBytes(context, '$fileName.xlsx', build(headers, rows));
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_toolbar.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_menu_bar.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_screen_actions.dart';
+import 'imd_tokens.dart';
+import 'imd_widgets.dart';
+
+/// بندا «ملف»/«مساعدة» — يُدمجان داخل الشريط العلوي بجانب اسم النظام مباشرة،
+/// على وندوز/لينكس/ماك وحدها ([ImdShortcuts.supported])؛ يغيبان تمامًا عن
+/// الجوال بلا أي أثر على تخطيط الشريط هناك.
+///
+/// بنود «ملف» تعكس ما سجّلته الشاشة النشطة فعلًا في [ImdScreenActions]
+/// فتُعطَّل تلقائيًا حين لا تدعمها الشاشة الحالية — لا قائمة جامدة تدّعي
+/// إجراءً لا تملكه الشاشة.
+class ImdMenuBar extends StatelessWidget {
+  const ImdMenuBar({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (!ImdShortcuts.supported) return const SizedBox.shrink();
+    final actions = ImdScreenActions.maybeOf(context);
+    if (actions == null) return const SizedBox.shrink();
+    final c = context.imd;
+
+    PopupMenuItem<String> item(String label, String shortcut, bool enabled, String value) {
+      return PopupMenuItem<String>(
+        value: value,
+        enabled: enabled,
+        child: Row(children: [
+          Expanded(child: Text(label)),
+          const SizedBox(width: 16),
+          Text(shortcut, style: TextStyle(fontSize: 11, color: c.muted)),
+        ]),
+      );
+    }
+
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      ImdMenuButton<String>(
+        label: 'ملف',
+        icon: 'file',
+        dense: true,
+        items: (_) => [
+          item('سند جديد', 'Ctrl+N', actions.onNewDoc != null, 'new'),
+          item('حفظ', 'Ctrl+S', actions.onSave != null, 'save'),
+          item('طباعة', 'Ctrl+P', actions.onPrint != null, 'print'),
+          item('تحديث', 'F5', actions.onRefresh != null, 'refresh'),
+        ],
+        onSelected: (v) {
+          switch (v) {
+            case 'new':
+              actions.onNewDoc?.call();
+            case 'save':
+              actions.onSave?.call();
+            case 'print':
+              actions.onPrint?.call();
+            case 'refresh':
+              actions.onRefresh?.call();
+          }
+        },
+      ),
+      const SizedBox(width: 6),
+      ImdMenuButton<String>(
+        label: 'مساعدة',
+        icon: 'info',
+        dense: true,
+        items: (_) => const [
+          PopupMenuItem<String>(value: 'shortcuts', child: Text('اختصارات لوحة المفاتيح')),
+        ],
+        onSelected: (v) {
+          if (v == 'shortcuts') _showShortcuts(context);
+        },
+      ),
+    ]);
+  }
+
+  void _showShortcuts(BuildContext context) {
+    showImdModal<void>(
+      context,
+      title: 'اختصارات لوحة المفاتيح',
+      icon: 'info',
+      maxWidth: 420,
+      builder: (ctx) {
+        final c = ctx.imd;
+        Widget row(String key, String desc) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 5),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SizedBox(
+                  width: 84,
+                  child: Text(key, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: c.text)),
+                ),
+                Expanded(
+                  child: Text(desc, style: TextStyle(fontSize: 13, color: c.text2, height: 1.5)),
+                ),
+              ]),
+            );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            row('Ctrl+S', 'حفظ — الزر الرئيسي في الشاشة الحالية'),
+            row('Ctrl+P', 'طباعة'),
+            row('Ctrl+N', 'سند/طلبية جديدة — تعلّق الحالية وتفتح فارغة'),
+            row('F5', 'تحديث البيانات'),
+            row('Esc', 'إغلاق الحوار الحالي'),
+            row('Enter', 'تأكيد في حوارات التأكيد'),
+          ],
+        );
+      },
+      actions: (ctx) => [
+        ImdButton(label: 'إغلاق', onPressed: () => Navigator.of(ctx).pop()),
+      ],
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_menu_bar.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_status_bar.dart ====================
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import 'imd_format.dart';
+import 'imd_icon.dart';
+import 'imd_tokens.dart';
+
+/// عدّاد السجلات التي تعرضها الصفحة الحالية — يغذّيه كل [ImdTable] ويقرؤه
+/// [ImdStatusBar].
+///
+/// **لماذا مجمَّعٌ لا قيمةٌ واحدة:** الصفحة قد تضمّ أكثر من جدول (مسودّاتٌ
+/// وسندات)، وكلٌّ يُبلّغ عن نفسه بمفتاحه. العدد المعروض للجدول **الأكبر** —
+/// هو جدول الصفحة الرئيسي عادةً — فلا يقفز الرقم بين جدولين بحسب من أعاد البناء
+/// آخرًا.
+class ImdRecordSink extends ChangeNotifier {
+  final Map<Object, ({int shown, int total})> _counts = {};
+
+  /// المعروض بعد التصفية، والإجمالي قبلها — للجدول الأكبر.
+  ({int shown, int total})? get current {
+    ({int shown, int total})? best;
+    for (final v in _counts.values) {
+      if (best == null || v.total > best.total) best = v;
+    }
+    return best;
+  }
+
+  void report(Object owner, {required int shown, required int total}) {
+    if (_disposed) return;
+    final old = _counts[owner];
+    if (old != null && old.shown == shown && old.total == total) return;
+    _counts[owner] = (shown: shown, total: total);
+    notifyListeners();
+  }
+
+  void remove(Object owner) {
+    // تُنادى من `dispose()` والشجرة مقفلة: الإشعار الفوري يُعيد بناء الشريط
+    // أثناء التفكيك فيُلقي «setState() called when widget tree was locked».
+    // فيُؤجَّل لما بعد الإطار.
+    if (_counts.remove(owner) != null) _notifyAfterFrame();
+  }
+
+  bool _disposed = false;
+  bool _pending = false;
+
+  void _notifyAfterFrame() {
+    if (_pending || _disposed) return;
+    _pending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pending = false;
+      if (!_disposed) notifyListeners();
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+}
+
+/// يربط جداول صفحةٍ بعدّادها. القشرة تلفّ كل صفحةٍ مفتوحة بنطاقٍ خاص بها، فلا
+/// تُلوِّث جداولُ صفحةٍ مخفيّةٍ عدّادَ الصفحة الظاهرة.
+class ImdRecordScope extends InheritedWidget {
+  const ImdRecordScope({super.key, required this.sink, required super.child});
+
+  final ImdRecordSink sink;
+
+  static ImdRecordSink? maybeOf(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<ImdRecordScope>()?.sink;
+
+  @override
+  bool updateShouldNotify(ImdRecordScope old) => old.sink != sink;
+}
+
+/// الشريط السفلي لسطح المكتب: الوقت، حالة الاتصال، وعدد السجلات. الكثافة والنمط
+/// الكلاسيكي في الإعدادات ▸ «المظهر والعرض» وحدها.
+///
+/// عرضٌ فقط — لا منطق مزامنةٍ هنا: [connection] تأتيه جاهزةً من القشرة التي
+/// تملك `AutoSyncService`.
+class ImdStatusBar extends StatefulWidget {
+  const ImdStatusBar({
+    super.key,
+    required this.connection,
+    required this.connectionOk,
+    this.records,
+    this.trailing = const [],
+    this.onConnectionTap,
+  });
+
+  /// نقر حالة الاتصال (يفتح شاشة المزامنة).
+  final VoidCallback? onConnectionTap;
+
+  /// نصّ حالة الاتصال/المزامنة.
+  final String connection;
+
+  /// `true` أخضر، `false` تنبيه (فشل)، والرمادي لحالة الإيقاف يقرّره [connection].
+  final bool? connectionOk;
+
+  /// عدّاد الصفحة الظاهرة، أو `null` فلا يُعرض عدد.
+  final ImdRecordSink? records;
+
+  /// عناصر إضافية في طرف الشريط.
+  final List<Widget> trailing;
+
+  @override
+  State<ImdStatusBar> createState() => _ImdStatusBarState();
+}
+
+class _ImdStatusBarState extends State<ImdStatusBar> {
+  Timer? _tick;
+  DateTime _now = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    // دقيقةٌ تكفي: الشريط لا يعرض ثواني، ومؤقّتٌ كل ثانية يُعيد رسمه بلا فائدة.
+    _tick = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Widget _sep(ImdColors c) => Container(width: 1, height: 14, margin: const EdgeInsets.symmetric(horizontal: 12), color: c.line);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final style = TextStyle(fontSize: 12, color: c.muted, height: 1.2);
+    final dot = widget.connectionOk == null ? c.faint : (widget.connectionOk! ? c.success : c.danger);
+    final time = DateFormat('HH:mm').format(_now);
+    final date = DateFormat('yyyy/MM/dd').format(_now);
+
+    final sink = widget.records;
+    final records = sink == null
+        ? const SizedBox.shrink()
+        : ListenableBuilder(
+            listenable: sink,
+            builder: (context, _) {
+              final cur = sink.current;
+              if (cur == null) return const SizedBox.shrink();
+              final text = cur.shown == cur.total
+                  ? 'السجلات: ${nf(cur.total)}'
+                  : 'السجلات: ${nf(cur.shown)} من ${nf(cur.total)}';
+              return Row(mainAxisSize: MainAxisSize.min, children: [
+                _sep(c),
+                ImdIcon('clipboard', size: 13, color: c.muted),
+                const SizedBox(width: 6),
+                Text(text, style: style.copyWith(color: c.text2, fontWeight: FontWeight.w600)),
+              ]);
+            },
+          );
+
+    return Container(
+      height: 30,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border(top: BorderSide(color: c.line)),
+      ),
+      child: Row(
+        children: [
+          ImdIcon('clock', size: 13, color: c.muted),
+          const SizedBox(width: 6),
+          Text('$time  ·  $date', style: style),
+          _sep(c),
+          Flexible(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: widget.onConnectionTap,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+                  const SizedBox(width: 6),
+                  Flexible(child: Text(widget.connection, style: style, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ),
+          ),
+          records,
+          const Spacer(),
+          ...widget.trailing,
+        ],
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_status_bar.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_page_tabs.dart ====================
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import 'imd_screen_actions.dart';
+
+import 'widgets/imd_tap.dart';
+
+import 'imd_context_menu.dart';
+import 'imd_icon.dart';
+import 'imd_status_bar.dart';
+import 'imd_tokens.dart';
+
+/// تبويبةٌ لصفحةٍ مفتوحة في القشرة.
+class ImdOpenPage {
+  const ImdOpenPage({required this.id, required this.title, this.icon, this.stale = false});
+
+  final String id;
+  final String title;
+  final String? icon;
+
+  /// تغيّرت البيانات من صفحةٍ أخرى منذ أُخفيت هذه — قد تعرض أرقامًا قديمة.
+  final bool stale;
+}
+
+/// شريط الصفحات المفتوحة (سطح المكتب): تبويبٌ لكل صفحة، ونقرةٌ للتنقّل، و×
+/// للإغلاق. الصفحات المخفيّة تبقى حيّةً بحالتها فلا يضيع نموذجٌ نصف مملوء.
+class ImdPageTabs extends StatelessWidget {
+  const ImdPageTabs({
+    super.key,
+    required this.pages,
+    required this.activeId,
+    required this.onSelect,
+    required this.onClose,
+    this.onCloseOthers,
+    this.embedded = false,
+  });
+
+  /// داخل شريط التطبيق الواحد: بلا خلفيةٍ ولا إطارٍ ولا ارتفاعٍ خاصّ — يملأ ارتفاع
+  /// الشريط المضيف ويتركه هو يرسم خلفيته.
+  final bool embedded;
+
+  final List<ImdOpenPage> pages;
+  final String activeId;
+  final ValueChanged<String> onSelect;
+  final ValueChanged<String> onClose;
+  final ValueChanged<String>? onCloseOthers;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    Widget tabAt(ImdOpenPage p) => _Tab(
+          page: p,
+          active: p.id == activeId,
+          closable: embedded || pages.length > 1,
+          embedded: embedded,
+          onTap: () => onSelect(p.id),
+          onClose: () => onClose(p.id),
+          onCloseOthers: onCloseOthers == null || pages.length < 2 ? null : () => onCloseOthers!(p.id),
+        );
+    if (embedded) {
+      // `shrinkWrap`: عرضُ القائمة = عرض تبويباتها (حتى سقف المتاح)، فيبقى ما بعدها
+      // من الشريط فراغًا يُسحب منه الشريط/النافذة. وارتفاعها يُفرض على كل تبويبةٍ
+      // (قيدٌ ضيّق) فتملأ ارتفاع الشريط بلا حساب.
+      return ListView(
+        shrinkWrap: true,
+        scrollDirection: Axis.horizontal,
+        children: [for (final p in pages) tabAt(p)],
+      );
+    }
+    final tabs = Row(children: [for (final p in pages) tabAt(p)]);
+    return Container(
+      height: 38,
+      decoration: BoxDecoration(
+        color: c.tableHead,
+        border: Border(bottom: BorderSide(color: c.line)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: tabs,
+      ),
+    );
+  }
+}
+
+class _Tab extends StatefulWidget {
+  const _Tab({
+    required this.page,
+    required this.active,
+    required this.closable,
+    required this.onTap,
+    required this.onClose,
+    this.onCloseOthers,
+    this.embedded = false,
+  });
+
+  final bool embedded;
+  final ImdOpenPage page;
+  final bool active;
+  final bool closable;
+  final VoidCallback onTap;
+  final VoidCallback onClose;
+  final VoidCallback? onCloseOthers;
+
+  @override
+  State<_Tab> createState() => _TabState();
+}
+
+class _TabState extends State<_Tab> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final active = widget.active;
+    final fg = active ? c.text : c.muted;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: ImdCursor.click,
+      child: ImdTap(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        // زرّ الفأرة الأوسط يغلق التبويبة كما في المتصفحات.
+        onTertiaryTapUp: widget.closable ? (_) => widget.onClose() : null,
+        onSecondaryTapDown: widget.onCloseOthers == null
+            ? null
+            : (d) => showImdContextMenu(context, d.globalPosition, [
+                  ImdMenuItem(label: 'إغلاق', icon: 'x', onTap: widget.onClose, enabled: widget.closable),
+                  ImdMenuItem(label: 'إغلاق الباقي', onTap: widget.onCloseOthers!),
+                ]),
+        child: Container(
+          margin: EdgeInsets.only(top: widget.embedded ? 6 : 5, left: 2, right: 2),
+          padding: EdgeInsets.symmetric(horizontal: widget.embedded ? 8 : 10),
+          constraints: BoxConstraints(maxWidth: widget.embedded ? 150 : 220),
+          decoration: BoxDecoration(
+            color: active ? c.surface : (_hover ? c.hover : null),
+            border: Border(
+              top: BorderSide(color: active ? c.accent : Colors.transparent, width: 2),
+              left: BorderSide(color: active ? c.line : Colors.transparent),
+              right: BorderSide(color: active ? c.line : Colors.transparent),
+            ),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (widget.page.icon != null) ...[
+              ImdIcon(widget.page.icon!, size: 13, color: active ? c.accent : c.muted),
+              const SizedBox(width: 6),
+            ],
+            Flexible(
+              child: Text(
+                widget.page.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12.5, fontWeight: active ? FontWeight.w700 : FontWeight.w500, color: fg),
+              ),
+            ),
+            if (widget.page.stale) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message: 'تغيّرت البيانات منذ فتحتَ هذه الصفحة',
+                child: Container(width: 7, height: 7, decoration: BoxDecoration(color: c.warn, shape: BoxShape.circle)),
+              ),
+            ],
+            if (widget.closable) ...[
+              const SizedBox(width: 6),
+              // زرّ إغلاقٍ بأيقونة: اسمه على عقدة النقر، ومساحته ٢٤×٢٤ (WCAG 2.5.8).
+              ImdTap(
+                label: 'إغلاق «${widget.page.title}»',
+                radius: 4,
+                onTap: widget.onClose,
+                child: Padding(
+                  padding: const EdgeInsets.all(6.5),
+                  child: ImdIcon('x', size: 11, color: (active || _hover) ? c.muted : c.faint),
+                ),
+              ),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// يستضيف صفحةً مفتوحة: تبقى مبنيّةً بحالتها وإن لم تكن الظاهرة.
+///
+/// - `Offstage`: لا تخطيط ولا رسم للمخفيّة، فعشر صفحاتٍ مفتوحة لا تكلّف
+///   تخطيط عشر شاشات في كل إطار.
+/// - `TickerMode`: لا تحريكات (shimmer ومؤشرات) تعمل خلف الستار.
+/// - `ExcludeFocus`: لا يهبط Tab على حقلٍ في صفحةٍ لا يراها المستخدم.
+/// - `PrimaryScrollController.none`: كل صفحةٍ تقرأ تمريرها الخاص؛ فشاشاتٌ
+///   كثيرة بتمريرٍ رأسيٍّ افتراضيٍّ لو شاركت متحكّمًا واحدًا لتعطّل التمرير
+///   («ScrollController attached to multiple scroll views»).
+class ImdPageHost extends StatelessWidget {
+  const ImdPageHost({super.key, required this.active, required this.sink, required this.child, this.actions});
+
+  final bool active;
+  final ImdRecordSink sink;
+  final Widget child;
+
+  /// خانة إجراءات هذه الصفحة (Ctrl+S/P/N وF5): تسجّل فيها الشاشة، ويقرؤها الجذر
+  /// حين تكون الصفحة ظاهرة. `null` ⇒ الشاشة تسجّل في الجذر كما كانت.
+  final ImdScreenActions? actions;
+
+  @override
+  Widget build(BuildContext context) => Offstage(
+        offstage: !active,
+        child: TickerMode(
+          enabled: active,
+          child: ExcludeFocus(
+            excluding: !active,
+            child: PrimaryScrollController.none(
+              child: ImdRecordScope(
+                sink: sink,
+                child: actions == null ? child : Provider<ImdScreenActions>.value(value: actions!, child: child),
+              ),
+            ),
+          ),
+        ),
+      );
+}
+// ==================== END FILE: lib/core/ui/imd_page_tabs.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_tabs_shell.dart ====================
+import 'package:flutter/material.dart';
+
+import '../security/perm.dart';
+import 'imd_empty_state.dart';
+import 'imd_tokens.dart';
+import 'imd_widgets.dart';
+import '../../domain/access_control.dart';
+
+/// تبويبةٌ في غلافٍ يجمع شاشاتٍ متقاربة.
+class ImdShellTab {
+  const ImdShellTab({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.builder,
+    this.perm,
+  });
+
+  final String id;
+  final String label;
+  final String icon;
+  final WidgetBuilder builder;
+
+  /// صلاحية هذه التبويبة وحدها — تُخفى إن لم يملكها المستخدم.
+  ///
+  /// الجمعُ في شاشةٍ واحدة تنظيمٌ للقائمة لا توسيعٌ للأذونات: من يملك
+  /// المستودعات ولا يملك المركبات يرى المستودعات فقط، كما كان قبل الجمع.
+  final String? perm;
+}
+
+/// غلافٌ يجمع شاشاتِ قسمٍ فرعيّ في بندٍ واحد بالقائمة.
+///
+/// **الشريط الجانبي فهرسٌ لا سجل.** عشرون شاشةً في قائمةٍ واحدة تُقرأ بالبحث
+/// لا بالنظر؛ وجمعُ المتقارب منها — حركةٌ، وبياناتٌ أساسية، وتقارير — يُعيد
+/// للقائمة معناها.
+///
+/// والشاشات تبقى كما هي: يُعلَّق فوقها شريط تبويبات ويُترك لها تمريرُها
+/// الخاص، فلا تمريرٌ داخل تمرير ولا عنوانٌ يُكرَّر.
+class ImdTabsShell extends StatefulWidget {
+  const ImdTabsShell({
+    super.key,
+    required this.tabs,
+    this.initial = '',
+    this.emptyMessage = 'لا صلاحية لأي شاشة في هذا القسم',
+  });
+
+  final List<ImdShellTab> tabs;
+  final String initial;
+  final String emptyMessage;
+
+  @override
+  State<ImdTabsShell> createState() => _ImdTabsShellState();
+}
+
+class _ImdTabsShellState extends State<ImdTabsShell> {
+  String _tab = '';
+
+  @override
+  void didUpdateWidget(covariant ImdTabsShell old) {
+    super.didUpdateWidget(old);
+    // التنقّل من اختصارٍ في اللوحة يفتح الغلاف نفسه على تبويبةٍ أخرى.
+    if (old.initial != widget.initial && widget.initial.isNotEmpty) {
+      setState(() => _tab = widget.initial);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final perm = Perm.of(context);
+    final visible = [
+      for (final t in widget.tabs)
+        if (t.perm == null || perm.has(t.perm!, PermAction.view)) t,
+    ];
+    if (visible.isEmpty) {
+      return ImdPage(children: [ImdEmptyState.noPermission(message: widget.emptyMessage)]);
+    }
+
+    final wanted = _tab.isEmpty ? widget.initial : _tab;
+    final current = visible.any((t) => t.id == wanted) ? wanted : visible.first.id;
+    final tab = visible.firstWhere((t) => t.id == current);
+    final c = context.imd;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 12),
+          decoration: BoxDecoration(
+            color: c.surface,
+            border: Border(bottom: BorderSide(color: c.line)),
+          ),
+          // شريط التبويبات سطرٌ واحد يُمرَّر أفقيًّا: التفافه على عدة أسطر كان يبتلع
+          // ارتفاع الهاتف الأفقي (٣٦٠) فيفيض الغلاف.
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: ImdPillTabs<String>(
+              value: current,
+              onChanged: (v) => setState(() => _tab = v),
+              tabs: [
+                for (final t in visible) ImdTab(t.id, t.label, icon: t.icon),
+              ],
+            ),
+          ),
+        ),
+        // الشاشة المختارة تحتفظ بتمريرها ولوحاتها كما لو فُتحت وحدها.
+        Expanded(child: KeyedSubtree(key: ValueKey(tab.id), child: tab.builder(context))),
+      ],
+    );
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_tabs_shell.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_context_menu.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_icon.dart';
+import 'imd_tokens.dart';
+
+/// بندٌ في قائمة السياق (كليك يمين على سطح المكتب، وضغطةٌ مطوّلة على اللمس).
+class ImdMenuItem {
+  const ImdMenuItem({
+    required this.label,
+    required this.onTap,
+    this.icon,
+    this.danger = false,
+    this.enabled = true,
+    this.shortcut,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+
+  /// اسم أيقونة من [ImdIcon].
+  final String? icon;
+
+  /// بندٌ هدّام (حذف) — يُلوَّن بلون الخطر ويُفصل عمّا قبله.
+  final bool danger;
+  final bool enabled;
+
+  /// نصٌّ يُعرض في طرف البند (مثل `Ctrl+S`) — للعلم فقط، لا يربط اختصارًا.
+  final String? shortcut;
+}
+
+/// يفتح قائمة سياقٍ عند [position] (إحداثيات الشاشة) ويُنفّذ البند المختار.
+///
+/// القائمة بلا بنودٍ لا تُفتح. تُلوَّن من `context.imd` فتتبع السمة، وتأخذ
+/// شكل قوائم ويندوز: صفوفٌ كثيفة، وفاصلٌ قبل البند الهدّام.
+Future<void> showImdContextMenu(
+  BuildContext context,
+  Offset position,
+  List<ImdMenuItem> items,
+) async {
+  if (items.isEmpty) return;
+  final c = context.imd;
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final picked = await showMenu<int>(
+    context: context,
+    position: RelativeRect.fromRect(position & const Size(1, 1), Offset.zero & overlay.size),
+    color: c.surface,
+    surfaceTintColor: Colors.transparent,
+    elevation: 8,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(8),
+      side: BorderSide(color: c.line),
+    ),
+    items: [
+      for (var i = 0; i < items.length; i++) ...[
+        if (items[i].danger && i > 0 && !items[i - 1].danger) const PopupMenuDivider(height: 8),
+        PopupMenuItem<int>(
+          value: i,
+          enabled: items[i].enabled,
+          height: 36,
+          child: _ItemRow(items[i]),
+        ),
+      ],
+    ],
+  );
+  if (picked != null) items[picked].onTap();
+}
+
+class _ItemRow extends StatelessWidget {
+  const _ItemRow(this.item);
+  final ImdMenuItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final color = !item.enabled ? c.muted : (item.danger ? c.danger : c.text);
+    return Row(children: [
+      if (item.icon != null) ...[
+        ImdIcon(item.icon!, size: 15, color: color),
+        const SizedBox(width: 10),
+      ],
+      Expanded(child: Text(item.label, style: TextStyle(fontSize: 13, color: color))),
+      if (item.shortcut != null) ...[
+        const SizedBox(width: 24),
+        Text(item.shortcut!, style: TextStyle(fontSize: 11.5, color: c.muted)),
+      ],
+    ]);
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_context_menu.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_key_scroll.dart ====================
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+/// تمرير الشاشة بلوحة المفاتيح (قرار المالك 2026-10-23): انقر في أيّ موضع ثم
+/// ↑ / ↓ لسطر، و Page Up / Page Down لصفحة، و Home / End لأول المحتوى وآخره.
+///
+/// **لماذا لا يكفي ما في Flutter:** اختصارات التمرير فيه لا تعمل إلا والتركيز
+/// داخل المنطقة الممرَّرة، والنقر على فراغٍ أو نصٍّ لا يمنح تركيزًا — فلا يتحرك
+/// شيء. هنا يُحفظ موضع آخر نقرة، وعند الضغط يُحرَّك **أعمق** منطقةٍ رأسيةٍ تحت ذلك
+/// الموضع ما زال لها ما تتحرك إليه (معاينة الطباعة داخل الحوار قبل الصفحة خلفه)،
+/// فإن بلغت حدّها انتقل الضغط إلى التي تحويها.
+///
+/// لا يمسّ الكتابة: والتركيز في حقل نصٍّ تبقى الأسهم للمؤشر. ولا يعمل مع Ctrl أو
+/// Alt (اختصارات الشاشة). على سطح المكتب وحده — الجوال يُمرَّر باللمس.
+class ImdKeyScroll extends StatefulWidget {
+  const ImdKeyScroll({super.key, required this.child, this.enabled = true});
+
+  final Widget child;
+  final bool enabled;
+
+  /// مقدار السهم الواحد بالبكسل.
+  static const double lineStep = 64;
+
+  /// نسبة الصفحة من ارتفاع المنطقة — يبقى سطرٌ من السابقة ظاهرًا للاستدلال.
+  static const double pageFraction = .85;
+
+  @override
+  State<ImdKeyScroll> createState() => _ImdKeyScrollState();
+}
+
+class _ImdKeyScrollState extends State<ImdKeyScroll> {
+  /// موضع آخر نقرة (إحداثيات الشاشة)، أو `null` قبل أي نقرة ⇒ وسط النافذة.
+  Offset? _last;
+
+  /// المناطق الرأسية تحت [_last] من الأعمق إلى الأعلى — تُحسب عند أول ضغطة
+  /// بعد النقرة وتُستعمل حتى النقرة التالية.
+  List<ScrollableState>? _cache;
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_onKey);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    super.dispose();
+  }
+
+  bool _onKey(KeyEvent e) {
+    if (!widget.enabled || !mounted) return false;
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return false;
+    final kb = HardwareKeyboard.instance;
+    if (kb.isControlPressed || kb.isAltPressed || kb.isMetaPressed) return false;
+    final key = e.logicalKey;
+    final down = key == LogicalKeyboardKey.arrowDown || key == LogicalKeyboardKey.pageDown || key == LogicalKeyboardKey.end;
+    final up = key == LogicalKeyboardKey.arrowUp || key == LogicalKeyboardKey.pageUp || key == LogicalKeyboardKey.home;
+    if (!down && !up) return false;
+    if (_typing()) return false;
+
+    var regions = (_cache ?? const <ScrollableState>[]).where((s) => s.mounted).toList();
+    if (regions.isEmpty) regions = _cache = _regionsAt(_last ?? _center());
+    for (final s in regions) {
+      final p = s.position;
+      if (!p.hasContentDimensions || !p.hasPixels) continue;
+      // اتجاه المحور: «أسفل» يزيد الإزاحة في القوائم العادية وينقصها في المعكوسة.
+      final reversed = s.axisDirection == AxisDirection.up;
+      final forward = down != reversed;
+      final edge = forward ? p.maxScrollExtent : p.minScrollExtent;
+      if ((p.pixels - edge).abs() < .5) continue;
+      final step = switch (key) {
+        LogicalKeyboardKey.home || LogicalKeyboardKey.end => double.infinity,
+        LogicalKeyboardKey.pageUp || LogicalKeyboardKey.pageDown => p.viewportDimension * ImdKeyScroll.pageFraction,
+        _ => ImdKeyScroll.lineStep,
+      };
+      final target = (p.pixels + (forward ? step : -step)).clamp(p.minScrollExtent, p.maxScrollExtent);
+      if (e is KeyRepeatEvent) {
+        p.jumpTo(target);
+      } else {
+        p.animateTo(target, duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// التركيز في حقل كتابة: الأسهم وHome/End للمؤشر لا للتمرير.
+  bool _typing() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    return ctx.widget is EditableText || ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  Offset _center() {
+    final size = MediaQuery.maybeSizeOf(context);
+    return size == null ? Offset.zero : Offset(size.width / 2, size.height / 2);
+  }
+
+  /// المناطق الرأسية التي يقع [at] فيها **ظاهرةً** (ضمن مسار اختبار الإصابة، فلا
+  /// تُحسب صفحةٌ مخفية خلف `Offstage`)، من الأعمق إلى الأعلى.
+  List<ScrollableState> _regionsAt(Offset at) {
+    final view = View.maybeOf(context);
+    if (view == null) return const [];
+    final result = HitTestResult();
+    WidgetsBinding.instance.hitTestInView(result, at, view.viewId);
+    final hit = <RenderObject>{for (final e in result.path) if (e.target is RenderObject) e.target as RenderObject};
+    final found = <(int, ScrollableState)>[];
+    void visit(Element el, int depth) {
+      if (el is StatefulElement && el.state is ScrollableState) {
+        final s = el.state as ScrollableState;
+        final ro = el.renderObject;
+        if (ro != null && hit.contains(ro) && axisDirectionToAxis(s.axisDirection) == Axis.vertical) {
+          found.add((depth, s));
+        }
+      }
+      el.visitChildren((c) => visit(c, depth + 1));
+    }
+
+    (context as Element).visitChildren((c) => visit(c, 1));
+    found.sort((a, b) => b.$1.compareTo(a.$1));
+    return [for (final (_, s) in found) s];
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (e) {
+          _last = e.position;
+          _cache = null;
+        },
+        // عجلة الفأرة تُعيد المرجع أيضًا: من مرّر منطقةً بالعجلة يتوقع أن تكملها الأسهم.
+        onPointerSignal: (e) {
+          if (e is PointerScrollEvent) {
+            _last = e.position;
+            _cache = null;
+          }
+        },
+        child: widget.child,
+      );
+}
+// ==================== END FILE: lib/core/ui/imd_key_scroll.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_page_dirty.dart ====================
+import 'package:flutter/widgets.dart';
+
+/// علامة «عدّل المستخدم شيئًا في هذه الصفحة» — واحدةٌ لكل صفحةٍ مفتوحة.
+///
+/// القشرة تُعيد بناء الصفحة المخفيّة التي تغيّرت بياناتها حين يعود إليها
+/// المستخدم، **إلا** إن كان قد كتب فيها أو اختار: إعادة البناء تمحو سندًا نصف
+/// مملوء وتبويبات السندات المعلّقة. فتبقى تلك الصفحة كما هي، بنقطةٍ على تبويبها.
+///
+/// تُرفع من حقول البيت نفسها ([ImdPageDirty.mark]) عند تعديلٍ **من المستخدم**:
+/// `onChanged` في `TextField` ومنتقيات البيت لا يُطلق على التعبئة البرمجية.
+/// ولا تُنزل إلا بإعادة بناء الصفحة أو إغلاقها: الشاشات لا تُبلغ عن الحفظ،
+/// وتصفير النموذج بعده لا يعني أن لا سندات معلّقة في تبويباتها.
+class ImdDirtyFlag {
+  bool dirty = false;
+}
+
+class ImdPageDirty extends InheritedWidget {
+  const ImdPageDirty({super.key, required this.flag, required super.child});
+
+  final ImdDirtyFlag flag;
+
+  /// يرفع علامة الصفحة المحيطة. بلا صفحةٍ محيطة (حوار، اختبار معزول) لا شيء.
+  /// لا يُنشئ اعتمادًا: يُستدعى من معالجات الأحداث لا من `build`.
+  static void mark(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<ImdPageDirty>()?.flag.dirty = true;
+
+  /// العلامة نفسها لتُرفع بعد `await` دون الرجوع إلى سياقٍ ربما فُكّ.
+  static ImdDirtyFlag? flagOf(BuildContext context) =>
+      context.getInheritedWidgetOfExactType<ImdPageDirty>()?.flag;
+
+  @override
+  bool updateShouldNotify(ImdPageDirty oldWidget) => false;
+}
+// ==================== END FILE: lib/core/ui/imd_page_dirty.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_screen_actions.dart ====================
+import 'dart:io';
+
+import 'package:flutter/widgets.dart';
+import 'package:provider/provider.dart';
+
+/// سجلّ إجراءات الشاشة النشطة — تسجّله كل شاشةٍ تريد الاستجابة لاختصارات
+/// لوحة المفاتيح على سطح المكتب (Ctrl+S حفظ، Ctrl+P طباعة، Ctrl+N سند جديد،
+/// F5 تحديث) في `initState`، وتُفرغه في `dispose`. طبقة الاختصارات العامة في
+/// `main.dart` وشريط القوائم العلوي يستدعيانه بدل أن يعرفا بنفسهما أيّ شاشةٍ
+/// نشطة الآن — بنفس فكرة `ImdNav` (التنقّل) لكن للإجراءات، وبنفس أسلوب
+/// `.of(context)`/`Perm` في الوصول من أي مكان عبر `context.read`.
+///
+/// ليست `ChangeNotifier` عمدًا: شريط القوائم يقرأها لا يستمع إليها، فتُقرأ من
+/// جديد مع كل إعادة بناءٍ لقالب الشاشة الرئيسية (كما يحدث عند كل تنقّل)، بلا
+/// حاجةٍ لإشعارٍ فعلي ولا خطر استدعاء مستمعٍ أثناء تفكيك شجرة عنصرٍ جماعي.
+class ImdScreenActions {
+  // إجراءات الصفحة. على الكائن الجذر (اختصارات الإطار وقائمة «ملف») تُقرأ من
+  // [delegate] أولًا: خانة الصفحة الظاهرة الآن. كان التسجيل في الجذر مباشرة،
+  // والصفحات تبقى حيّةً تبويبات، فيملك Ctrl+S آخرُ صفحةٍ فُتحت لا الظاهرة —
+  // فيُحفظ سندٌ في تبويبٍ مخفيّ.
+  VoidCallback? _onSave;
+  VoidCallback? _onPrint;
+  VoidCallback? _onNewDoc;
+  VoidCallback? _onRefresh;
+
+  /// خانة الصفحة الظاهرة (يضبطها الإطار عند تبديل الصفحة) — للجذر وحده.
+  ImdScreenActions? delegate;
+
+  VoidCallback? get onSave => delegate?.onSave ?? _onSave;
+  set onSave(VoidCallback? v) => _onSave = v;
+  VoidCallback? get onPrint => delegate?.onPrint ?? _onPrint;
+  set onPrint(VoidCallback? v) => _onPrint = v;
+  VoidCallback? get onNewDoc => delegate?.onNewDoc ?? _onNewDoc;
+  set onNewDoc(VoidCallback? v) => _onNewDoc = v;
+  VoidCallback? get onRefresh => delegate?.onRefresh ?? _onRefresh;
+  set onRefresh(VoidCallback? v) => _onRefresh = v;
+
+  /// البحث العام (Ctrl+K) — **إجراءُ الإطار لا الشاشة**: يسجّله `HomeShell`
+  /// مرةً واحدة لأن اللوحة تفتح أي شاشةٍ كانت. ولذلك لا تمسّه [register] ولا
+  /// [clear]: كلتاهما تُستدعى من كل شاشةٍ تُفتح، فلو شملتاه ضاع الاختصار بعد
+  /// أول شاشة.
+  VoidCallback? onSearch;
+
+  /// تُستدعى في `initState` — الدوالّ غير المطلوبة تُترك `null` فلا يفعل
+  /// اختصارها شيئًا، بدل أن تُفرَض دلالةٌ لا تملكها الشاشة.
+  void register({
+    VoidCallback? onSave,
+    VoidCallback? onPrint,
+    VoidCallback? onNewDoc,
+    VoidCallback? onRefresh,
+  }) {
+    this.onSave = onSave;
+    this.onPrint = onPrint;
+    this.onNewDoc = onNewDoc;
+    this.onRefresh = onRefresh;
+  }
+
+  /// تُستدعى في `dispose` — وإلا بقيت الشاشة المغلقة "نشطة" لاختصارات شاشةٍ
+  /// غيرها فتحت بعدها.
+  void clear() {
+    onSave = null;
+    onPrint = null;
+    onNewDoc = null;
+    onRefresh = null;
+  }
+
+  /// كـ`context.read<ImdScreenActions>()` لكن بلا رميٍ إن لم يُسجَّل السجلّ
+  /// فوق الشجرة — شاشاتٌ في اختباراتٍ أو سياقاتٍ معزولةٍ عن `main.dart` لا
+  /// تملك هذا المزوِّد، فيصحّ أن تُبنى بلا اختصارات بدل أن تنهار.
+  static ImdScreenActions? maybeOf(BuildContext context) {
+    try {
+      return context.read<ImdScreenActions>();
+    } on ProviderNotFoundException {
+      return null;
+    }
+  }
+}
+
+/// اختصارات لوحة المفاتيح مدعومةٌ على سطح المكتب وحده — بلا أثرٍ على
+/// الجوّال حتى مع لوحة مفاتيح خارجية متّصلة به.
+class ImdShortcuts {
+  ImdShortcuts._();
+
+  static bool get supported =>
+      (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+}
+// ==================== END FILE: lib/core/ui/imd_screen_actions.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_occupancy_bar.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_format.dart';
+import 'imd_tokens.dart';
+
+/// شريط إشغال مع نسبة: اسم فوقه، شريط تقدّم، ونصّ «كذا من كذا» تحته.
+///
+/// اللون يتبع النسبة: `c.warn` عند الامتلاء (قرب طفح)، `c.danger` عند
+/// الانخفاض الشديد، و`c.accent` بينهما، و`c.muted` إن كانت السعة غير معروفة
+/// (صفر أو أقل) فلا نسبة تُحسب أصلًا.
+///
+/// استُخرجت من `_OccupancyBar` في `fuel_dashboard_screen.dart` — أول استخدامٍ
+/// لها هناك (خزّانات المحروقات)، وعتباتها معاملاتٌ لا قيمًا ثابتة كي تصلح
+/// لأي مقياس سعة/استخدام آخر لاحقًا (مستودع، حصة، إلخ).
+class ImdOccupancyBar extends StatelessWidget {
+  const ImdOccupancyBar({
+    super.key,
+    required this.name,
+    required this.used,
+    required this.capacity,
+    this.unit = '',
+    this.highAt = 90,
+    this.lowAt = 20,
+  });
+
+  final String name;
+  final double used;
+  final double capacity;
+
+  /// يُلحَق برقمَي الاستخدام والسعة في السطر السفلي (مثل «لتر»).
+  final String unit;
+
+  /// النسبة% التي يتحوّل عندها اللون إلى `c.warn` (امتلاء).
+  final double highAt;
+
+  /// النسبة% التي يتحوّل تحتها اللون إلى `c.danger` (نضوب).
+  final double lowAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final known = capacity > 0;
+    // لا حدّ أعلى للنسبة نفسها (خزّانٌ تجاوز سعته المسجَّلة يظهر رقمه الحقيقي
+    // ولو فوق 100٪)؛ الشريط وحده يُقيَّد بصريًّا في `value:` أدناه.
+    final pct = known ? used / capacity * 100 : 0.0;
+    final color = !known
+        ? c.muted
+        : (pct >= highAt ? c.warn : (pct <= lowAt ? c.danger : c.accent));
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Expanded(
+          child: Text(name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 13.5, fontWeight: FontWeight.w700, color: c.text)),
+        ),
+        Text(known ? '${pct.round()}٪' : 'بلا سعة',
+            style: TextStyle(fontSize: 11.5, color: c.muted)),
+      ]),
+      const SizedBox(height: 6),
+      ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: LinearProgressIndicator(
+          value: known ? (pct / 100).clamp(0.0, 1.0) : 0,
+          minHeight: 8,
+          backgroundColor: c.subtle,
+          valueColor: AlwaysStoppedAnimation<Color>(color),
+        ),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        known ? '${nf(used)}${unit.isEmpty ? '' : ' $unit'} من ${nf(capacity)}' : '${nf(used)}${unit.isEmpty ? '' : ' $unit'}',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 11.5, color: c.muted),
+      ),
+    ]);
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_occupancy_bar.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_bulk.dart ====================
+import 'package:flutter/material.dart';
+
+import 'imd_form.dart';
+import 'imd_tokens.dart';
+import 'imd_widgets.dart';
+
+/// عمود في شبكة الإدخال الجماعي.
+///
+/// [width] يثبّت العرض (للحقول الرقمية والقوائم)، و[flex] يوزّع ما بقي.
+class ImdBulkCol {
+  const ImdBulkCol(this.label, {this.width, this.flex = 1, this.hint = ''});
+
+  final String label;
+  final double? width;
+  final int flex;
+
+  /// سطرٌ صغير تحت العنوان يشرح ما يُكتب — أرخص من تدريب المستخدم.
+  final String hint;
+}
+
+/// سطرٌ في الشبكة: خلاياه، وخطؤه إن وُجد.
+class ImdBulkRow {
+  const ImdBulkRow({required this.cells, this.error = '', this.badge});
+
+  final List<Widget> cells;
+
+  /// خطأ هذا السطر وحده — يُعرض تحته بلا أن يُخفي ما كُتب.
+  final String error;
+
+  /// شارة تُعرض بجوار رقم السطر (حالة، وحدة، تنبيه).
+  final Widget? badge;
+}
+
+/// شبكة إدخال جماعي: سطورٌ متكررة بأعمدة ثابتة، مع ترقيم وتكرار وحذف.
+///
+/// **لماذا شبكة لا نموذجٌ يُعاد فتحه لكل سطر؟** إدخال خمسين أصلًا أو عشرين
+/// حدًّا نموذجًا نموذجًا عملُ ساعة، والمستخدم لا يرى ما أدخله قبل قليل فيكرره
+/// أو يتناقض معه. الشبكة تُبقي الدفعة كلها أمام عينه حتى لحظة الحفظ.
+///
+/// وثلاث تفصيلات تجعلها تُحتمل فعلًا:
+/// * **الترقيم** — «السطر ٧ خطأ» لا معنى له بلا رقم ظاهر.
+/// * **التكرار** — أكثر سطور الدفعة تتشابه في كل شيء إلا حقلًا واحدًا.
+/// * **الخطأ تحت سطره** — لا رسالة واحدة أعلى الشاشة تُخفي أيّ سطر تعني.
+///
+/// وعلى الشاشات الضيّقة تنقلب الشبكة إلى بطاقات: صفٌّ من ستة حقول على عرض
+/// ٤٠٠ بكسل لا يُقرأ ولا يُكتب فيه.
+class ImdBulkGrid extends StatelessWidget {
+  const ImdBulkGrid({
+    super.key,
+    required this.columns,
+    required this.rows,
+    required this.onAdd,
+    required this.onRemove,
+    this.onDuplicate,
+    this.addLabel = 'إضافة سطر',
+    this.empty = 'لم يُضف سطر بعد',
+    this.summary = const [],
+    this.actions = const [],
+  });
+
+  final List<ImdBulkCol> columns;
+  final List<ImdBulkRow> rows;
+  final VoidCallback onAdd;
+  final ValueChanged<int> onRemove;
+
+  /// تكرار السطر بكل قيمه — يُخفى إن لم يُمرَّر.
+  final ValueChanged<int>? onDuplicate;
+
+  final String addLabel;
+  final String empty;
+
+  /// رقائق الملخّص أسفل الشبكة (عدد السطور، الإجمالي، التحذيرات).
+  final List<Widget> summary;
+
+  /// أزرار إضافية بجوار «إضافة سطر».
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final narrow = ImdBp.of(context).tablet;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (rows.isEmpty)
+          ImdEmptyBox(empty)
+        else if (narrow)
+          ...[
+            for (var i = 0; i < rows.length; i++) _card(context, i),
+          ]
+        else ...[
+          _header(context),
+          for (var i = 0; i < rows.length; i++) _row(context, i),
+        ],
+        const SizedBox(height: 10),
+        Wrap(spacing: 10, runSpacing: 10, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          ImdButton.outline(
+              label: addLabel, icon: 'plus-square', small: true, onPressed: onAdd),
+          ...actions,
+          if (summary.isNotEmpty) ...[
+            Container(width: 1, height: 22, color: c.line),
+            ...summary,
+          ],
+        ]),
+      ],
+    );
+  }
+
+  /// عرض عمود الترقيم: الرقم وحده 34، ومعه شارةٌ (كود الصنف مثلًا) 34 + فاصل + 72.
+  /// كان العرض 34 ثابتًا فتفيض الشارة عنه (`OVERFLOWED BY 23 PIXELS`) — فالعرض يتبع
+  /// وجود الشارات في أي سطر، والترويسة والصفوف تقرأ القيمة نفسها فتتحاذى الأعمدة.
+  double get _leadWidth => rows.any((r) => r.badge != null) ? 34 + 6 + 72 : 34;
+
+  /// عرض عمود الإجراءات: زرّان (تكرار + حذف) أو زرٌّ واحد، كلٌّ بنحو 40.
+  double get _actionsWidth => onDuplicate != null ? 92 : 48;
+
+  Widget _header(BuildContext context) {
+    final c = context.imd;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      decoration: BoxDecoration(
+        color: c.tableHead,
+        border: Border(bottom: BorderSide(color: c.lineStrong)),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+      ),
+      child: Row(children: [
+        SizedBox(width: _leadWidth),
+        for (final col in columns) Expanded(flex: col.flex, child: _headCell(context, col)),
+        SizedBox(width: _actionsWidth),
+      ]),
+    );
+  }
+
+  Widget _headCell(BuildContext context, ImdBulkCol col) {
+    final c = context.imd;
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(col.label,
+            style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: .2,
+                color: c.text2)),
+        if (col.hint.isNotEmpty)
+          Text(col.hint,
+              style: TextStyle(fontSize: 10.5, color: c.muted, height: 1.4),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+      ],
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: col.width == null ? body : SizedBox(width: col.width, child: body),
+    );
+  }
+
+  Widget _row(BuildContext context, int i) {
+    final c = context.imd;
+    final row = rows[i];
+    final bad = row.error.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+      decoration: BoxDecoration(
+        // شريطٌ أحمر على حافة السطر الخاطئ: يُرى قبل قراءة أي نص.
+        border: BorderDirectional(
+          bottom: BorderSide(color: c.line),
+          start: BorderSide(color: bad ? c.danger : Colors.transparent, width: 3),
+        ),
+        color: bad ? c.dangerSoft.withValues(alpha: .35) : (i.isOdd ? c.subtle : null),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+            SizedBox(width: _leadWidth, child: _index(context, i, row.badge, fit: true)),
+            for (var k = 0; k < columns.length; k++)
+              Expanded(
+                flex: columns[k].flex,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: k < row.cells.length ? row.cells[k] : const SizedBox.shrink(),
+                ),
+              ),
+            SizedBox(width: _actionsWidth, child: _rowActions(context, i, fit: true)),
+          ]),
+          if (bad)
+            Padding(
+              padding: EdgeInsetsDirectional.only(top: 6, start: _leadWidth + 4),
+              child: Text('✖ ${row.error}',
+                  style: TextStyle(
+                      fontSize: 11.5, color: c.danger, fontWeight: FontWeight.w600)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// بطاقة السطر على الشاشات الضيّقة.
+  Widget _card(BuildContext context, int i) {
+    final c = context.imd;
+    final row = rows[i];
+    final bad = row.error.isNotEmpty;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: c.surface,
+        border: Border.all(color: bad ? c.danger : c.line),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          _index(context, i, row.badge),
+          const Spacer(),
+          _rowActions(context, i),
+        ]),
+        const SizedBox(height: 8),
+        for (var k = 0; k < columns.length && k < row.cells.length; k++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ImdLabeled(columns[k].label, row.cells[k], size: 11),
+          ),
+        if (bad)
+          Text('✖ ${row.error}',
+              style: TextStyle(
+                  fontSize: 11.5, color: c.danger, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+
+  Widget _index(BuildContext context, int i, Widget? badge, {bool fit = false}) {
+    final c = context.imd;
+    final row = Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: 24,
+        height: 24,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: c.subtle,
+          border: Border.all(color: c.line),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text('${i + 1}',
+            style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w700, color: c.text2)),
+      ),
+      if (badge != null) ...[const SizedBox(width: 6), badge],
+    ]);
+    // داخل عمودٍ بعرضٍ ثابت: ما زاد عن العرض يُصغَّر لا يفيض.
+    return fit
+        ? FittedBox(fit: BoxFit.scaleDown, alignment: AlignmentDirectional.centerStart, child: row)
+        : row;
+  }
+
+  Widget _rowActions(BuildContext context, int i, {bool fit = false}) {
+    final actions = Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (onDuplicate != null)
+          ImdIconButton(icon: 'plus', tooltip: 'تكرار السطر', onPressed: () => onDuplicate!(i)),
+        ImdIconButton(icon: 'trash', tooltip: 'حذف السطر', onPressed: () => onRemove(i)),
+      ],
+    );
+    return fit
+        ? FittedBox(fit: BoxFit.scaleDown, alignment: AlignmentDirectional.centerEnd, child: actions)
+        : actions;
+  }
+}
+// ==================== END FILE: lib/core/ui/imd_bulk.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_charts.dart ====================
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import 'imd_format.dart';
+import 'imd_tokens.dart';
+
+// رسوم بيانية مرسومة على لوحةٍ مباشرة بلا حزمة خارجية: المحور الصادي يبدأ من
+// الصفر، وخطواته أرقامٌ مستريحة، ووسيلة الإيضاح أسفل الرسم.
+//
+// الشبكة والنصوص تتبع السمة؛ القيمتان أدناه هما لونا الوضع الفاتح فقط، وفي
+// الداكن تُشتقّ من رموز الثيم — بلا ذلك تختفي الشبكة الفاتحة على خلفيةٍ داكنة.
+
+const _gridColor = ImdColors.chartGridLight;
+const _tickColor = ImdColors.chartTickLight;
+
+class ImdSeries {
+  const ImdSeries(this.label, this.values, this.color);
+  final String label;
+  final List<num> values;
+  final Color color;
+}
+
+/// «خطوات» المحور: أرقامٌ مستريحة (1، 2، 5 ومضاعفاتها) تغطّي أكبر قيمة.
+List<double> _niceTicks(double maxV, {int maxTicks = 11}) {
+  if (maxV <= 0) return [for (var i = 0; i <= 10; i++) i / 10];
+  double nice(double range, bool round) {
+    final exp = (math.log(range) / math.ln10).floorToDouble();
+    final f = range / math.pow(10, exp);
+    double nf;
+    if (round) {
+      nf = f < 1.5
+          ? 1
+          : f < 3
+              ? 2
+              : f < 7
+                  ? 5
+                  : 10;
+    } else {
+      nf = f <= 1
+          ? 1
+          : f <= 2
+              ? 2
+              : f <= 5
+                  ? 5
+                  : 10;
+    }
+    return nf * math.pow(10, exp);
+  }
+
+  final step = math.max(1.0, nice(nice(maxV, false) / (maxTicks - 1), true));
+  final top = (maxV / step).ceil() * step;
+  return [for (var v = 0.0; v <= top + 1e-9; v += step) v];
+}
+
+/// القيم تُعرض بعدد خانات الخطوة: الصفر «0» والباقي «0.1 … 1.0» عند خطوة كسرية.
+String _tickLabel(double v, List<double> ticks) {
+  final fractional = ticks.length > 1 && (ticks[1] - ticks[0]) < 1;
+  if (v == 0) return '0';
+  return fractional ? v.toStringAsFixed(1) : v.toInt().toString();
+}
+
+TextPainter _tp(String s, {double size = 12, Color color = _tickColor}) =>
+    TextPainter(
+      text: TextSpan(
+          text: s,
+          style: TextStyle(fontSize: size, color: color, fontFamily: null)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+/// مخطط خطي متعدد السلاسل مع تعبئة شفافة وانحناء 0.35.
+class ImdLineChart extends StatelessWidget {
+  const ImdLineChart(
+      {super.key,
+      required this.labels,
+      required this.series,
+      this.height = 280,
+      this.gridColor,
+      this.tickColor});
+
+  final List<String> labels;
+  final List<ImdSeries> series;
+  final double height;
+  final Color? gridColor;
+  final Color? tickColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final grid = gridColor ?? (c.isDark ? c.line : _gridColor);
+    final tick = tickColor ?? c.muted;
+    return SizedBox(
+      height: height,
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Column(
+          children: [
+            Expanded(
+                child: CustomPaint(
+                    size: Size.infinite,
+                    painter: _LinePainter(labels, series, grid, tick))),
+            const SizedBox(height: 8),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 10,
+              children: [
+                for (final s in series)
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Container(
+                      width: 40,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: s.color.withValues(alpha: .125),
+                        border: Border.all(color: s.color, width: 2.4),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(s.label, style: TextStyle(fontSize: 12, color: tick)),
+                  ]),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LinePainter extends CustomPainter {
+  _LinePainter(this.labels, this.series, this.gridPaintColor, this.tick);
+  final List<String> labels;
+  final List<ImdSeries> series;
+  final Color gridPaintColor;
+  final Color tick;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final maxV =
+        series.expand((s) => s.values).fold<num>(0, math.max).toDouble();
+    final ticks =
+        maxV <= 0 ? [for (var i = 0; i <= 10; i++) i / 10] : _niceTicks(maxV);
+    final top = ticks.last;
+    final yLabelW = ticks
+            .map((t) => _tp(_tickLabel(t, ticks), color: tick).width)
+            .fold<double>(0, math.max) +
+        10;
+    const bottomH = 22.0;
+    final plot =
+        Rect.fromLTRB(yLabelW, 6, size.width - 6, size.height - bottomH);
+    final grid = Paint()
+      ..color = gridPaintColor
+      ..strokeWidth = 1;
+    for (final t in ticks) {
+      final y = plot.bottom - (t / top) * plot.height;
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), grid);
+      final tp = _tp(_tickLabel(t, ticks), color: tick);
+      tp.paint(canvas, Offset(plot.left - tp.width - 8, y - tp.height / 2));
+    }
+    final n = labels.length;
+    double xOf(int i) =>
+        n <= 1 ? plot.center.dx : plot.left + plot.width * i / (n - 1);
+    // تسميات المحور السيني: 8 كحد أقصى (autoSkip).
+    final skip = (n / 8).ceil().clamp(1, 1000);
+    for (var i = 0; i < n; i += skip) {
+      final tp = _tp(labels[i], color: tick);
+      tp.paint(canvas, Offset(xOf(i) - tp.width / 2, plot.bottom + 6));
+    }
+    for (final s in series) {
+      final pts = [
+        for (var i = 0; i < n; i++)
+          Offset(
+              xOf(i),
+              plot.bottom -
+                  ((i < s.values.length ? s.values[i] : 0) / top) * plot.height)
+      ];
+      if (pts.isEmpty) continue;
+      final path = _smooth(pts, .35);
+      final fill = Path.from(path)
+        ..lineTo(pts.last.dx, plot.bottom)
+        ..lineTo(pts.first.dx, plot.bottom)
+        ..close();
+      canvas.drawPath(fill, Paint()..color = s.color.withValues(alpha: .125));
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = s.color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.4,
+      );
+      for (final p in pts) {
+        canvas.drawCircle(
+            p, 2.5, Paint()..color = s.color.withValues(alpha: .125));
+        canvas.drawCircle(
+          p,
+          2.5,
+          Paint()
+            ..color = s.color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1,
+        );
+      }
+    }
+  }
+
+  /// منحنى بيزيه بتوتّرٍ يُنعّم الخط بلا أن يتجاوز نقاطه.
+  Path _smooth(List<Offset> p, double t) {
+    final path = Path()..moveTo(p.first.dx, p.first.dy);
+    for (var i = 0; i < p.length - 1; i++) {
+      final p0 = i > 0 ? p[i - 1] : p[i];
+      final p1 = p[i];
+      final p2 = p[i + 1];
+      final p3 = i + 2 < p.length ? p[i + 2] : p2;
+      final c1 = p1 + (p2 - p0) * (t / 2);
+      final c2 = p2 - (p3 - p1) * (t / 2);
+      path.cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, p2.dx, p2.dy);
+    }
+    return path;
+  }
+
+  @override
+  bool shouldRepaint(covariant _LinePainter old) =>
+      old.labels != labels ||
+      old.series != series ||
+      old.gridPaintColor != gridPaintColor ||
+      old.tick != tick;
+}
+
+/// مخطط أعمدة أفقية (indexAxis: 'y') بزوايا 8 وسماكة 20.
+class ImdHBarChart extends StatelessWidget {
+  const ImdHBarChart({
+    super.key,
+    required this.labels,
+    required this.values,
+    this.color,
+    this.height = 280,
+    this.gridColor,
+    this.tickColor,
+  });
+
+  final List<String> labels;
+  final List<num> values;
+
+  /// لون الأعمدة — الافتراضي لون التمييز في السمة الحالية.
+  final Color? color;
+  final double height;
+  final Color? gridColor;
+  final Color? tickColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return SizedBox(
+      height: height,
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _HBarPainter(
+          labels,
+          values,
+          color ?? c.accent,
+          gridColor ?? (c.isDark ? c.line : _gridColor),
+          tickColor ?? c.muted,
+        ),
+      ),
+    );
+  }
+}
+
+class _HBarPainter extends CustomPainter {
+  _HBarPainter(this.labels, this.values, this.color, this.gridPaintColor, this.tick);
+  final List<String> labels;
+  final List<num> values;
+  final Color color;
+  final Color gridPaintColor;
+  final Color tick;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final maxV = values.fold<num>(0, math.max).toDouble();
+    final ticks = maxV <= 0
+        ? [for (var i = 0; i <= 5; i++) i / 5]
+        : _niceTicks(maxV, maxTicks: 8);
+    final top = ticks.last;
+    // التسميات على يسار المحور: اللوحة تُرسم باتجاه LTR.
+    final labelW =
+        labels.map((l) => _tp(l, color: tick).width).fold<double>(0, math.max) + 10;
+    const bottomH = 22.0;
+    final plot =
+        Rect.fromLTRB(labelW, 6, size.width - 12, size.height - bottomH);
+    final grid = Paint()
+      ..color = gridPaintColor
+      ..strokeWidth = 1;
+    for (final t in ticks) {
+      final x = plot.left + (t / top) * plot.width;
+      canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), grid);
+      final tp = _tp(_tickLabel(t, ticks), color: tick);
+      tp.paint(canvas, Offset(x - tp.width / 2, plot.bottom + 6));
+    }
+    final n = labels.length;
+    if (n == 0) return;
+    final band = plot.height / n;
+    for (var i = 0; i < n; i++) {
+      final cy = plot.top + band * i + band / 2;
+      final tp = _tp(labels[i], color: tick);
+      tp.paint(canvas, Offset(plot.left - tp.width - 8, cy - tp.height / 2));
+      final w = (values[i] / top) * plot.width;
+      if (w <= 0) continue;
+      final r = RRect.fromRectAndCorners(
+        Rect.fromLTWH(plot.left, cy - 10, w, 20),
+        topRight: const Radius.circular(8),
+        bottomRight: const Radius.circular(8),
+        topLeft: const Radius.circular(8),
+        bottomLeft: const Radius.circular(8),
+      );
+      canvas.drawRRect(r, Paint()..color = color);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _HBarPainter old) =>
+      old.labels != labels ||
+      old.values != values ||
+      old.color != color ||
+      old.gridPaintColor != gridPaintColor ||
+      old.tick != tick;
+}
+
+/// حلقة مؤشر بنسبة مئوية.
+class ImdScoreRing extends StatelessWidget {
+  const ImdScoreRing({super.key, required this.percent});
+  final int percent;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return SizedBox(
+      width: 112,
+      height: 112,
+      child: CustomPaint(
+        painter: _RingPainter(percent / 100, c.accent, c.subtle),
+        child: Center(
+          child: Container(
+            width: 78,
+            height: 78,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: c.surface,
+              shape: BoxShape.circle,
+              border: Border.all(color: c.line),
+            ),
+            child: Text('${nf(percent)}%',
+                style: TextStyle(
+                    fontSize: 26,
+                    fontWeight: FontWeight.w900,
+                    color: c.text,
+                    height: 1.2)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  _RingPainter(this.p, this.on, this.off);
+  final double p;
+  final Color on;
+  final Color off;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawOval(rect, Paint()..color = off);
+    // conic-gradient يبدأ من الأعلى باتجاه عقارب الساعة.
+    canvas.drawArc(rect, -math.pi / 2, 2 * math.pi * p.clamp(0, 1), true,
+        Paint()..color = on);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RingPainter old) => old.p != p || old.on != on;
+}
+
+/// مخطط أعمدةٍ رأسية مجمَّعة — سلسلةٌ أو أكثر لكل تسمية.
+///
+/// يأخذ ألوان الشبكة والتسميات من خارجه لأن قسم المحروقات داكن: شبكةٌ فاتحة
+/// ثابتة تختفي على أرضيته، والرسم الذي لا يُقرأ زينةٌ لا معلومة.
+class ImdVBarChart extends StatelessWidget {
+  const ImdVBarChart({
+    super.key,
+    required this.labels,
+    required this.series,
+    this.height = 260,
+    this.gridColor,
+    this.tickColor,
+  });
+
+  final List<String> labels;
+  final List<ImdSeries> series;
+  final double height;
+  final Color? gridColor;
+  final Color? tickColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return SizedBox(
+      height: height,
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _VBarPainter(
+          labels,
+          series,
+          gridColor ?? (c.isDark ? c.line : _gridColor),
+          tickColor ?? c.muted,
+        ),
+      ),
+    );
+  }
+}
+
+class _VBarPainter extends CustomPainter {
+  _VBarPainter(this.labels, this.series, this.grid, this.tick);
+
+  final List<String> labels;
+  final List<ImdSeries> series;
+  final Color grid;
+  final Color tick;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (labels.isEmpty || series.isEmpty) return;
+    var maxV = 0.0;
+    for (final s in series) {
+      for (final v in s.values) {
+        if (v.toDouble() > maxV) maxV = v.toDouble();
+      }
+    }
+    final ticks = _niceTicks(maxV, maxTicks: 6);
+    final top = ticks.last;
+    final axisW = ticks
+            .map((t) => _tp(_tickLabel(t, ticks), color: tick).width)
+            .fold<double>(0, math.max) +
+        10;
+    const bottomH = 26.0;
+    final plot = Rect.fromLTRB(axisW, 8, size.width - 8, size.height - bottomH);
+    if (plot.width <= 0 || plot.height <= 0) return;
+
+    final gridPaint = Paint()
+      ..color = grid
+      ..strokeWidth = 1;
+    for (final t in ticks) {
+      final y = plot.bottom - (top == 0 ? 0 : t / top) * plot.height;
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
+      final tp = _tp(_tickLabel(t, ticks), color: tick);
+      tp.paint(canvas, Offset(plot.left - tp.width - 6, y - tp.height / 2));
+    }
+
+    final band = plot.width / labels.length;
+    // ثلث الحزمة فراغٌ بين المجموعات، وما بقي يُقسم على السلاسل.
+    final groupW = band * 0.66;
+    final barW = groupW / series.length;
+    for (var i = 0; i < labels.length; i++) {
+      final left = plot.left + band * i + (band - groupW) / 2;
+      for (var s = 0; s < series.length; s++) {
+        final vals = series[s].values;
+        final v = i < vals.length ? vals[i].toDouble() : 0.0;
+        if (v <= 0 || top == 0) continue;
+        final h = (v / top) * plot.height;
+        final r = RRect.fromRectAndCorners(
+          Rect.fromLTWH(left + barW * s, plot.bottom - h, barW - 2, h),
+          topLeft: const Radius.circular(4),
+          topRight: const Radius.circular(4),
+        );
+        canvas.drawRRect(r, Paint()..color = series[s].color);
+      }
+      final tp = _tp(labels[i], size: 11, color: tick);
+      final cx = plot.left + band * i + band / 2;
+      if (tp.width < band) {
+        tp.paint(canvas, Offset(cx - tp.width / 2, plot.bottom + 7));
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _VBarPainter old) =>
+      old.labels != labels ||
+      old.series != series ||
+      old.grid != grid ||
+      old.tick != tick;
+}
+// ==================== END FILE: lib/core/ui/imd_charts.dart ====================
+
+// ==================== FILE: lib/core/ui/imd_widgets.dart ====================
+// مكوّنات الواجهة المشتركة لنظام الإمداد والتموين: العناوين والأزرار والشارات
+// والجداول والحوارات. مقاساتها وألوانها من `ImdSizes` و`ImdColors` وحدهما، فلا
+// يُعاد تعريف قياسٍ ولا لونٍ في شاشة.
+
+export 'widgets/imd_page_chrome.dart';
+export 'widgets/imd_buttons.dart';
+export 'widgets/imd_tap.dart';
+export 'widgets/imd_tabs.dart';
+export 'widgets/imd_chips.dart';
+export 'widgets/imd_fields.dart';
+export 'widgets/imd_column_filter.dart';
+export 'widgets/imd_table.dart';
+export 'widgets/imd_dialogs.dart';
+// ==================== END FILE: lib/core/ui/imd_widgets.dart ====================
