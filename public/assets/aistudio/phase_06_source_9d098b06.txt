@@ -1,0 +1,3398 @@
+// المرحلة 6 — هيكل التطبيق والقائمة — الشيفرة المصدرية (Dart)
+// عدد الملفات: 9
+// فهرس الملفات:
+//   - lib/main.dart (539 سطر)
+//   - lib/features/home/home_shell.dart (1062 سطر)
+//   - lib/features/home/shell/home_shell_bottom_nav.dart (129 سطر)
+//   - lib/features/home/shell/home_shell_menu.dart (153 سطر)
+//   - lib/features/home/shell/home_shell_placeholders.dart (35 سطر)
+//   - lib/features/home/shell/home_shell_sidebar.dart (529 سطر)
+//   - lib/features/home/shell/home_shell_topbar.dart (378 سطر)
+//   - lib/features/home/space_chooser_screen.dart (189 سطر)
+//   - lib/features/home/supply_groups.dart (353 سطر)
+
+
+// ==================== FILE: lib/main.dart ====================
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show debugPrint, kReleaseMode;
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:provider/provider.dart';
+import 'package:window_manager/window_manager.dart';
+
+import 'core/app_names.dart';
+import 'core/error_log.dart';
+import 'domain/diagnostics.dart';
+import 'core/print/print_preview.dart';
+import 'core/security/auth_service.dart';
+import 'core/security/idle_lock.dart';
+import 'core/security/owner_key.dart';
+import 'core/ui/imd_density.dart';
+import 'core/ui/imd_section_theme.dart';
+import 'core/ui/imd_fonts.dart';
+import 'core/ui/imd_key_scroll.dart';
+import 'core/ui/imd_layout.dart';
+import 'core/ui/imd_screen_actions.dart';
+import 'core/ui/imd_style.dart';
+import 'core/ui/imd_widgets.dart';
+import 'core/ui/imd_window.dart';
+import 'core/theme/app_theme.dart';
+import 'data/backup/backup_scheduler.dart';
+import 'data/backup/key_hardening.dart';
+import 'data/db/app_database.dart';
+import 'data/db/db_cipher.dart';
+import 'data/repos/audit_repo.dart';
+import 'data/repos/camp_ledger_repo.dart';
+import 'data/repos/settings_repo.dart';
+import 'data/sync/auto_sync.dart';
+import 'features/auth/activation_lock_screen.dart';
+import 'features/auth/idle_lock_host.dart';
+import 'features/auth/key_recovery_screen.dart';
+import 'features/auth/login_screen.dart';
+import 'features/home/home_shell.dart';
+import 'core/security/device_activation.dart';
+import 'features/settings/device_activation_screen.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // نسخة التوزيع بلا مفتاح مالك تعمل بلا تفعيل على أي جهاز — لا تُشغَّل أبدًا.
+  // (الفحص المبكر قبل البناء: `dart run tool/check_release.dart`.)
+  if (kReleaseMode && !OwnerKey.isConfigured) {
+    throw StateError(
+      'نسخة الإصدار بُنيت بلا مفتاح مالك (OwnerKey.publicKey فارغ). '
+      'ولّد مفتاحًا بـ tool/make_owner_key.dart وأعد البناء.',
+    );
+  }
+  await boot();
+}
+
+/// فحص مفتاح القاعدة قبل فتحها: غائبٌ أو لا يُقرأ والقاعدة المشفّرة قائمة ⇒
+/// شاشة الاسترداد لا مفتاحٌ جديد (H-2). `null` ⇒ المفتاح جاهز (أو وُلِّد لتثبيتٍ
+/// جديد).
+Future<DbKeyMissing?> _keyPreflight() async {
+  try {
+    await DbCipher.loadKey(dbFile: await DbCipher.defaultFile());
+    return null;
+  } on DbKeyMissing catch (e) {
+    return e;
+  } on StateError catch (e) {
+    // مفتاحٌ محفوظٌ تالف (`loadKey` يرفض الكتابة فوقه): الاسترداد هو الطريق نفسه.
+    return DbKeyMissing(e.message, unreadable: true);
+  }
+}
+
+/// الإقلاع كاملًا — ويُعاد استدعاؤه بعد استرداد المفتاح من شاشة الاسترداد.
+Future<void> boot() async {
+  final keyProblem = await _keyPreflight();
+  if (keyProblem != null) {
+    if (ImdWindow.supported) {
+      await windowManager.ensureInitialized();
+      await windowManager.waitUntilReadyToShow(
+        WindowOptions(size: const Size(1000, 760), title: AppNames.title, center: true),
+        () async {
+          await windowManager.show();
+          await windowManager.focus();
+        },
+      );
+    }
+    runApp(KeyRecoveryApp(problem: keyProblem, onResolved: boot));
+    return;
+  }
+
+  final db = AppDatabase();
+  _wireErrorLogger(db);
+  ErrorLogger.installGlobalHandlers();
+  DomainDiagnostics.sink = ErrorLogger.log;
+  // «فرعٌ» هنا بمعنى: لا يُحدَّد عليه المالك محليًّا (M-15) — كل جهازٍ ليس إدارةً
+  // مفعَّلة ولا يحمل مفتاح المالك.
+  final auth = AuthService(db, isBranchDevice: () async => !await DeviceActivation(db).mayAssignOwner());
+  final restored = await auth.restoreSession();
+  await _cleanupPlainBackups(db);
+  // مفتاح القاعدة فوق DPAPI بشريحة TPM متى حُفظ ملف الاسترداد (لا يرمي).
+  if (Platform.isWindows) await KeyHardening(db).afterEscrow();
+  final identity = await SettingsRepo(db).identity();
+
+  if (ImdWindow.supported) {
+    // تظهر النافذة من البداية بوضعها الصحيح: بطاقة الدخول وحدها، أو الرئيسية
+    // مكبّرة بشريط عنوانها. (الجهاز الجديد يعرض بوابة التفعيل، وهي شاشة كاملة.)
+    final compact = restored == null && await auth.hasAnyUser();
+    await windowManager.ensureInitialized();
+    await windowManager.waitUntilReadyToShow(
+      WindowOptions(
+        size: compact ? ImdWindow.loginSize : const Size(1280, 820),
+        minimumSize: compact ? ImdWindow.loginSize : const Size(360, 600),
+        title: AppNames.title,
+        center: true,
+        titleBarStyle: compact ? TitleBarStyle.hidden : TitleBarStyle.normal,
+        windowButtonVisibility: !compact,
+      ),
+      () async {
+        if (compact) {
+          await ImdWindow.login();
+        } else {
+          await ImdWindow.main();
+        }
+        await windowManager.show();
+        await windowManager.focus();
+      },
+    );
+    await ImdWindow.syncMica(ImdTheme.parse(identity.themePref));
+  }
+
+  runApp(ImdadApp(
+    db: db,
+    auth: auth,
+    signedIn: restored != null,
+    themeMode: ImdTheme.parse(identity.themePref),
+    fontFamily: identity.fontFamily,
+  ));
+}
+
+/// يربط [ErrorLogger] بسجل التدقيق (للحرجة) وبإشعار المستخدم (SnackBar).
+void _wireErrorLogger(AppDatabase db) {
+  ErrorLogger.sink = (e) => AuditRepo(db).log(
+        action: 'error.critical',
+        entityType: 'نظام',
+        summary: '${e.source}: ${e.message.length > 160 ? '${e.message.substring(0, 160)}…' : e.message}',
+        details: {'source': e.source, 'type': e.type},
+      );
+  ErrorLogger.userNotifier = (message) {
+    final ctx = imdNavigatorKey.currentContext;
+    if (ctx != null && ctx.mounted) showImdToast(ctx, '⚠ $message', error: false);
+  };
+}
+
+/// تنظيف الإقلاع: نسخ `*.plain.bak` غير المشفّرة التي تركها الترحيل القديم تُحذف
+/// متى سلمت القاعدة المشفّرة، ويُسجَّل ذلك في سجل التدقيق. لا يمنع الإقلاع أبدًا.
+Future<void> _cleanupPlainBackups(AppDatabase db) async {
+  try {
+    final dir = await getApplicationSupportDirectory();
+    final file = File(p.join(dir.path, DbCipher.fileName));
+    final removed = DbCipher.removeStalePlainBackups(file, await DbCipher.loadKey(dbFile: file));
+    if (removed.isEmpty) return;
+    await AuditRepo(db).log(
+      action: 'db.cleanup_plain_backup',
+      entityType: 'قاعدة البيانات',
+      summary: 'حُذفت ${removed.length} نسخة غير مشفّرة قديمة (plain.bak) بعد التأكد من سلامة القاعدة المشفّرة',
+      details: {'files': [for (final f in removed) p.basename(f)]},
+      risk: AuditRepo.riskHigh,
+    );
+  } catch (e) {
+    debugPrint('تعذّر تنظيف النسخ غير المشفّرة: $e');
+  }
+}
+
+/// تفضيل السمة المحفوظ في شاشة الهوية — يطبَّق على التطبيق كله
+/// عبر `MaterialApp.themeMode`.
+class ImdTheme extends ChangeNotifier {
+  ImdTheme(this._mode, [String font = ImdFonts.defaultFamily])
+      : _font = ImdFonts.normalize(font);
+
+  ThemeMode _mode;
+  ThemeMode get mode => _mode;
+
+  String _font;
+
+  /// خط الواجهة المختار — يسري على التطبيق كله فور حفظه، بلا إعادة تشغيل.
+  String get font => _font;
+
+  void applyFont(String family) {
+    final next = ImdFonts.normalize(family);
+    if (next == _font) return;
+    _font = next;
+    notifyListeners();
+  }
+
+  static ThemeMode parse(String pref) => switch (pref) {
+        'light' => ThemeMode.light,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
+      };
+
+  void apply(String pref) {
+    final next = parse(pref);
+    if (next == _mode) return;
+    _mode = next;
+    notifyListeners();
+  }
+}
+
+class ImdadApp extends StatefulWidget {
+  const ImdadApp({
+    super.key,
+    required this.db,
+    required this.auth,
+    required this.signedIn,
+    this.themeMode = ThemeMode.system,
+    this.fontFamily = ImdFonts.defaultFamily,
+  });
+
+  final AppDatabase db;
+  final AuthService auth;
+  final bool signedIn;
+  final ThemeMode themeMode;
+  final String fontFamily;
+
+  @override
+  State<ImdadApp> createState() => _ImdadAppState();
+}
+
+class _ImdadAppState extends State<ImdadApp> with WindowListener {
+  late bool _signedIn = widget.signedIn;
+  late final ImdTheme _theme = ImdTheme(widget.themeMode, widget.fontFamily);
+
+  /// القفل التلقائي بعد الخمول — يعمل ما دام المستخدم مسجَّلًا.
+  late final IdleLock _idle = IdleLock(widget.db);
+
+  /// النسخ الاحتياطي المشفّر المجدول — يعمل في الخلفية ما دام التطبيق مفتوحًا.
+  late final BackupScheduler _backup = BackupScheduler(widget.db);
+
+  /// المزامنة التلقائية تبدأ مع التطبيق لا مع شاشة المزامنة: جهاز الفرع قد لا
+  /// يفتح تلك الشاشة شهرًا كاملًا، والمقصود أن يزامن بلا أن يفتحها أحد.
+  late final AutoSyncService _autoSync = AutoSyncService(widget.db);
+
+  /// سجلّ إجراءات الشاشة النشطة لاختصارات لوحة المفاتيح — انظر
+  /// [ImdScreenActions].
+  final _screenActions = ImdScreenActions();
+
+  /// فحصٌ دوري لقفل الجهاز (M-1): التفعيل ينتهي بمرور الوقت والإلغاء يصل
+  /// بالمزامنة، وكلاهما قد يحدث والمستخدم داخل.
+  Timer? _lockTimer;
+  static const Duration lockCheckEvery = Duration(minutes: 10);
+
+  @override
+  void initState() {
+    super.initState();
+    // تفضيلات الشكل (نمط كلاسيكي/كثافة) قبل أول إطار ما أمكن حتى لا يومض الشكل الآخر.
+    ImdStyle.load();
+    ImdDensity.load();
+    ImdSectionTheme.load();
+    // تنسيق الأرقام من القاعدة: معيارُ الجهة لا تفضيلُ جهاز، فيسبق أول رقمٍ
+    // يُرسم. وفشلُه يُبقي الافتراضات ولا يمنع الإقلاع.
+    SettingsRepo(widget.db).loadNumbers().catchError((_) {});
+    // الإعداد يُقرأ من القاعدة ثم تبدأ المراقبة إن كانت الجلسة مستعادة.
+    _idle.load().then((_) {
+      if (mounted && _signedIn) _idle.activate();
+    });
+    // بعد أول إطار: الإقلاع لا ينتظر الشبكة، وفشلها لا يمنع ظهور الواجهة.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_checkLock());
+      _lockTimer = Timer.periodic(lockCheckEvery, (_) => unawaited(_checkLock()));
+      _autoSync.addListener(_afterSync);
+      _autoSync.refresh();
+      _backup.start();
+      // تصفية الشهر المنقضي إن أُذن بها — تتحقق بنفسها من الإذن وانقضاء الشهر.
+      CampLedgerRepo(widget.db).autoSettleIfDue().catchError(
+            (_) => const SettlementResult(ok: false, error: ''),
+          );
+    });
+    // زر إغلاق النافذة لا يمرّ بـ `PopScope`، فيُعترض هنا ليُسأل عن التأكيد
+    // كما يُسأل زر الرجوع على الهاتف.
+    // ما يُنهى قبل الإغلاق: الجلسة، ومؤقّت المزامنة وخادمها ومقبس اكتشافها —
+    // على كل المنصات، فالخروج من أندرويد بزر الرجوع يمسح الجلسة أيضًا.
+    ImdWindow.onBeforeExit = _shutdown;
+    if (Platform.isWindows) {
+      windowManager.addListener(this);
+      // الإضافة غير مُهيّأة في بيئة الاختبار، فالفشل هنا لا يمنع التطبيق.
+      windowManager.setPreventClose(true).catchError((_) {});
+      // لون Mica يتبع السمة: فاتحٌ أو داكن.
+      _theme.addListener(_syncMica);
+    }
+  }
+
+  void _syncMica() => ImdWindow.syncMica(_theme.mode);
+
+  bool _wasSyncing = false;
+
+  /// بعد كل دورة مزامنة: قد تحمل قرار إلغاءٍ لهذا الجهاز.
+  void _afterSync() {
+    final running = _autoSync.isRunning;
+    if (_wasSyncing && !running) unawaited(_checkLock());
+    _wasSyncing = running;
+  }
+
+  /// جهازٌ صار مقفلًا والمستخدم داخل: تُغلق الجلسة فتعرض البوابة شاشة القفل.
+  Future<void> _checkLock() async {
+    if (!_signedIn) return;
+    final reason = await DeviceActivation(widget.db).lockReason();
+    if (reason == null || !mounted || !_signedIn) return;
+    await AuditRepo(widget.db).log(
+      action: 'device.locked',
+      entityType: 'جهاز',
+      summary: 'أُقفل الجهاز أثناء الجلسة — $reason',
+      risk: AuditRepo.riskHigh,
+    );
+    await _signOut();
+  }
+
+  /// تسجيل الخروج: من الشريط الرئيسي أو من غطاء القفل.
+  Future<void> _signOut() async {
+    _idle.deactivate();
+    await widget.auth.logout();
+    if (mounted) setState(() => _signedIn = false);
+    await ImdWindow.login();
+  }
+
+  @override
+  void dispose() {
+    if (Platform.isWindows) {
+      windowManager.removeListener(this);
+      _theme.removeListener(_syncMica);
+    }
+    _lockTimer?.cancel();
+    _autoSync.removeListener(_afterSync);
+    _autoSync.dispose();
+    _idle.dispose();
+    _backup.dispose();
+    super.dispose();
+  }
+
+  /// إنهاء ما يُبقي العملية حيّةً بعد إغلاق النافذة.
+  ///
+  /// خادم المزامنة يستمع على منفذ، ومقبس الاكتشاف على آخر، ومؤقّتها يدور.
+  /// هدمُ النافذة وحده يترك هذه قائمةً فتتأخّر نهاية العملية ثوانيَ تبدو
+  /// تعليقًا. وكلٌّ منها يُنهى على حدة فلا يمنع تعثّرُ واحدٍ إنهاءَ الباقي.
+  ///
+  /// والجلسة تُمسح كذلك: الخروج الصريح (زر الإغلاق أو «خروج») ينهي الجلسة،
+  /// فيُطلب الدخول عند فتح التطبيق من جديد. كانت الجلسة تبقى 12 ساعة فيدخل
+  /// التطبيق بلا كلمة مرور بعد الإغلاق.
+  Future<void> _shutdown() async {
+    await Future.wait([
+      _autoSync.shutdown().catchError((_) {}),
+      widget.auth.logout().catchError((_) {}),
+    ]);
+  }
+
+  @override
+  void onWindowClose() async {
+    if (!await windowManager.isPreventClose()) return;
+    final context = imdNavigatorKey.currentContext;
+    if (context == null || !context.mounted) {
+      await ImdWindow.exit();
+      return;
+    }
+    if (await imdConfirm(context, 'إغلاق النظام؟', ok: 'خروج')) {
+      await ImdWindow.exit();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        Provider<AppDatabase>.value(value: widget.db),
+        Provider<AuthService>.value(value: widget.auth),
+        Provider<ImdScreenActions>.value(value: _screenActions),
+        ChangeNotifierProvider<ImdTheme>.value(value: _theme),
+        ChangeNotifierProvider<AutoSyncService>.value(value: _autoSync),
+        ChangeNotifierProvider<IdleLock>.value(value: _idle),
+        ChangeNotifierProvider<BackupScheduler>.value(value: _backup),
+      ],
+      child: Consumer<ImdTheme>(
+        builder: (context, theme, _) => MaterialApp(
+        // تحتاجه نافذة معاينة الطباعة (تُفتح من طبقة الطباعة بلا سياق).
+        navigatorKey: imdNavigatorKey,
+        title: AppNames.title,
+        debugShowCheckedModeBanner: false,
+        // الخط المختار في الفاتح والداكن والكلاسيكي سواء: كان الكلاسيكي يُبنى بـTahoma
+        // وليس من خطوط التطبيق فيسقط إلى الافتراضي، فيختلف خط الفاتح عن الداكن.
+        theme: ImdStyle.classic ? AppTheme.classic(font: theme.font) : AppTheme.light(font: theme.font),
+        darkTheme: AppTheme.dark(font: theme.font),
+        themeMode: theme.mode,
+        // بلا تدرّجٍ بين السمتين: التدرّج يعيد بناء الشجرة كلها (كل التبويبات
+        // الحيّة في القسمين) في كل إطارٍ من ٢٠٠ مللي ثانية فيتقطّع ويتأخر.
+        themeAnimationDuration: Duration.zero,
+        locale: const Locale('ar'),
+        supportedLocales: const [Locale('ar'), Locale('en')],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        builder: (context, child) {
+          final content = child ?? const SizedBox.shrink();
+          // بعد تسجيل الدخول: رصد الخمول وغطاء القفل فوق كل شيء (حتى الحوارات).
+          final locked = _signedIn
+              ? IdleLockHost(lock: _idle, auth: widget.auth, onSignOut: _signOut, child: content)
+              : content;
+          // الأسهم وPage Up/Down تمرّر ما تحت آخر نقرة (سطح المكتب) — فوق كل
+          // الصفحات والحوارات ومعاينة الطباعة.
+          final body = ImdShortcuts.supported ? ImdKeyScroll(child: locked) : locked;
+          return MediaQuery(
+            data: imdClampedMediaQuery(MediaQuery.of(context)),
+            child: Directionality(
+            textDirection: TextDirection.rtl,
+            child: ImdShortcuts.supported
+                ? CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(LogicalKeyboardKey.keyS, control: true): () =>
+                          context.read<ImdScreenActions>().onSave?.call(),
+                      const SingleActivator(LogicalKeyboardKey.keyP, control: true): () =>
+                          context.read<ImdScreenActions>().onPrint?.call(),
+                      const SingleActivator(LogicalKeyboardKey.keyN, control: true): () =>
+                          context.read<ImdScreenActions>().onNewDoc?.call(),
+                      const SingleActivator(LogicalKeyboardKey.f5): () =>
+                          context.read<ImdScreenActions>().onRefresh?.call(),
+                      // البحث العام: يسجّله الإطار لا الشاشة، فلا يعمل قبل الدخول.
+                      const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
+                          context.read<ImdScreenActions>().onSearch?.call(),
+                    },
+                    child: Focus(autofocus: true, child: body),
+                  )
+                : body,
+          ));
+        },
+        home: _signedIn
+            ? HomeShell(onSignOut: _signOut)
+            : _DeviceGate(
+                db: widget.db,
+                auth: widget.auth,
+                onSignedIn: () async {
+                  await ImdWindow.main();
+                  _idle.activate();
+                  if (mounted) setState(() => _signedIn = true);
+                },
+              ),
+        ),
+      ),
+    );
+  }
+}
+
+/// بوابة الجهاز قبل تسجيل الدخول.
+///
+/// **جهاز جديد بلا حسابات** لا يُستعمل إلا بعد تفعيله برمز موقَّع من الإدارة،
+/// ثم يجلب الحسابات بالمزامنة — فلا ينشئ أحد لنفسه حسابًا في فرع.
+///
+/// **الأجهزة العاملة اليوم لا تُمسّ**: وجود حسابات يعني جهازًا قيد الخدمة، فلا
+/// يُقفل بأثر رجعي عند التحديث. المدير يفعّله لاحقًا من الإعدادات.
+/// وجهة البوابة — مستخرَجة لتُختبر بلا واجهة.
+enum GateTarget { activation, login }
+
+/// القرار: هل على الجهاز حساب واحد على الأقل؟ إن كان فشاشة الدخول، وإلا فالبوابة.
+///
+/// [fresh] تعني **لا حساب على الجهاز إطلاقًا** (`AuthService.hasAnyUser`)، لا
+/// «لا حساب محلي». جهاز الفرع يستقبل حساباته بالمزامنة بمعرّفات ليست `local-`،
+/// فلو قِيس بالحسابات المحلية وحدها لبقي «جديدًا» بعد أن صارت عنده حسابات.
+///
+/// ولماذا لا يخرج الجهاز الجديد إلى شاشة الدخول بمجرد قبول رمزه: لأن قبول
+/// الرمز لا يُنشئ حسابًا. جهاز الإدارة ينشئ حساب مديره من لوحة «تهيئة جهاز
+/// الإدارة» داخل البوابة نفسها، وجهاز الفرع ينتظر المزامنة. إخراجه قبل ذلك
+/// يضعه أمام شاشة دخول لا حساب خلفها، فيرد عليه النظام «اسم المستخدم أو كلمة
+/// المرور غير صحيحة» مهما كتب — وهي رسالة كاذبة، فلا حساب أصلًا ليخطئ فيه.
+GateTarget gateFor({required bool fresh}) =>
+    fresh ? GateTarget.activation : GateTarget.login;
+
+class _DeviceGate extends StatefulWidget {
+  const _DeviceGate({required this.db, required this.auth, required this.onSignedIn});
+
+  final AppDatabase db;
+  final AuthService auth;
+  final VoidCallback onSignedIn;
+
+  @override
+  State<_DeviceGate> createState() => _DeviceGateState();
+}
+
+class _DeviceGateState extends State<_DeviceGate> {
+  bool _loading = true;
+  bool _fresh = false; // لا حسابات على هذا الجهاز إطلاقًا
+
+  /// سبب قفل الجهاز (انتهى تفعيله أو أُلغي)، أو `null` (M-1).
+  String? _lock;
+
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  Future<void> _check() async {
+    final fresh = !await widget.auth.hasAnyUser();
+    final lock = fresh ? null : await DeviceActivation(widget.db).lockReason();
+    if (!mounted) return;
+    setState(() {
+      _fresh = fresh;
+      _lock = lock;
+      _loading = false;
+    });
+    if (lock != null) {
+      await ImdWindow.main();
+      return;
+    }
+    // بوابة التفعيل شاشة كاملة؛ الدخول نافذة صغيرة بمقاس بطاقته.
+    if (gateFor(fresh: fresh) == GateTarget.activation) {
+      await ImdWindow.main();
+    } else {
+      await ImdWindow.login();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    final lock = _lock;
+    if (lock != null) {
+      return ActivationLockScreen(db: widget.db, reason: lock, onUnlocked: _check);
+    }
+    if (gateFor(fresh: _fresh) == GateTarget.activation) {
+      return Scaffold(
+        body: DeviceActivationScreen(standalone: true, onActivated: _check),
+      );
+    }
+    return LoginScreen(onSignedIn: widget.onSignedIn);
+  }
+}
+// ==================== END FILE: lib/main.dart ====================
+
+// ==================== FILE: lib/features/home/home_shell.dart ====================
+import 'dart:async';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:intl/intl.dart';
+
+import '../../core/error_log.dart';
+import '../../core/security/auth_service.dart';
+import '../auth/change_password_dialog.dart';
+import '../../data/db/app_database.dart';
+import '../../data/repos/reports_repo.dart' show ReportId;
+import '../../data/repos/settings_repo.dart';
+import '../../main.dart' show ImdTheme;
+import '../../core/ui/imd_empty_state.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/theme/app_theme.dart';
+import '../../core/ui/imd_density.dart';
+import '../../core/ui/imd_section_theme.dart';
+import '../../core/ui/imd_fonts.dart';
+import '../../core/ui/imd_menu_bar.dart';
+import '../../core/ui/imd_page_dirty.dart';
+import '../../core/ui/imd_page_tabs.dart';
+import '../../core/ui/imd_screen_actions.dart';
+import '../../core/ui/imd_status_bar.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../core/ui/imd_window.dart';
+import '../../core/ui/imd_context_menu.dart';
+import '../../core/ui/imd_widgets.dart';
+import '../../domain/access_control.dart';
+import '../../domain/app_space.dart';
+import '../../domain/menu_doors.dart';
+import '../../domain/section_block.dart';
+import '../../data/sync/auto_sync.dart';
+import '../search/search_modal.dart';
+import 'space_chooser_screen.dart';
+import '../fuel/fuel_allocations_screen.dart';
+import '../fuel/fuel_consumption_screen.dart';
+import '../fuel/fuel_daily_report_screen.dart';
+import '../fuel/fuel_directories_screen.dart';
+import '../fuel/fuel_groups.dart';
+import '../fuel/fuel_ledger_screen.dart';
+import '../fuel/fuel_official_report_screen.dart';
+import '../fuel/fuel_vehicles_screen.dart';
+import 'supply_groups.dart';
+import '../fuel/fuel_settings_screen.dart';
+import '../fuel/fuel_dashboard_screen.dart';
+import '../fuel/fuel_moves_screen.dart';
+import '../fuel/fuel_stocktake_screen.dart';
+import '../daily/meal_dispatch_screen.dart';
+import '../daily/meal_plan_screen.dart';
+import '../daily/kitchen_log_screen.dart';
+import '../daily/ratios_screen.dart';
+import '../daily/strength_screen.dart';
+import 'notification_bell.dart';
+import '../alerts/stock_alerts_screen.dart';
+import '../linkages/linkages_screen.dart';
+import '../cables/cables_screen.dart';
+import '../linkages/personnel_screen.dart';
+import '../archive/electronic_archive_screen.dart';
+import '../catalog/assets_screen.dart';
+import '../catalog/items_screen.dart';
+import '../catalog/kitchens_screen.dart';
+import '../catalog/suppliers_screen.dart';
+import '../catalog/units_screen.dart';
+import '../catalog/warehouses_screen.dart';
+import '../inventory/destruction_screen.dart';
+import '../inventory/issue_screen.dart';
+import '../inventory/opening_screen.dart';
+import '../inventory/pending_screen.dart';
+import '../inventory/ration_order_screen.dart';
+import '../inventory/receive_screen.dart';
+import '../inventory/returns_screen.dart';
+import '../inventory/transfer_screen.dart';
+import '../reports/balances_screen.dart';
+import '../reports/reports_center_screen.dart';
+import '../settings/settings_screen.dart';
+import '../stocktake/stocktake_screen.dart';
+import 'dashboard_screen.dart';
+
+part 'shell/home_shell_menu.dart';
+part 'shell/home_shell_topbar.dart';
+part 'shell/home_shell_sidebar.dart';
+part 'shell/home_shell_bottom_nav.dart';
+part 'shell/home_shell_placeholders.dart';
+
+
+/// التنقل بين الشاشات من داخل أي شاشة.
+class ImdNav {
+  ImdNav(this._go, this._current);
+  final void Function(String page) _go;
+  final String Function() _current;
+
+  void go(String page) => _go(page);
+  String get current => _current();
+
+  static ImdNav of(BuildContext context) => context.read<ImdNav>();
+}
+
+/// معرّفات الصفحات التي صارت أقسامًا داخل الإعدادات ← القسم الذي تُفتح عليه.
+/// معرّفاتٌ لا بند لها في القائمة: تفتح **بند القائمة نفسه** لا نسخةً ثانية من
+/// شاشته ولا شكلًا قديمًا منها — لكل شاشةٍ بابٌ واحد (قرار المالك 2026-10-25).
+/// التنبيهات والبحث وروابط التخزين القديمة تمرّ بها.
+const kPageAliases = <String, String>{
+  // تبويبات «حساب المعسكر والاستحقاق».
+  'campLedger': 'campAccounts',
+  'campSettlement': 'campAccounts',
+  'actualEntitlement': 'campAccounts',
+  // تبويبات «الرقابة والتدقيق».
+  'auditTrail': 'supplyAudit',
+  'activityIntel': 'supplyAudit',
+  'sensitiveOps': 'supplyAudit',
+  'executiveCmd': 'supplyAudit',
+  'healthOps': 'supplyAudit',
+  // أقسام الإعدادات.
+  'branding': 'settings',
+  'formsDesigner': 'settings',
+  'deviceActivation': 'settings',
+  'verifySign': 'settings',
+  'lanSync': 'settings',
+  'usersAccess': 'settings',
+  // «مركز التقارير» القديم بقائمته الجانبية، والجرد بتبويباته، والأبواب القديمة.
+  'reports': 'reportMoves',
+  'supplyReports': 'reportMoves',
+  'stocktake': 'stocktakeHistory',
+  'supplyMoves': 'receive',
+  'supplyOrders': 'rationOrders',
+  'supplyData': 'items',
+  'supplyDaily': 'feeding',
+  'dailyOperations': 'mealPlans',
+  'fuelMoves': 'fuelIssue',
+  'fuelData': 'fuelWarehouses',
+};
+
+const kSettingsSections = <String, String>{
+  'branding': 'company',
+  'formsDesigner': 'forms',
+  'deviceActivation': 'devices',
+  'verifySign': 'verify',
+  'lanSync': 'sync',
+  'usersAccess': 'users',
+};
+
+/// عتبات القشرة الثلاث.
+///
+/// **الشاشة الواحدة تعمل على شاشتين مختلفتين تمامًا**: حاسبُ الشعبة وجهازُ
+/// أمين المستودع في يده. والفرق ليس في الحجم وحده — على الحاسب فأرةٌ ووقت،
+/// وفي اليد إبهامٌ وعجلة.
+class _Shell {
+  const _Shell._();
+
+  /// فوقها شريطٌ جانبيّ كامل بأقسامه وأسمائه.
+  static const double wide = 1150;
+
+  /// بينها و[wide] شريطٌ ضيّق بالأيقونات وحدها: ٢٩٠ بكسل تأكل ثلث لوحيّ
+  /// عرضه ألف، وسبعون منها تكفي للتنقّل.
+  static const double rail = 900;
+}
+
+/// حالة تبويبات قسمٍ واحد — انظر [_HomeShellState._spaces].
+class _SpaceState {
+  _SpaceState(String space) : openSec = space == AppSpace.fuel ? 'fuelMoves' : 'basic';
+
+  String page = 'dash';
+  final List<String> open = ['dash'];
+  final Map<String, int> gen = {};
+  final Map<String, ImdRecordSink> sinks = {};
+
+  /// خانة إجراءات (Ctrl+S…) لكل صفحة مفتوحة — انظر [ImdScreenActions.delegate].
+  final Map<String, ImdScreenActions> actions = {};
+  final Set<String> stale = {};
+
+  /// علامة «عدّل المستخدم شيئًا» لكل صفحةٍ مفتوحة ([ImdPageDirty]).
+  final Map<String, ImdDirtyFlag> dirty = {};
+  String? openSec;
+}
+
+/// الهيكل الرئيسي بعد الدخول:
+/// شريط علوي، قائمة جانبية داكنة بأقسام قابلة للطي (قسم واحد مفتوح)، ومنطقة المحتوى.
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key, required this.onSignOut});
+
+  final Future<void> Function() onSignOut;
+
+  @override
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
+  /// حالة كل قسم (الإمداد/المحروقات) على حدة: تبويباته المفتوحة وصفحته الظاهرة
+  /// وأرقام تحديثه وتنبيهات تقادمه. **القسمان يحيَيان معًا**: التبديل بينهما
+  /// يُخفي أحدهما ولا يهدمه، فيعود كل قسمٍ بتبويباته وما في صفحاته من إدخال.
+  final Map<String, _SpaceState> _spaces = {};
+
+  _SpaceState _stateOf(String space) => _spaces.putIfAbsent(space, () => _SpaceState(space));
+
+  /// حالة القسم الظاهر.
+  _SpaceState get _st => _stateOf(_space ?? AppSpace.supply);
+
+  /// الصفحة الظاهرة في القسم الظاهر.
+  String get _page => _st.page;
+  set _page(String v) => _st.page = v;
+
+  /// الصفحات المفتوحة بحالتها (تبويبات سطح المكتب) في القسم الظاهر.
+  ///
+  /// **لماذا تبقى حيّةً:** التنقّل بين الشاشات كان يهدم السابقة (`ValueKey(_page)`)
+  /// فيضيع سندٌ نصف مملوء بمجرد نظرةٍ إلى الأرصدة. الآن تبقى مبنيّةً مخفيّة
+  /// ([ImdPageHost]) وتعود كما تُركت.
+  List<String> get _open => _st.open;
+
+  /// أقصى صفحاتٍ مفتوحة في كل قسم: كل واحدةٍ تحمل حالتها وبياناتها في الذاكرة.
+  static const int _maxOpen = 8;
+
+  /// رقم إعادة بناء كل صفحة — زيادته تُنشئ الصفحة من جديد (تحديث).
+  Map<String, int> get _gen => _st.gen;
+
+  /// عدّاد سجلات كل صفحة مفتوحة لشريط الحالة.
+  Map<String, ImdRecordSink> get _sinks => _st.sinks;
+
+  /// صفحاتٌ مخفيّة تغيّرت البيانات بعد إخفائها.
+  Set<String> get _stale => _st.stale;
+  Map<String, ImdDirtyFlag> get _dirty => _st.dirty;
+  StreamSubscription<Object?>? _dbSub;
+
+  /// آخر قياسٍ للقشرة — يقرّره البناء، ويقرؤه التنقّل لتقييد عدد الصفحات.
+  bool _handheld = false;
+
+  String? get _openSec => _st.openSec;
+  set _openSec(String? v) => _st.openSec = v;
+
+  // سمة المحروقات تُبنى مرةً لكل (سطوع، خط): بناؤها في كل إطار يعيد اشتقاق
+  // لوحة ألوان Material كاملة.
+  ThemeData? _fuelTheme;
+  bool? _fuelDark;
+  String? _fuelFont;
+
+  /// سمة القسم: الإمداد هو سمة التطبيق نفسها. والمحروقات تتبعه افتراضًا —
+  /// تطبيقٌ واحدٌ بهويّةٍ واحدة — إلا أن يُطلب تمييزه بلوحته البرتقالية من
+  /// الإعدادات ([ImdSectionTheme.distinctFuel]).
+  ThemeData _themeFor(BuildContext context, String space) {
+    final base = Theme.of(context);
+    if (space != AppSpace.fuel || !ImdSectionTheme.distinctFuel) return base;
+    final dark = base.brightness == Brightness.dark;
+    final font = base.textTheme.bodyMedium?.fontFamily ?? ImdFonts.defaultFamily;
+    if (_fuelTheme == null || _fuelDark != dark || _fuelFont != font) {
+      _fuelTheme = AppTheme.fuelSection(dark: dark, font: font);
+      _fuelDark = dark;
+      _fuelFont = font;
+    }
+    return _fuelTheme!;
+  }
+
+  static const double _sideMin = 220;
+  static const double _sideMax = 420;
+  static const String _sideKey = 'imdad.sideWidth';
+  double _sideWidth = ImdSizes.sideWidth;
+
+  Future<void> _loadSideWidth() async {
+    final prefs = await SharedPreferences.getInstance();
+    final w = prefs.getDouble(_sideKey);
+    final collapsed = prefs.getBool(_collapsedKey);
+    if (!mounted) return;
+    setState(() {
+      if (w != null) _sideWidth = w.clamp(_sideMin, _sideMax);
+      _userCollapsed = collapsed;
+    });
+  }
+
+  /// طيّ القائمة الجانبية يدويًّا: `null` = تلقائي (شريط أيقونات بين 900 و1150، وقائمةٌ
+  /// كاملة فوقها)، و`true`/`false` = اختيار المستخدم يسري على كل العروض فوق 900.
+  static const String _collapsedKey = 'imdad.sideCollapsed';
+  bool? _userCollapsed;
+
+  Future<void> _setCollapsed(bool v) async {
+    setState(() => _userCollapsed = v);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_collapsedKey, v);
+    } catch (_) {
+      // تفضيل شكلٍ فقط: فشل حفظه لا يمنع الطيّ في هذه الجلسة.
+    }
+  }
+
+  Future<void> _saveSideWidth() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_sideKey, _sideWidth);
+  }
+
+  /// مساحة العمل الحالية — `null` تعني أن المستخدم يملك الاثنتين ولم يختر.
+  String? _space;
+  bool _spaceReady = false;
+  Timer? _sessionTimer;
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+  late final ImdNav _nav = ImdNav(_go, () => _page);
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // فحص دوري: الجلسة 12 ساعة، ووقف الحساب يُنهي الجلسة فورًا.
+    _sessionTimer =
+        Timer.periodic(const Duration(minutes: 5), (_) => _checkSession());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreSpace());
+    _loadSideWidth();
+    ImdDensity.load();
+    _watchData();
+    // دور المستخدم أو حجب أقسامه تغيّر (مزامنة): تُعاد الواجهة فيسري فورًا.
+    _userVersion = context.read<AuthService>().userVersion..addListener(_onUserChanged);
+    // البحث العام (Ctrl+K): إجراءُ الإطار — يفتح أي شاشةٍ فلا تملكه شاشةٌ
+    // واحدة. يُسجَّل هنا مرةً، فلا يعمل الاختصار قبل الدخول.
+    _actions = ImdScreenActions.maybeOf(context)?..onSearch = _openSearch;
+  }
+
+  ImdScreenActions? _actions;
+
+  /// خانة الصفحة [p]؛ والظاهرة منها تصير مندوب الجذر فتصلها الاختصارات.
+  ImdScreenActions _slot(_SpaceState st, String p, bool visible) {
+    final slot = st.actions.putIfAbsent(p, ImdScreenActions.new);
+    if (visible) _actions?.delegate = slot;
+    return slot;
+  }
+
+  void _openSearch() => showSearchModal(context, onOpenPage: _go);
+
+  late final ValueNotifier<int> _userVersion;
+
+  void _onUserChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// أي كتابةٍ في القاعدة (من هذه الشاشات أو من المزامنة) تجعل الصفحات
+  /// **المخفيّة** مشتبهةً بالتقادم؛ الظاهرة هي مصدر الكتابة فلا تُعلَّم.
+  void _watchData() {
+    final db = context.read<AppDatabase>();
+    _dbSub = db.tableUpdates().listen((_) {
+      if (!mounted) return;
+      final current = _space ?? AppSpace.supply;
+      var changed = false;
+      for (final e in _spaces.entries) {
+        for (final p in e.value.open) {
+          // الظاهر هو مصدر الكتابة؛ وكل ما عداه (حتى صفحات القسم الآخر) مشتبهٌ به.
+          if (e.key == current && p == e.value.page) continue;
+          changed = e.value.stale.add(p) || changed;
+        }
+      }
+      if (changed) setState(() {});
+    });
+  }
+
+  ImdRecordSink _sinkOf(String page) => _sinks.putIfAbsent(page, ImdRecordSink.new);
+
+  /// يُسقط صفحةً مفتوحة بحالتها كلّها.
+  void _drop(String page) {
+    final slot = _st.actions.remove(page);
+    if (slot != null && identical(_actions?.delegate, slot)) _actions?.delegate = null;
+    _open.remove(page);
+    _openHint.remove(page);
+    _stale.remove(page);
+    _dirty.remove(page);
+    _gen.remove(page);
+    // يُتخلَّص منه بعد الإطار: جداول الصفحة المهدومة ما زالت تُبلّغ عنه حتى تُفكَّك.
+    final sink = _sinks.remove(page);
+    if (sink != null) WidgetsBinding.instance.addPostFrameCallback((_) => sink.dispose());
+  }
+
+  void _closePage(String page) {
+    if (_open.length <= 1) return;
+    setState(() {
+      final i = _open.indexOf(page);
+      _drop(page);
+      if (page == _page) _page = _open[i.clamp(0, _open.length - 1)];
+    });
+  }
+
+  void _closeOthers(String keep) => setState(() {
+        for (final p in List.of(_open)) {
+          if (p != keep) _drop(p);
+        }
+        _page = keep;
+      });
+
+  /// العودة إلى صفحةٍ مخفيّة تغيّرت بياناتها: تُعاد بناءً صامتًا **إن لم يعدّل
+  /// المستخدم فيها شيئًا**. المعدَّلة تبقى كما تُركت (سندٌ نصف مملوء، تبويبات
+  /// سنداتٍ معلّقة) ونقطتها على التبويب تقول إن بياناتها قد تكون قديمة.
+  ///
+  /// يُستدعى داخل `setState`.
+  static void _reenter(_SpaceState st, String page) {
+    if (!st.stale.contains(page)) return;
+    if (st.dirty[page]?.dirty ?? false) return;
+    st.gen[page] = (st.gen[page] ?? 0) + 1;
+    st.stale.remove(page);
+  }
+
+  static String _titleOf(String page) {
+    if (_canonical(page) == 'dash') return 'الرئيسية';
+    final id = _menuPageOf(page);
+    for (final sec in _menu) {
+      for (final it in sec.items) {
+        if (it.id == id) return it.name;
+      }
+    }
+    return page;
+  }
+
+  static String? _iconOf(String page) {
+    if (_canonical(page) == 'dash') return 'home';
+    final id = _menuPageOf(page);
+    for (final sec in _menu) {
+      for (final it in sec.items) {
+        if (it.id == id) return it.icon;
+      }
+    }
+    return null;
+  }
+
+  /// مفتاح الاختيار لكل مستخدم على حدة: جهازٌ يتشاركه أمين المستودع وأمين
+  /// المحروقات لا يفرض اختيار أحدهما على الآخر.
+  String _spaceKey(AuthService auth) =>
+      'imdad.space.${auth.currentUser?.id ?? ''}';
+
+  Future<void> _restoreSpace() async {
+    final auth = context.read<AuthService>();
+    final available = AppSpace.availableFor((p) => _hasPerm(auth, p));
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_spaceKey(auth));
+    if (!mounted) return;
+    setState(() {
+      _space = AppSpace.resolve(available: available, saved: saved);
+      _spaceReady = true;
+    });
+  }
+
+  Future<void> _pickSpace(String space) async {
+    final key = _spaceKey(context.read<AuthService>());
+    // التبديل أولًا ثم الحفظ: كان ينتظر كتابة التفضيل في ملفّه قبل أن يتبدّل القسم.
+    // لا تُصفَّر الحالة: العودة إلى قسمٍ زاره المستخدم تُظهر تبويباته كما تركها.
+    setState(() {
+      _space = space;
+      _reenter(_stateOf(space), _stateOf(space).page);
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(key, space);
+  }
+
+  /// يبدّل إلى القسم التالي مباشرةً (دون شاشة الاختيار) ويحفظ اختياره. القسم
+  /// الذي غادره يبقى حيًّا بتبويباته وبياناته.
+  Future<void> _switchSpace() async {
+    final auth = context.read<AuthService>();
+    final available = AppSpace.availableFor((p) => _hasPerm(auth, p));
+    if (available.length < 2) return;
+    final current = _space ?? available.first;
+    final next = available[(available.indexOf(current) + 1) % available.length];
+    await _pickSpace(next);
+  }
+
+  @override
+  void dispose() {
+    _actions?.onSearch = null;
+    _sessionTimer?.cancel();
+    _dbSub?.cancel();
+    // المرجع محفوظ منذ initState: القراءة من السياق أثناء dispose غير آمنة.
+    _userVersion.removeListener(_onUserChanged);
+    for (final st in _spaces.values) {
+      for (final s in st.sinks.values) {
+        s.dispose();
+      }
+    }
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkSession();
+  }
+
+  Future<void> _checkSession() async {
+    final auth = context.read<AuthService>();
+    if (!await auth.sessionExpired()) return;
+    if (!mounted) return;
+    showImdToast(context, 'انتهت مدة الجلسة — سجّل الدخول من جديد');
+    await widget.onSignOut();
+  }
+
+  /// صفحات تُفتح باسمٍ آخر. «لوحة المحروقات» هي «الرئيسية» في قسم المحروقات
+  /// (`_pageBody('dash', fuel)`)، فلا تُفتح تبويبةً مستقلة باسمها الكودي.
+  static String _canonical(String page) => page == 'fuelDashboard' ? 'dash' : (kPageAliases[page] ?? page);
+
+  /// التبويبة التي يُفتح عليها بابٌ جاء من معرّفٍ قديم (تنبيه أو بحث)، حتى يُغلق.
+  final _openHint = <String, String>{};
+
+  void _go(String page) {
+    final asked = page;
+    page = _canonical(page);
+    setState(() {
+      if (asked != page && !_open.contains(page)) _openHint[page] = asked;
+      if (!_open.contains(page)) {
+        _open.add(page);
+        // الجوال صفحةٌ واحدة كما كان: لا شريط تبويبات يتيح العودة لما أُخفي.
+        final cap = _handheld ? 1 : _maxOpen;
+        while (_open.length > cap) {
+          _drop(_open.firstWhere((p) => p != page));
+        }
+      }
+      _page = page;
+      _reenter(_st, page);
+    });
+    // يُغلق الدرج نفسه لا «أعلى مسار»: `Navigator.pop` كانت تغلق أي حوارٍ
+    // مفتوح فوق الشاشة بدل الدرج.
+    _scaffoldKey.currentState?.closeEndDrawer();
+  }
+
+  bool _isAdmin(AuthService auth) => UserRole.isAdmin(auth.currentUser?.role);
+
+  /// صفحات بلا صلاحية خاصة بها تتبع صلاحية صفحة أخرى، فلا يلزم تعديل الأدوار.
+  static const _permPage = {
+    'lanSync': SysPerm.sync,
+    'stockAlerts': 'balances',
+    // بنود الحركة الأربعة شاشةٌ واحدة بتبويبات، فصلاحيتها واحدة.
+    'fuelIssue': 'fuelMoves',
+    'fuelSupply': 'fuelMoves',
+    'fuelTransfer': 'fuelMoves',
+    'fuelOpening': 'fuelMoves',
+    // والتقارير الستة تحت صلاحية التقارير، عدا الاستهلاك فله صلاحيته.
+    'fuelDaily': 'fuelReports',
+    'fuelOfficial': 'fuelReports',
+    'fuelStocks': 'fuelReports',
+    'fuelLedger': 'fuelReports',
+    'fuelPlanVsIssued': 'fuelReports',
+    // بنود إدارة الجرد الخمسة شاشةٌ واحدة بتبويبات داخلية، فصلاحيتها واحدة.
+    'stocktakeCreate': 'stocktake',
+    'stocktakeCount': 'stocktake',
+    'stocktakeAnalysis': 'stocktake',
+    'stocktakeSettle': 'stocktake',
+    'stocktakeHistory': 'stocktake',
+    // أربعة من تقارير «مركز التقارير» فُكِّكت إلى بنودٍ مباشرة؛ صلاحيتها صلاحية
+    // المركز نفسه — الفلترة بين التقارير تنظيمٌ للقائمة لا توسيعٌ للأذونات.
+    'reportMoves': 'reports',
+    'reportUnitAccount': 'reports',
+    'reportStock': 'reports',
+    'reportConsumption': 'reports',
+    'reportStrength': 'reports',
+    'reportKitchen': 'reports',
+    'reportSupplier': 'reports',
+    'reportReturns': 'reports',
+    'reportDaily': 'reports',
+    'reportMealDispatch': 'reports',
+    // صرف الوجبات سند صرفٍ للمطبخ: صلاحيته صلاحية الصرف نفسها (والتنفيذ «اعتماد»).
+    'mealDispatch': 'issue',
+    // شاشتا المالية والتسليح صلاحيتهما صلاحية «الارتباطات» نفسها.
+    'linkFinances': 'linkages',
+    'linkArmament': 'linkages',
+  };
+
+  /// هل قسم العمل [space] (`supply`/`fuel`) محجوبٌ عن المستخدم الحالي؟
+  bool _spaceBlocked(AuthService auth, String space) {
+    final u = auth.currentUser;
+    if (u == null) return false;
+    return SectionBlock.blocksSection(role: u.role, blockedJson: u.sectionBlocked, section: space);
+  }
+
+  bool _homeAllowed(AuthService auth, String space) =>
+      !_spaceBlocked(auth, space) && (space != AppSpace.fuel || _hasPerm(auth, 'fuelDashboard'));
+
+  bool _hasPerm(AuthService auth, String page,
+      [String action = PermAction.view]) {
+    // الحجب أولًا وعلى **هوية الصفحة الأصلية**: التطبيع التالي قد يحوّلها إلى
+    // صلاحيةٍ لا تُنبئ بقسمها (`lanSync` ← `sys.sync`).
+    final blockedUser = auth.currentUser;
+    if (blockedUser != null &&
+        SectionBlock.blocksPage(role: blockedUser.role, blockedJson: blockedUser.sectionBlocked, page: page)) {
+      return false;
+    }
+    page = _permPage[page] ?? page;
+    // بابٌ بتبويبات يُفتح لمن ملك إحداها، والتبويبات تُخفي ما لا يملك —
+    // فالجمع تنظيمٌ للقائمة لا توسيعٌ للأذونات.
+    if (kMenuDoors.containsKey(page)) {
+      return menuDoorAllows(page, (p) => _hasPerm(auth, p, action));
+    }
+    final user = auth.currentUser;
+    if (user == null) return false;
+    final perms = auth.permissionsOf(user).map(
+          (k, v) => MapEntry(
+              k, (v as Map).map((a, b) => MapEntry(a.toString(), b == true))),
+        );
+    return AccessControl.can(
+        isAdmin: _isAdmin(auth),
+        isOwner: UserRole.isOwner(user.role),
+        permissions: perms,
+        page: page,
+        action: action);
+  }
+
+  Widget _pageBody(String page, String space) {
+    switch (page) {
+      case 'dash':
+        // «الرئيسية» تتبع القسم: لوحة الإمداد في مكانها، ولوحة المحروقات في
+        // مكانها — ولا يرى صاحب قسمٍ لوحةَ القسم الآخر.
+        return space == AppSpace.fuel
+            ? const FuelDashboardScreen()
+            : const DashboardScreen();
+      case 'items':
+        return const ItemsScreen();
+      case 'suppliers':
+        return const SuppliersScreen();
+      case 'kitchens':
+        return const KitchensScreen();
+      case 'units':
+        return const UnitsScreen();
+      // التقارير الثلاثة شاشةٌ واحدة بتبويبات؛ ومعرّفاتها القديمة (روابط التنبيهات)
+      // تفتحها على تبويبتها.
+      case 'campAccounts':
+        final tab = _openHint[page];
+        return tab == null ? const CampAccountsScreen() : CampAccountsScreen(initialTab: tab);
+      case 'campLedger':
+      case 'campSettlement':
+      case 'actualEntitlement':
+        return CampAccountsScreen(initialTab: page);
+      case 'mealPlans':
+        return const MealPlanScreen();
+      case 'dailyOperations':
+        return const SupplyDailyScreen(initialTab: 'dailyOperations');
+      case 'assets':
+        return const AssetsScreen();
+      case 'fuelDashboard':
+        return const FuelDashboardScreen();
+      // حركة المحروقات: كل بندٍ يفتح نفس الشاشة، لكن مقفلةً على تبويبته —
+      // `standalone: true` يُخفي شريط التبويبات (انظر fuel_moves_screen.dart).
+      case 'fuelIssue':
+        return const FuelMovesScreen(initialTab: 'issue', standalone: true);
+      case 'fuelSupply':
+        return const FuelMovesScreen(initialTab: 'supply', standalone: true);
+      case 'fuelTransfer':
+        return const FuelMovesScreen(initialTab: 'transfer', standalone: true);
+      case 'fuelOpening':
+        return const FuelMovesScreen(initialTab: 'opening', standalone: true);
+      case 'fuelAllocations':
+        return const FuelAllocationsScreen();
+      case 'fuelMoves':
+        return const FuelMovesScreen();
+      case 'fuelStocktake':
+        return const FuelStocktakeScreen();
+      // الأدلّة والتقارير أبوابٌ بتبويبات، والمعرّفات القديمة تفتحها على
+      // تبويبتها — فاختصارٌ أو رابطٌ قديم لا ينكسر.
+      case 'fuelData':
+        return const FuelDataScreen();
+      case 'fuelWarehouses':
+        return const FuelWarehousesScreen();
+      case 'fuelUnits':
+        return const FuelUnitsScreen();
+      case 'fuelVehicles':
+        return const FuelVehiclesScreen();
+      case 'fuelConsumption':
+        return const FuelConsumptionScreen();
+      case 'fuelDaily':
+        return const FuelDailyReportScreen();
+      case 'fuelOfficial':
+        return const FuelOfficialReportScreen();
+      case 'fuelStocks':
+        return const FuelStocksReportScreen();
+      case 'fuelLedger':
+        return const FuelLedgerScreen();
+      case 'fuelPlanVsIssued':
+        return const FuelPlanVsIssuedScreen();
+      case 'fuelReports':
+        return const FuelReportsHubScreen();
+      case 'fuelSettings':
+        return const FuelSettingsScreen();
+      // أبواب الإمداد — والمعرّفات القديمة تفتحها على تبويبتها، فلا ينكسر
+      // اختصارٌ في اللوحة ولا رابطٌ من تنبيه.
+      case 'supplyMoves':
+        return const SupplyMovesScreen();
+      case 'supplyOrders':
+        return const SupplyOrdersScreen();
+      case 'supplyData':
+        return const SupplyDataScreen();
+      case 'supplyDaily':
+        return const SupplyDailyScreen();
+      case 'supplyReports':
+        return const SupplyReportsScreen();
+      case 'supplyAudit':
+        final tab = _openHint[page];
+        return tab == null ? const SupplyAuditScreen() : SupplyAuditScreen(initialTab: tab);
+      case 'rationOrders':
+        return const RationOrderScreen();
+      case 'stores':
+        return const WarehousesScreen();
+      case 'pendingOrders':
+        return const PendingScreen();
+      case 'receive':
+        return const ReceiveScreen();
+      case 'issue':
+        return const IssueScreen();
+      case 'transfer':
+        return const TransferScreen();
+      case 'returns':
+        return const ReturnsScreen();
+      case 'opening':
+        return const OpeningScreen();
+      case 'destruction':
+        return const DestructionScreen();
+      case 'feeding':
+        return const StrengthScreen();
+      case 'kitchenLog':
+        return const KitchenLogScreen();
+      case 'ratios':
+        return const RatiosScreen();
+      case 'balances':
+        return const BalancesScreen();
+      case 'stockAlerts':
+        return const StockAlertsScreen();
+      // إدارة الجرد: نفس معالجة حركة المحروقات — `standalone: true` يُخفي
+      // شريط تبويبات الشاشة الداخلي عند الفتح من بندٍ مباشر.
+      case 'stocktakeCreate':
+        return const StocktakeScreen(initialTab: 'create', standalone: true);
+      case 'stocktakeCount':
+        return const StocktakeScreen(initialTab: 'count', standalone: true);
+      case 'stocktakeAnalysis':
+        return const StocktakeScreen(initialTab: 'analysis', standalone: true);
+      case 'stocktakeSettle':
+        return const StocktakeScreen(initialTab: 'approve', standalone: true);
+      case 'stocktakeHistory':
+        return const StocktakeScreen(initialTab: 'history', standalone: true);
+      case 'stocktake':
+        return const StocktakeScreen();
+      case 'reports':
+        return const ReportsCenterScreen();
+      // أربعة تقارير من التسعة القائمة داخل «مركز التقارير» فُكِّكت إلى بنودٍ
+      // مباشرة — `standalone: true` يُخفي قائمة التنقّل الجانبية للمركز،
+      // والتقرير الواحد يصير الشاشة كلها (نفس معالجة حركة المحروقات).
+      case 'reportMoves':
+        return const ReportsCenterScreen(initialReport: ReportId.moves, standalone: true);
+      case 'reportUnitAccount':
+        return const ReportsCenterScreen(
+            initialReport: ReportId.unitAccount, standalone: true);
+      case 'reportStock':
+        return const ReportsCenterScreen(initialReport: ReportId.stock, standalone: true);
+      case 'reportConsumption':
+        return const ReportsCenterScreen(
+            initialReport: ReportId.consumption, standalone: true);
+      case 'reportStrength':
+        return const ReportsCenterScreen(initialReport: ReportId.strength, standalone: true);
+      case 'reportKitchen':
+        return const ReportsCenterScreen(initialReport: ReportId.kitchen, standalone: true);
+      case 'reportSupplier':
+        return const ReportsCenterScreen(initialReport: ReportId.supplier, standalone: true);
+      case 'reportReturns':
+        return const ReportsCenterScreen(initialReport: ReportId.returns, standalone: true);
+      case 'reportDaily':
+        return const ReportsCenterScreen(initialReport: ReportId.daily, standalone: true);
+      case 'reportMealDispatch':
+        return const ReportsCenterScreen(initialReport: ReportId.mealDispatch, standalone: true);
+      case 'mealDispatch':
+        return const MealDispatchScreen();
+      case 'auditTrail':
+        return const SupplyAuditScreen(initialTab: 'auditTrail');
+      case 'activityIntel':
+        return const SupplyAuditScreen(initialTab: 'activityIntel');
+      case 'executiveCmd':
+        return const SupplyAuditScreen(initialTab: 'executiveCmd');
+      case 'sensitiveOps':
+        return const SupplyAuditScreen(initialTab: 'sensitiveOps');
+      case 'healthOps':
+        return const SupplyAuditScreen(initialTab: 'healthOps');
+      case 'cables':
+        return const CablesScreen();
+      case 'archive':
+        return const ElectronicArchiveScreen();
+      case 'personnel':
+        return const PersonnelStrengthScreen();
+      // «linkages» معرّفٌ قديم (مركز الارتباطات) يفتح المالية.
+      case 'linkages':
+      case 'linkFinances':
+        return const LinkFinancesScreen();
+      case 'linkArmament':
+        return const LinkArmamentScreen();
+      case 'settings':
+        final hint = kSettingsSections[_openHint[page]];
+        return hint == null ? const SettingsScreen() : SettingsScreen(initialSection: hint);
+      // أقسامٌ داخل الإعدادات: الروابط القديمة تفتح الإعدادات على القسم نفسه.
+      case 'formsDesigner':
+      case 'deviceActivation':
+      case 'verifySign':
+      case 'branding':
+      case 'usersAccess':
+      case 'lanSync':
+        return SettingsScreen(initialSection: kSettingsSections[page]!);
+    }
+    // رسالة الشاشات غير المبنية بعد.
+    return const _Soon();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      // **القياس على المساحة المتاحة لا على النافذة**: القشرة قد تُعرض داخل
+      // لوحٍ مقسوم أو نافذةٍ فرعية، وقياسُ النافذة يعدها عريضةً وهي ضيقة.
+      LayoutBuilder(builder: (context, cons) => _build(context, cons.maxWidth));
+
+  Widget _build(BuildContext context, double width) {
+    final auth = context.read<AuthService>();
+    final c = context.imd;
+    final wide = width > _Shell.wide;
+    final handheld = width <= _Shell.rail;
+    final rail = !handheld && (_userCollapsed ?? !wide);
+
+    // قبل أن تُقرأ المساحة المحفوظة لا تُرسم قائمةٌ قد تتبدّل بعد لحظة.
+    if (!_spaceReady) {
+      return Scaffold(
+        backgroundColor: c.bg,
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+    final available = AppSpace.availableFor((p) => _hasPerm(auth, p));
+    if (_space == null && available.length > 1) {
+      return SpaceChooserScreen(
+        spaces: available,
+        userName: auth.currentUser?.name.isNotEmpty == true
+            ? auth.currentUser!.name
+            : (auth.currentUser?.username ?? ''),
+        onPick: _pickSpace,
+      );
+    }
+    // قسمٌ حُجب عن المستخدم أثناء جلسته (مزامنة/تعديل المالك) لا يبقى مفتوحًا:
+    // يُنقل إلى أول قسمٍ متاح بعد هذا الإطار. وإطارٌ واحد يُبنى فيه القسم المحجوب
+    // صفحاتُه كلها «لا صلاحية» (الحجب fail-closed في `_hasPerm`).
+    if (_space != null && available.isNotEmpty && !available.contains(_space)) {
+      final fallback = available.first;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _space != fallback) {
+          setState(() {
+            _space = fallback;
+            _reenter(_stateOf(fallback), _stateOf(fallback).page);
+          });
+        }
+      });
+    }
+    final space = _space ?? AppSpace.supply;
+
+    _handheld = handheld;
+    final themed = _themeFor(context, space);
+    final sc = themed.extension<ImdColors>() ?? c;
+
+    // كل قسمٍ زاره المستخدم يبقى مبنيًّا (الظاهر وحده مرئي) بسمته: التبديل بين
+    // الإمداد والمحروقات لا يهدم تبويباتهما. على الجوال صفحةٌ واحدة فقط للقسم
+    // الظاهر — ما أُخفي لا شريط يعيده، فلا يُبقى حيًّا بلا فائدة.
+    Widget sectionStack(String sp, _SpaceState st) {
+      final isActive = sp == space;
+      final pages = handheld ? (isActive ? [st.page] : <String>[]) : List<String>.of(st.open);
+      return Offstage(
+        key: ValueKey('space:$sp'),
+        offstage: !isActive,
+        child: TickerMode(
+          enabled: isActive,
+          child: ExcludeFocus(
+            excluding: !isActive,
+            child: Theme(
+              data: _themeFor(context, sp),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  for (final p in pages)
+                    ImdPageHost(
+                      key: ValueKey('host:$sp:$p'),
+                      active: isActive && p == st.page,
+                      sink: st.sinks.putIfAbsent(p, ImdRecordSink.new),
+                      actions: _slot(st, p, isActive && p == st.page),
+                      child: KeyedSubtree(
+                        key: ValueKey('$sp:$p#${st.gen[p] ?? 0}'),
+                        child: ImdPageDirty(
+                          flag: st.dirty.putIfAbsent(p, ImdDirtyFlag.new),
+                          // «الرئيسية» مفتوحةٌ لكل مستخدم، إلا أن يُحجب قسمُها نفسه — ورئيسية
+                          // المحروقات هي لوحة المحروقات بأرقامها، فتشترط صلاحيتها
+                          // (`fuelDashboard.view`، كان TODO أمنيًّا مفتوحًا).
+                          child: ((p == 'dash' && _homeAllowed(auth, sp)) || (p != 'dash' && _hasPerm(auth, p)))
+                              ? _pageBody(p, sp)
+                              : const _NoAccess(),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // الحالة تُنشأ للقسم الظاهر قبل البناء حتى يظهر في `_spaces`.
+    _stateOf(space);
+    final body = Stack(
+      fit: StackFit.expand,
+      children: [for (final e in _spaces.entries) sectionStack(e.key, e.value)],
+    );
+    final sync = context.watch<AutoSyncService>();
+    final syncFailed = !sync.isRunning && sync.failed;
+
+    final side = _Sidebar(
+      page: _menuPageOf(_page),
+      space: space,
+      rail: rail,
+      openSec: _openSec,
+      hasPerm: (p) => _hasPerm(auth, p),
+      userName: auth.currentUser?.name.isNotEmpty == true
+          ? auth.currentUser!.name
+          : (auth.currentUser?.username ?? ''),
+      onGo: _go,
+      onToggle: (sec) =>
+          setState(() => _openSec = _openSec == sec ? null : sec),
+      onLogout: widget.onSignOut,
+      width: _sideWidth,
+    );
+
+    final shell = Provider<ImdNav>.value(
+      value: _nav,
+      child: PopScope(
+        // زر الرجوع كان يُنهي التطبيق بضغطة واحدة من أي شاشة. الآن يعود إلى
+        // الرئيسية أولًا، ولا يخرج من الرئيسية إلا بتأكيد صريح.
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (didPop) return;
+          // الرجوع والدرج مفتوح يغلق الدرج أولًا.
+          if (_scaffoldKey.currentState?.isEndDrawerOpen ?? false) {
+            _scaffoldKey.currentState?.closeEndDrawer();
+            return;
+          }
+          if (_page != 'dash') {
+            _go('dash');
+            return;
+          }
+          if (await imdConfirm(context, 'إغلاق النظام؟', ok: 'خروج')) {
+            // `SystemNavigator.pop` تُنهي تطبيق أندرويد، أما على ويندوز
+            // فتُطلب ولا يستجيب لها أحد: يظلّ المستخدم ينقر ويظنّ التطبيق
+            // معلّقًا. وهدمُ النافذة هو إنهاؤه هناك.
+            // `exit()` يمسح الجلسة ويُغلق المنافذ على كل المنصات، ويُنهي العملية
+            // على ويندوز؛ على أندرويد يُنهي النظام التطبيق بعد `pop`.
+            await ImdWindow.exit();
+            if (!ImdWindow.supported) await SystemNavigator.pop();
+          }
+        },
+        child: Scaffold(
+          key: _scaffoldKey,
+          backgroundColor: sc.bg,
+          // الدرج يحمل القائمة كاملةً في اليد: الشريط السفليّ لأشهر الأبواب،
+          // وما وراءها يُفتح منه.
+          endDrawer: handheld
+              ? Drawer(
+                  width: ImdSizes.drawerWidth(context),
+                  backgroundColor: sc.side,
+                  child: _Sidebar(
+                    // داخل الدرج تملأ القائمةُ عرضَه؛ ولو فرضت ٢٩٠ على درجٍ
+                    // أضيق منها فاضت أفقيًّا.
+                    width: null,
+                    page: _menuPageOf(_page),
+                    space: space,
+                    openSec: _openSec,
+                    hasPerm: (p) => _hasPerm(auth, p),
+                    userName: side.userName,
+                    // `_go` يغلق الدرج. كان هنا `maybePop` أيضًا فتعترضها `PopScope`
+                    // أدناه وتُعيد المستخدم إلى الرئيسية (أو تسأله عن الإغلاق)،
+                    // فلا تفتح أي شاشةٍ من الدرج على أندرويد إلا «الرئيسية».
+                    onGo: _go,
+                    onToggle: (sec) => setState(
+                        () => _openSec = _openSec == sec ? null : sec),
+                    onLogout: widget.onSignOut,
+                  ),
+                )
+              : null,
+          bottomNavigationBar: handheld
+              ? _BottomNav(
+                  space: space,
+                  page: _menuPageOf(_page),
+                  hasPerm: (p) => _hasPerm(auth, p),
+                  onGo: _go,
+                  onMore: () => _scaffoldKey.currentState?.openEndDrawer(),
+                )
+              : null,
+          body: Column(
+            children: [
+              if (handheld)
+                _Topbar(
+                  userName: side.userName,
+                  showBurger: true,
+                  onBurger: () => _scaffoldKey.currentState?.openEndDrawer(),
+                  onOpenPage: _go,
+                  space: _space ?? '',
+                  canSwitch: available.length > 1,
+                  onSwitchSpace: _switchSpace,
+                )
+              else
+                _DesktopBar(
+                  userName: side.userName,
+                  collapsed: rail,
+                  onToggleSide: () => _setCollapsed(!rail),
+                  pages: [
+                    for (final p in _open)
+                      ImdOpenPage(id: p, title: _titleOf(p), icon: _iconOf(p), stale: _stale.contains(p)),
+                  ],
+                  activeId: _page,
+                  onSelect: _go,
+                  onClose: _closePage,
+                  onCloseOthers: _closeOthers,
+                  onOpenPage: _go,
+                  space: _space ?? '',
+                  canSwitch: available.length > 1,
+                  onSwitchSpace: _switchSpace,
+                ),
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (!handheld) side,
+                    if (!handheld && !rail)
+                      _SideSplitter(
+                        onDrag: (dx) => setState(() {
+                          // القائمة على الطرف البدئي: السحب نحو المحتوى يوسّعها.
+                          final rtl = Directionality.of(context) == ui.TextDirection.rtl;
+                          _sideWidth = (_sideWidth + (rtl ? -dx : dx)).clamp(_sideMin, _sideMax);
+                        }),
+                        onEnd: _saveSideWidth,
+                      ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(child: body),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (!handheld)
+                ImdStatusBar(
+                  records: _sinkOf(_page),
+                  connection: sync.isRunning
+                      ? 'جارٍ التزامن'
+                      : !sync.enabled
+                          ? 'العمل محلي — المزامنة متوقفة'
+                          : syncFailed
+                              ? 'تعذّرت آخر مزامنة'
+                              : sync.lastAt == null
+                                  ? 'متصل — بانتظار أول مزامنة'
+                                  : 'متصل — آخر مزامنة ${DateFormat('HH:mm').format(sync.lastAt!)}',
+                  connectionOk: sync.isRunning
+                      ? true
+                      : !sync.enabled
+                          ? null
+                          : !syncFailed,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // الإطار كله (الشريط الجانبي والعلوي والتبويبات) بسمة القسم الظاهر.
+    return Theme(data: themed, child: shell);
+  }
+}
+// ==================== END FILE: lib/features/home/home_shell.dart ====================
+
+// ==================== FILE: lib/features/home/shell/home_shell_bottom_nav.dart ====================
+part of '../home_shell.dart';
+
+/// شريطٌ سفليّ لأشهر أبواب القسم — وما وراءها في الدرج.
+///
+/// **الإبهام لا يبلغ أعلى الشاشة.** الدرج وحده يكلّف نقرتين لكل تنقّل، وأمينُ
+/// المستودع ينتقل بين الصرف والاستلام عشرات المرات في الساعة.
+class _BottomNav extends StatelessWidget {
+  const _BottomNav({
+    required this.space,
+    required this.page,
+    required this.hasPerm,
+    required this.onGo,
+    required this.onMore,
+  });
+
+  final String space;
+  final String page;
+  final bool Function(String) hasPerm;
+  final ValueChanged<String> onGo;
+  final VoidCallback onMore;
+
+  /// أبوابٌ ثلاثة بعد الرئيسية — والرابع «المزيد» يفتح القائمة كاملة.
+  // أُشير بها إلى معرّفات أبوابٍ حذفناها من الشجرة عند تفكيكها إلى بنودٍ
+  // مباشرة؛ استُبدلت ببنودٍ فرديةٍ ما زالت في `_menu` تمثّل نفس الغرض
+  // (أشهر ما يُفتح) بدل أن تختفي صفوف المفضّلة في الشريط السفليّ صامتة.
+  static const Map<String, List<String>> _main = {
+    AppSpace.supply: ['issue', 'receive', 'balances'],
+    AppSpace.fuel: ['fuelIssue', 'fuelAllocations', 'fuelDaily'],
+  };
+
+  static _MenuItem? _itemOf(String id) {
+    for (final sec in _menu) {
+      for (final i in sec.items) {
+        if (i.id == id) return i;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final ids = [
+      for (final id in _main[space] ?? const <String>[])
+        if (hasPerm(id)) id,
+    ];
+    final items = [
+      for (final id in ids)
+        if (_itemOf(id) != null) _itemOf(id)!,
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: c.side,
+        border: Border(top: BorderSide(color: c.sideLine)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 58,
+          child: Row(children: [
+            _BottomTile(
+              icon: 'home',
+              label: 'الرئيسية',
+              on: page == 'dash',
+              onTap: () => onGo('dash'),
+            ),
+            for (final i in items)
+              _BottomTile(
+                icon: i.icon,
+                label: i.name,
+                on: page == i.id,
+                onTap: () => onGo(i.id),
+              ),
+            _BottomTile(
+              icon: 'menu',
+              label: 'المزيد',
+              on: false,
+              onTap: onMore,
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomTile extends StatelessWidget {
+  const _BottomTile({
+    required this.icon,
+    required this.label,
+    required this.on,
+    required this.onTap,
+  });
+
+  final String icon;
+  final String label;
+  final bool on;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final fg = on ? c.accent : c.sideMuted;
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ImdIcon(icon, size: 19, color: fg),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                  color: fg),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/home/shell/home_shell_bottom_nav.dart ====================
+
+// ==================== FILE: lib/features/home/shell/home_shell_menu.dart ====================
+part of '../home_shell.dart';
+
+/// عنصر في القائمة الجانبية — نفس `MENU` في `index.html`.
+class _MenuItem {
+  const _MenuItem(this.id, this.icon, this.name,
+      {this.space = AppSpace.supply});
+
+  final String id;
+  final String icon;
+  final String name;
+
+  /// مساحة البند: `supply` أو `fuel` أو `both` لما يخدم القسمين.
+  ///
+  /// الأدلة المشتركة (المستودعات والوحدات) والإعدادات والتدقيق تظهر في
+  /// القسمين: الوقود يُخزَّن في نفس المستودعات ويُصرف لنفس الوحدات، ومنعُ
+  /// أمين المحروقات من دليلٍ يحتاجه في كل سند أغلى من تكرار بندٍ في قائمة.
+  final String space;
+}
+
+class _MenuSection {
+  const _MenuSection(this.sec, this.icon, this.name, this.items);
+  final String sec;
+  final String icon;
+  final String name;
+  final List<_MenuItem> items;
+}
+
+const _menu = <_MenuSection>[
+  // ═════════ الإمداد: ستّة أقسامٍ قابلة للطي — «الرئيسية» مستقلةٌ خارجها.
+  //
+  // **شجرةٌ لا أبواب.** كل بندٍ هنا يفتح شاشته الخامّة مباشرة، بلا تبويباتٍ
+  // فوقها تُخفي أخواتها — القسم في الشريط هو التصنيف الوحيد، فلا حاجة
+  // لتصنيفٍ ثانٍ داخل الشاشة نفسها.
+  _MenuSection('basic', 'database', 'البيانات الأساسية', [
+    _MenuItem('items', 'package', 'الأصناف'),
+    _MenuItem('stores', 'warehouse', 'المستودعات'),
+    _MenuItem('units', 'users', 'الوحدات المستفيدة'),
+    _MenuItem('suppliers', 'truck', 'الموردون'),
+    _MenuItem('kitchens', 'utensils', 'المطابخ والأفران'),
+    _MenuItem('assets', 'package', 'الأصول الثابتة'),
+  ]),
+  _MenuSection('stock', 'package', 'العمليات المخزنية', [
+    _MenuItem('receive', 'download', 'استلام'),
+    _MenuItem('issue', 'upload', 'صرف'),
+    _MenuItem('mealDispatch', 'utensils', 'صرف الوجبات'),
+    _MenuItem('transfer', 'refresh', 'تحويل'),
+    _MenuItem('returns', 'undo', 'مرتجعات'),
+    _MenuItem('opening', 'clipboard', 'الأرصدة الافتتاحية'),
+    _MenuItem('destruction', 'trash', 'الإتلاف'),
+    _MenuItem('rationOrders', 'clipboard', 'طلبيات الإعاشة'),
+    _MenuItem('pendingOrders', 'bell', 'أوامر التوريد المعلقة'),
+  ]),
+  _MenuSection('daily', 'chart', 'التشغيل اليومي', [
+    _MenuItem('feeding', 'calendar', 'التفريدة اليومية'),
+    _MenuItem('mealPlans', 'calendar', 'خطط الوجبات'),
+    _MenuItem('kitchenLog', 'utensils', 'سجل التشغيل والطهي'),
+    _MenuItem('ratios', 'scale', 'نسب الاستحقاق'),
+  ]),
+  // «رقابة» وحدها بقيت باباً بتبويباته الخمسة (سجل النشاط، ذكاء النشاط،
+  // التغييرات الحساسة، مركز القيادة، صحة النظام) — خمس نظراتٍ على سجلٍّ
+  // واحد لا خمس شاشاتٍ منفصلة، فتفكيكها يُكرِّر لا يُبسِّط.
+  _MenuSection('archiveGroup', 'folder', 'البرقيات والأرشيف', [
+    _MenuItem('cables', 'mail', 'البرقيات'),
+    _MenuItem('archive', 'folder', 'الأرشيف الإلكتروني'),
+  ]),
+  _MenuSection('linkagesGroup', 'link', 'الارتباطات', [
+    // ثلاث شاشات؛ تبويباتها الفرعية داخل الشاشة نفسها لا في هذا الشريط.
+    _MenuItem('personnel', 'users', 'القوة البشرية'),
+    _MenuItem('linkFinances', 'dollar', 'المالية'),
+    _MenuItem('linkArmament', 'target', 'التسليح'),
+  ]),
+  _MenuSection('reports', 'trending', 'التقارير', [
+    _MenuItem('balances', 'calculator', 'الأرصدة الحالية'),
+    // تقارير «مركز التقارير» التسعة كلها بنودٌ مباشرة الآن (بلا قائمة تنقّل
+    // جانبية) — فلا حاجة لبند «مركز التقارير» نفسه في الشريط؛ الشاشة
+    // (`reports_center_screen.dart`) بقيت بلا حذف، فقط بلا رابطٍ إليها هنا.
+    _MenuItem('reportMoves', 'repeat', 'حركة المخزون اليومية'),
+    _MenuItem('reportUnitAccount', 'file', 'كشف حساب وحدة مستفيدة'),
+    _MenuItem('reportStock', 'package', 'تقرير أرصدة المخزون'),
+    _MenuItem('reportConsumption', 'chart', 'تحليل الاستهلاك'),
+    _MenuItem('reportStrength', 'users', 'تقرير حصر القوة'),
+    _MenuItem('reportKitchen', 'utensils', 'أداء المطابخ والأفران'),
+    _MenuItem('reportSupplier', 'truck', 'ملخص توريدات الموردين'),
+    _MenuItem('reportReturns', 'undo', 'تقرير المرتجعات'),
+    _MenuItem('reportDaily', 'clipboard', 'تقرير العمل اليومي'),
+    _MenuItem('reportMealDispatch', 'upload', 'تقرير صرف الوجبات'),
+    // الاستحقاق الفعلي وسجل المعسكر وتصفية الشهر: بابٌ واحد بتبويبات (`campAccounts`).
+    _MenuItem('campAccounts', 'calculator', 'حساب المعسكر والاستحقاق'),
+    _MenuItem('stockAlerts', 'alert', 'تنبيهات المخزون'),
+    _MenuItem('supplyAudit', 'scan', 'الرقابة والتدقيق'),
+  ]),
+  // خمسة بنودٍ لشاشةٍ واحدة (`StocktakeScreen`) بمعامل `standalone` يُخفي
+  // تبويباتها الداخلية — لا خمس شاشاتٍ منفصلة فعلًا.
+  _MenuSection('stocktake', 'clipboard', 'إدارة الجرد', [
+    _MenuItem('stocktakeCreate', 'plus-square', 'إنشاء أمر جرد'),
+    _MenuItem('stocktakeCount', 'clipboard', 'العدّ الفعلي'),
+    _MenuItem('stocktakeAnalysis', 'scale', 'تحليل الفروقات'),
+    _MenuItem('stocktakeSettle', 'check-circle', 'التسوية والاعتماد'),
+    _MenuItem('stocktakeHistory', 'clock', 'سجل الجرد'),
+  ]),
+  // «مركز الصلاحيات» كان بندًا مستقلًّا خارج كل الأقسام يظهر لمدير النظام
+  // فقط؛ انتقل هنا، وبقي مقصورًا على الإمداد (`space` الافتراضي) كما كان —
+  // شأنُ النظام كله وبابه قسم الإمداد، لا يخلطه بالمحروقات.
+  // بندٌ واحد: الهوية والنماذج والتفعيل والتوقيع والمزامنة والمستخدمون صارت
+  // أقسامًا داخل شاشة الإعدادات نفسها (انظر [kSettingsSections])، وتبقى
+  // معرّفاتها القديمة (`branding`، `deviceActivation`…) تفتح الإعدادات على قسمها.
+  _MenuSection('settings', 'wrench', 'الإعدادات', [
+    _MenuItem('settings', 'settings', 'الإعدادات العامة'),
+  ]),
+
+  // ═════════ المحروقات: نفس نمط الإمداد — خمسة أقسامٍ و«رئيسية» مستقلة.
+  // «حركة المحروقات» أربعة بنودٍ لشاشةٍ واحدة (`FuelMovesScreen`) بمعامل
+  // `standalone` يُخفي تبويباتها الداخلية، والتفريدة شاشةٌ مستقلة فعلًا.
+  _MenuSection('fuelMoves', 'swap', 'حركة المحروقات', [
+    _MenuItem('fuelIssue', 'upload', 'صرف', space: AppSpace.fuel),
+    _MenuItem('fuelSupply', 'download', 'توريد', space: AppSpace.fuel),
+    _MenuItem('fuelTransfer', 'refresh', 'تحويل', space: AppSpace.fuel),
+    _MenuItem('fuelOpening', 'compass', 'رصيد افتتاحي', space: AppSpace.fuel),
+    _MenuItem('fuelAllocations', 'clipboard', 'التفريدة', space: AppSpace.fuel),
+  ]),
+  _MenuSection('fuelData', 'database', 'البيانات الأساسية', [
+    _MenuItem('fuelWarehouses', 'warehouse', 'المستودعات', space: AppSpace.fuel),
+    _MenuItem('fuelUnits', 'building', 'الوحدات المستفيدة', space: AppSpace.fuel),
+    _MenuItem('fuelVehicles', 'truck', 'سجل المركبات', space: AppSpace.fuel),
+  ]),
+  _MenuSection('fuelReports', 'chart', 'التقارير', [
+    _MenuItem('fuelDaily', 'calendar', 'الحركة اليومية', space: AppSpace.fuel),
+    _MenuItem('fuelOfficial', 'file', 'التقرير الرسمي', space: AppSpace.fuel),
+    _MenuItem('fuelConsumption', 'trending', 'الاستهلاك', space: AppSpace.fuel),
+    _MenuItem('fuelStocks', 'package', 'أرصدة المستودعات', space: AppSpace.fuel),
+    _MenuItem('fuelLedger', 'list', 'كشف حركة المستودع', space: AppSpace.fuel),
+    _MenuItem('fuelPlanVsIssued', 'scale', 'الاستحقاق مقابل الصرف',
+        space: AppSpace.fuel),
+  ]),
+  // «جرد المحروقات» بلا تبويبات داخلية أصلًا (تدفّق قائمة ← تفاصيل لا
+  // شريط تبويبات)، فبقيت بندًا واحدًا كما كانت.
+  _MenuSection('fuelStocktake', 'clipboard', 'إدارة الجرد', [
+    _MenuItem('fuelStocktake', 'clipboard', 'الجرد المخزني',
+        space: AppSpace.fuel),
+  ]),
+  _MenuSection('fuelSettings', 'wrench', 'الإعدادات', [
+    _MenuItem('fuelSettings', 'settings', 'الإعدادات', space: AppSpace.fuel),
+  ]),
+];
+
+/// الصفحة التي يُضيئها بندُها في القائمة: الأقسام المضمَّنة تُضيء «الإعدادات»،
+/// وتبويبات «حساب المعسكر والاستحقاق» (روابط التنبيهات القديمة) تُضيء بابها.
+String _menuPageOf(String page) {
+  if (kSettingsSections.containsKey(page)) return 'settings';
+  if (kMenuDoors['campAccounts']!.contains(page)) return 'campAccounts';
+  return page;
+}
+// ==================== END FILE: lib/features/home/shell/home_shell_menu.dart ====================
+
+// ==================== FILE: lib/features/home/shell/home_shell_placeholders.dart ====================
+part of '../home_shell.dart';
+
+/// رسالة «صلاحية غير متاحة 🔒».
+class _NoAccess extends StatelessWidget {
+  const _NoAccess();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ImdPage(
+      children: [
+        ImdPageTitle(title: 'صلاحية غير متاحة', icon: 'lock'),
+        ImdEmptyState.noPermission(
+          message: 'لا تملك صلاحية الوصول إلى هذه الشاشة. اطلب من مدير النظام منحك الصلاحية المناسبة.',
+        ),
+      ],
+    );
+  }
+}
+
+class _Soon extends StatelessWidget {
+  const _Soon();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ImdPage(
+      children: [
+        ImdPageTitle(
+            title: 'قريبًا',
+            icon: 'alert',
+            subtitle: 'هذه الشاشة ستُبنى في خطوة قادمة'),
+      ],
+    );
+  }
+}
+// ==================== END FILE: lib/features/home/shell/home_shell_placeholders.dart ====================
+
+// ==================== FILE: lib/features/home/shell/home_shell_sidebar.dart ====================
+part of '../home_shell.dart';
+
+/// القائمة الجانبية الداكنة.
+class _Sidebar extends StatelessWidget {
+  const _Sidebar({
+    required this.page,
+    required this.space,
+    required this.openSec,
+    required this.hasPerm,
+    required this.userName,
+    required this.onGo,
+    required this.onToggle,
+    required this.onLogout,
+    this.rail = false,
+    this.width = ImdSizes.sideWidth,
+  });
+
+  /// عرض القائمة الكاملة — يسحبه المستخدم بفاصلٍ قابلٍ للسحب على سطح المكتب.
+  /// و`null` داخل درج الجوال: العرض للدرج، والقائمة تملؤه.
+  final double? width;
+
+  /// أيقوناتٌ بلا أسماء — لشاشةٍ لا تتسع لـ٢٩٠ بكسل من قائمة.
+  final bool rail;
+
+  /// بنود المساحة التي يملكها المستخدم، مسطَّحةً — وهي ما يُرسم في القضيب.
+  List<_MenuItem> _items() => [
+        for (final sec in _menu)
+          for (final i in sec.items)
+            if (AppSpace.shows(i.space, space) && hasPerm(i.id)) i,
+      ];
+
+  /// أبواب القسم [sec] التي يراها المستخدم في المساحة الحالية.
+  List<_MenuItem> _itemsOf(_MenuSection sec) =>
+      [for (final i in sec.items) if (AppSpace.shows(i.space, space) && hasPerm(i.id)) i];
+
+  /// هل للمساحة قسمٌ واحد فيُعرض مسطّحًا بلا رأس؟
+  static bool _flat(String space, bool Function(String) hasPerm) =>
+      _menu
+          .where((s) => s.items
+              .any((i) => AppSpace.shows(i.space, space) && hasPerm(i.id)))
+          .length <=
+      1;
+
+  final String page;
+
+  /// مساحة العمل الحالية — تُرشَّح بها بنود القائمة.
+  final String space;
+
+  final String? openSec;
+  final bool Function(String page) hasPerm;
+  final String userName;
+  final ValueChanged<String> onGo;
+  final ValueChanged<String> onToggle;
+  final Future<void> Function() onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    if (rail) return _rail(context);
+    final c = context.imd;
+    // داخل الدرج: حشوةٌ تتجاوز شريط الحالة أعلى وشريط التنقّل أسفل، وإلا بدأ
+    // أولُ بندٍ تحت ساعة النظام وانحشر «تسجيل خروج» فوق أزرار التنقّل.
+    final inset = width == null ? MediaQuery.paddingOf(context) : EdgeInsets.zero;
+    return Container(
+      width: width,
+      decoration: BoxDecoration(
+        // تدرّج خفيف من لون الشريط إلى أغمق منه أسفلًا.
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            c.side.withValues(alpha: ImdWindow.micaActive.value ? .82 : 1),
+            c.sideDeep
+                .withValues(alpha: ImdWindow.micaActive.value ? .82 : 1),
+          ],
+        ),
+        border: BorderDirectional(start: BorderSide(color: c.sideLine)),
+      ),
+      padding: EdgeInsets.fromLTRB(10, 12 + inset.top, 10, 12 + inset.bottom),
+      // الرأس والتذييل ثابتان، والقائمة بينهما تتمرّر. لا `IntrinsicHeight` هنا:
+      // `AnimatedSize` تُرجع ارتفاع الطفل الهدف لا المتحرّك، فيفيض العمود
+      // مؤقتًا عند طيّ قسمٍ أو التبديل بين قسمين.
+      child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                  // الرئيسية بندٌ مستقلٌّ دائمًا في القسمين — لا قائمة فرعية
+                  // تحته؛ `dash` نفسها تعرض لوحة القسم النشط (إمداد أو محروقات).
+                  _SideTile(
+                    icon: 'home',
+                    label: 'الرئيسية',
+                    kind: _SideKind.home,
+                    on: page == 'dash',
+                    onTap: () => onGo('dash'),
+                  ),
+                  // قسمٌ بقائمةٍ واحدة يُعرض مسطّحًا: رأسُ قسمٍ يُطوى على كل
+                  // ما في الشاشة ليس تصنيفًا، بل نقرةٌ تُدفع قبل كل شيء.
+                  if (_flat(space, hasPerm))
+                    for (final i in _menu.expand((x) => x.items).where(
+                        (i) => AppSpace.shows(i.space, space) && hasPerm(i.id)))
+                      _SideTile(
+                        icon: i.icon,
+                        label: i.name,
+                        kind: _SideKind.item,
+                        on: page == i.id,
+                        onTap: () => onGo(i.id),
+                      )
+                  else
+                    for (final s in _menu)
+                      if (s.items.any((i) =>
+                          AppSpace.shows(i.space, space) && hasPerm(i.id))) ...[
+                        _SideTile(
+                          icon: s.icon,
+                          label: s.name,
+                          kind: _SideKind.header,
+                          open: openSec == s.sec,
+                          onTap: () => onToggle(s.sec),
+                        ),
+                        AnimatedSize(
+                          duration: const Duration(milliseconds: 250),
+                          curve: Curves.ease,
+                          alignment: Alignment.topCenter,
+                          child: openSec == s.sec
+                              ? Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    for (final i in s.items.where((i) =>
+                                        AppSpace.shows(i.space, space) &&
+                                        hasPerm(i.id)))
+                                      _SideTile(
+                                        icon: i.icon,
+                                        label: i.name,
+                                        kind: _SideKind.item,
+                                        on: page == i.id,
+                                        onTap: () => onGo(i.id),
+                                      ),
+                                  ],
+                                )
+                              : const SizedBox(width: double.infinity),
+                        ),
+                      ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  Container(
+                    margin: const EdgeInsets.only(top: 14),
+                    padding: const EdgeInsets.only(top: 14),
+                    decoration: BoxDecoration(
+                        border: Border(top: BorderSide(color: c.sideLine))),
+                    // بلا بطاقة مستخدمٍ هنا: الاسم والصلاحية معروضان في
+                    // الشريط العلوي، وهذا الشريط لا يحمل غير الخروج فيقصر
+                    // ارتفاعه لصالح القائمة.
+                    child: _SideTile(
+                        icon: 'lock',
+                        label: 'تسجيل خروج',
+                        kind: _SideKind.logout,
+                        onTap: onLogout),
+                  ),
+                ],
+      ),
+    );
+  }
+  /// شريطٌ ضيّق: أيقونةٌ لكل باب واسمُه في تلميحها.
+  ///
+  /// **الأيقونة تكفي لمن يعرف طريقه.** من يفتح الشاشة كل يوم لا يقرأ اسم
+  /// البند، بل يقصد موضعه؛ والاسم يبقى في التلميح لمن يبحث.
+  Widget _rail(BuildContext context) {
+    final c = context.imd;
+    final items = _items();
+    return Container(
+      width: 68,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            c.side.withValues(alpha: ImdWindow.micaActive.value ? .82 : 1),
+            c.sideDeep
+                .withValues(alpha: ImdWindow.micaActive.value ? .82 : 1),
+          ],
+        ),
+        border: BorderDirectional(start: BorderSide(color: c.sideLine)),
+      ),
+      child: Column(children: [
+        const SizedBox(height: 10),
+        _RailTile(
+          icon: 'home',
+          label: 'الرئيسية',
+          on: page == 'dash',
+          onTap: () => onGo('dash'),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(children: [
+              // قسمٌ بقائمةٍ واحدة يُعرض مسطّحًا؛ وما سواه تظهر **أيقونات الأقسام
+              // الرئيسية فقط** — ونقرةٌ على أيقونة قسمٍ تفتح قائمةً بأبوابه بجوارها.
+              if (_flat(space, hasPerm))
+                for (final i in items)
+                  _RailTile(
+                    icon: i.icon,
+                    label: i.name,
+                    on: page == i.id,
+                    onTap: () => onGo(i.id),
+                  )
+              else
+                for (final sec in _menu)
+                  if (_itemsOf(sec).isNotEmpty)
+                    _RailSection(
+                      icon: sec.icon,
+                      label: sec.name,
+                      on: _itemsOf(sec).any((i) => i.id == page),
+                      items: _itemsOf(sec),
+                      page: page,
+                      onGo: onGo,
+                    ),
+            ]),
+          ),
+        ),
+        _RailTile(
+          icon: 'log-out',
+          label: 'تسجيل الخروج',
+          on: false,
+          danger: true,
+          onTap: onLogout,
+        ),
+        const SizedBox(height: 10),
+      ]),
+    );
+  }
+}
+
+/// أيقونةُ بابٍ في الشريط الضيّق، واسمُه في تلميحها.
+class _RailTile extends StatelessWidget {
+  const _RailTile({
+    required this.icon,
+    required this.label,
+    required this.on,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final String icon;
+  final String label;
+  final bool on;
+  final VoidCallback onTap;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final fg = danger ? c.danger : (on ? c.sideText : c.sideMuted);
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 48,
+            height: 44,
+            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: on ? c.sideActive : null,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: ImdIcon(icon, size: 19, color: fg),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// أيقونة قسمٍ رئيسيّ في الشريط المطويّ: تلميحها اسمه، ونقرتها تفتح قائمةً بأبوابه.
+///
+/// القائمة تُفتح عند الحافة الخارجية للأيقونة (يسارها في الواجهة العربية) فلا
+/// تغطّي الشريط نفسه، والبابُ المفتوح حاليًّا يُعلَّم فيها.
+class _RailSection extends StatelessWidget {
+  const _RailSection({
+    required this.icon,
+    required this.label,
+    required this.on,
+    required this.items,
+    required this.page,
+    required this.onGo,
+  });
+
+  final String icon;
+  final String label;
+
+  /// الصفحة الحالية داخل هذا القسم.
+  final bool on;
+  final List<_MenuItem> items;
+  final String page;
+  final ValueChanged<String> onGo;
+
+  void _open(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox;
+    final origin = box.localToGlobal(Offset.zero);
+    showImdContextMenu(context, Offset(origin.dx, origin.dy), [
+      for (final i in items)
+        ImdMenuItem(
+          label: i.id == page ? '${i.name}  ●' : i.name,
+          icon: i.icon,
+          onTap: () => onGo(i.id),
+        ),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final fg = on ? c.sideText : c.sideMuted;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        button: true,
+        child: InkWell(
+          onTap: () => _open(context),
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            width: 48,
+            height: 44,
+            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: on ? c.sideActive : null,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: ImdIcon(icon, size: 19, color: fg),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _SideKind { home, header, item, logout }
+
+class _SideTile extends StatefulWidget {
+  const _SideTile({
+    required this.icon,
+    required this.label,
+    required this.kind,
+    required this.onTap,
+    this.on = false,
+    this.open = false,
+  });
+
+  final String icon;
+  final String label;
+  final _SideKind kind;
+  final VoidCallback onTap;
+  final bool on;
+  final bool open;
+
+  @override
+  State<_SideTile> createState() => _SideTileState();
+}
+
+class _SideTileState extends State<_SideTile> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    late final Color bg;
+    late final Color fg;
+    Border? border;
+    late final EdgeInsetsGeometry pad;
+    late final EdgeInsetsGeometry margin;
+    late final double fs;
+    late final FontWeight fw;
+    late final double radius;
+    Color? iconColor;
+    switch (widget.kind) {
+      case _SideKind.home:
+        bg = _hover ? c.sideHover : c.side2;
+        fg = c.sideBright;
+        border = Border.all(color: c.sideBorder);
+        pad = const EdgeInsets.symmetric(horizontal: 16, vertical: 13);
+        margin = const EdgeInsets.only(bottom: 10);
+        fs = 14;
+        fw = FontWeight.w600;
+        radius = 10;
+      case _SideKind.header:
+        bg = _hover ? c.sideHover : Colors.transparent;
+        fg = (_hover || widget.open) ? c.sideBright : c.sideMuted;
+        pad = const EdgeInsets.symmetric(horizontal: 14, vertical: 11);
+        margin = const EdgeInsets.only(top: 6, bottom: 4);
+        fs = 12.5;
+        fw = FontWeight.w600;
+        radius = 8;
+      case _SideKind.item:
+        bg = widget.on
+            ? c.sideActive
+            : (_hover ? c.sideHover : Colors.transparent);
+        fg = (widget.on || _hover)
+            ? c.sideBright
+            : c.sideText.withValues(alpha: .86);
+        iconColor = widget.on ? ImdColors.dark.accentHover : null;
+        // اتجاهيّة لا فيزيائية: الواجهة عربية (RTL) فالبدايةُ يمينٌ لا يسار،
+        // وحشوةٌ غير متماثلة بـleft/right تنعكس فتصير على الجانب الخطأ.
+        pad = const EdgeInsetsDirectional.only(start: 10, top: 11, end: 14, bottom: 11);
+        margin = const EdgeInsetsDirectional.only(start: 4, top: 1, bottom: 1);
+        fs = 13.5;
+        fw = FontWeight.w500;
+        radius = 8;
+      case _SideKind.logout:
+        bg = _hover ? c.sideHover : Colors.transparent;
+        fg = c.sideText;
+        border = Border.all(color: _hover ? c.sideMuted : c.sideBorder);
+        pad = const EdgeInsets.all(13);
+        margin = EdgeInsets.zero;
+        fs = 14;
+        fw = FontWeight.w600;
+        radius = 10;
+    }
+    final isItem = widget.kind == _SideKind.item;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          margin: margin,
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(radius),
+            border: isItem ? null : border,
+          ),
+          foregroundDecoration: isItem && widget.on
+              ? BoxDecoration(
+                  border: Border(
+                      right: BorderSide(color: ImdColors.dark.accentHover, width: 2)),
+                )
+              : null,
+          padding: pad,
+          child: Row(
+            mainAxisAlignment: widget.kind == _SideKind.logout
+                ? MainAxisAlignment.center
+                : MainAxisAlignment.start,
+            children: [
+              ImdIcon(widget.icon, size: fs * 1.1, color: iconColor ?? fg),
+              SizedBox(
+                  width: widget.kind == _SideKind.header
+                      ? 8
+                      : (widget.kind == _SideKind.logout ? 6 : 10)),
+              if (widget.kind == _SideKind.logout)
+                Text(widget.label,
+                    style: TextStyle(
+                        fontSize: fs, fontWeight: fw, color: fg, height: 1.6))
+              else
+                Expanded(
+                  child: Text(widget.label,
+                      style: TextStyle(
+                          fontSize: fs, fontWeight: fw, color: fg, height: 1.6),
+                      overflow: TextOverflow.ellipsis),
+                ),
+              if (widget.kind == _SideKind.header) ...[
+                ImdIcon(widget.open ? 'chevron-down' : 'chevron-left',
+                    size: 12, color: c.sideMuted),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// فاصلٌ رأسيّ رفيع بين القائمة الجانبية والمحتوى يُسحب لتغيير عرضها —
+/// مؤشّر تغيير الحجم وخطٌّ بلون العلامة عند المرور، كنوافذ سطح المكتب.
+class _SideSplitter extends StatefulWidget {
+  const _SideSplitter({required this.onDrag, required this.onEnd});
+
+  final ValueChanged<double> onDrag;
+  final VoidCallback onEnd;
+
+  @override
+  State<_SideSplitter> createState() => _SideSplitterState();
+}
+
+class _SideSplitterState extends State<_SideSplitter> {
+  bool _hover = false;
+  bool _drag = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final on = _hover || _drag;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: (_) => setState(() => _drag = true),
+        onHorizontalDragUpdate: (d) => widget.onDrag(d.delta.dx),
+        onHorizontalDragEnd: (_) {
+          setState(() => _drag = false);
+          widget.onEnd();
+        },
+        child: SizedBox(
+          width: 6,
+          child: Center(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width: on ? 3 : 1,
+              color: on ? c.accent : Colors.transparent,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/home/shell/home_shell_sidebar.dart ====================
+
+// ==================== FILE: lib/features/home/shell/home_shell_topbar.dart ====================
+part of '../home_shell.dart';
+
+/// يبدّل السمة صراحةً بين فاتحٍ وداكن (لا «تلقائي»): زرٌّ سريعٌ يفترض
+/// نيّة المستخدم من السطوع الحالي الفعلي — ويحفظها فتبقى بعد إعادة
+/// التشغيل، بنفس مسار حفظ السمة من شاشة الهوية.
+///
+/// **التبديل أولًا ثم الحفظ:** كان ينتظر قراءة الهوية وكتابتها في القاعدة
+/// المشفّرة (ومعها مراقبو البيانات في كل تبويب) قبل أن تتبدّل السمة، فيتأخر
+/// الزرّ ملحوظًا. الحفظ الآن بعد التبديل ولا يُنتظر.
+Future<void> _toggleTheme(BuildContext context) async {
+  final next = Theme.of(context).brightness == Brightness.dark ? 'light' : 'dark';
+  final settings = SettingsRepo(context.read<AppDatabase>());
+  context.read<ImdTheme>().apply(next);
+  try {
+    final id = await settings.identity();
+    await settings.saveIdentity(id.copyWith(themePref: next));
+  } catch (err, stack) {
+    // السمة تبدّلت في الجلسة؛ تعذُّر حفظها يُعيدها بعد إعادة التشغيل لا أكثر.
+    ErrorLogger.log('theme.save', err, stack);
+  }
+}
+
+/// الشريط العلوي **للجوال**: زرّ القائمة، واسم النظام، وتبديل القسم والسمة
+/// والجرس والحساب. سطح المكتب يستعمل [_DesktopBar] (شريطٌ واحدٌ يجمع التبويبات).
+///
+/// تبديل القسم انتقل إليه من الشريط الجانبي: هو إجراءٌ نادر (مرةً في بداية
+/// الجلسة غالبًا) لا يستحقّ ارتفاعًا دائمًا في القائمة، وهنا يبقى في متناول
+/// اليد بلا أن يزاحم أبوابها.
+class _Topbar extends StatelessWidget {
+  const _Topbar({
+    required this.userName,
+    required this.showBurger,
+    required this.onBurger,
+    required this.onOpenPage,
+    required this.space,
+    required this.canSwitch,
+    required this.onSwitchSpace,
+  });
+
+  final String userName;
+  final bool showBurger;
+  final VoidCallback onBurger;
+  final ValueChanged<String> onOpenPage;
+
+  /// القسم الذي يقف فيه المستخدم — الجرس يخصّ ما بين يديه.
+  final String space;
+
+  /// زر التبديل لا يظهر تفاعليًّا لمن يملك مساحةً واحدة: تبديلٌ إلى لا شيء،
+  /// لكن اسم القسم يبقى معروضًا فيعرف من فتحه أين هو.
+  final bool canSwitch;
+  final VoidCallback onSwitchSpace;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    // **الشريط العلويّ نظيفٌ على الجهازين.** ما يُزاح أولًا اسم المستخدم، ثم
+    // اسم النظام — وتبقى الصورة والجرس والقائمة، وهي ما يُنقر. وبلا هذا
+    // التدرّج يفيض الصف ويُرسم شريطًا أصفر.
+    return LayoutBuilder(builder: (context, cons) {
+      final w = cons.maxWidth;
+      final showName = w > 560;
+      final showTitle = w > 430;
+      // أندرويد ١٥+ يرسم التطبيق خلف شريط الحالة: بلا هذا الإزاحة يطلع الشريط
+      // العلوي (الاسم والمزامنة) تحت الساعة والبطارية. على ويندوز الإزاحة صفر.
+      final inset = MediaQuery.paddingOf(context).top;
+      return Container(
+        height: ImdSizes.topbarHeight + inset,
+        padding: EdgeInsets.fromLTRB(12, 8 + inset, 12, 10),
+        decoration: BoxDecoration(
+          color: c.topbar(mica: ImdWindow.micaActive.value),
+          border: Border(bottom: BorderSide(color: c.line)),
+        ),
+        child: Row(
+          children: [
+            if (showBurger) ...[
+              ImdIconButton(icon: 'menu', tooltip: 'القائمة', onPressed: onBurger),
+              const SizedBox(width: 8),
+            ],
+            if (showTitle)
+              Flexible(
+                child: Text.rich(
+                  TextSpan(children: [
+                    const TextSpan(text: 'نظام '),
+                    TextSpan(
+                        text: 'الإمداد والتموين',
+                        style: TextStyle(
+                            color: c.accent, fontWeight: FontWeight.w700)),
+                  ]),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: c.text2),
+                ),
+              ),
+            if (showTitle) ...[
+              const SizedBox(width: 10),
+              const ImdMenuBar(),
+            ],
+            const SizedBox(width: 10),
+            _SpacePill(space: space, canSwitch: canSwitch, onTap: onSwitchSpace, showLabel: showTitle),
+            const Spacer(),
+            const _SearchButton(),
+            const SizedBox(width: 8),
+            _ThemeButton(isDark: c.isDark),
+            const SizedBox(width: 8),
+            NotificationBell(onOpenPage: onOpenPage, space: space),
+            const SizedBox(width: 8),
+            _UserChip(userName: userName, showName: showName, height: 40, avatar: 32),
+          ],
+        ),
+      );
+    });
+  }
+}
+
+/// **الشريط الواحد لسطح المكتب**: زرّ طيّ القائمة، فالتبويبات، فالأدوات، فأزرار
+/// النافذة — كلها في صفٍّ واحد بدل ثلاثة (شريط عنوان النظام + شريط علوي + شريط
+/// تبويبات). حين يُنزع إطار ويندوز يصير هذا الصفُّ شريطَ
+/// العنوان نفسه: يُسحب منه فراغُه لتحريك النافذة، ويُنقر مرتين لتكبيرها.
+class _DesktopBar extends StatelessWidget {
+  const _DesktopBar({
+    required this.userName,
+    required this.collapsed,
+    required this.onToggleSide,
+    required this.pages,
+    required this.activeId,
+    required this.onSelect,
+    required this.onClose,
+    required this.onCloseOthers,
+    required this.onOpenPage,
+    required this.space,
+    required this.canSwitch,
+    required this.onSwitchSpace,
+  });
+
+  final String userName;
+
+  /// القائمة الجانبية مطويّةٌ الآن؟ (تحدّد تلميح الزرّ.)
+  final bool collapsed;
+  final VoidCallback onToggleSide;
+  final List<ImdOpenPage> pages;
+  final String activeId;
+  final ValueChanged<String> onSelect;
+  final ValueChanged<String> onClose;
+  final ValueChanged<String> onCloseOthers;
+  final ValueChanged<String> onOpenPage;
+  final String space;
+  final bool canSwitch;
+  final VoidCallback onSwitchSpace;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    const h = ImdSizes.desktopBarHeight;
+    return LayoutBuilder(builder: (context, cons) {
+      final w = cons.maxWidth;
+      // التبويبات أولى بالعرض من الأدوات: تُسقَط القوائم أولًا ثم اسم المستخدم
+      // ثم اسم القسم — وتبقى الأيقونات (السمة، الجرس، الصورة).
+      final showMenus = w > 1180;
+      final showName = w > 1040;
+      final showLabel = w > 1040;
+      return Container(
+          height: h,
+          decoration: BoxDecoration(
+            color: c.topbar(mica: ImdWindow.micaActive.value),
+            border: Border(bottom: BorderSide(color: c.line)),
+          ),
+          child: Row(children: [
+            const SizedBox(width: 8),
+            // `Tooltip` يُظهر النصَّ للمُبصر ولا يُسمّي الزرَّ في شجرة
+            // الدلالات، و`InkWell` عارٍ من أي اسم — فالاثنان لازمان.
+            Semantics(
+              label: collapsed ? 'توسيع القائمة' : 'طيّ القائمة',
+              button: true,
+              child: Tooltip(
+                message: collapsed ? 'توسيع القائمة' : 'طيّ القائمة',
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: onToggleSide,
+                  child: SizedBox(
+                    width: 34,
+                    height: 28,
+                    child: Center(child: ImdIcon('menu', size: 16, color: c.text2)),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: ImdPageTabs(
+                  embedded: true,
+                  // الرئيسية تُفتح من الشريط الجانبي ولا تحتاج تبويبة.
+                  pages: [for (final p in pages) if (p.id != 'dash' && p.id != 'fuelDashboard') p],
+                  activeId: activeId,
+                  onSelect: onSelect,
+                  onClose: onClose,
+                  onCloseOthers: onCloseOthers,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (showMenus) ...[const ImdMenuBar(), const SizedBox(width: 8)],
+            _SpacePill(space: space, canSwitch: canSwitch, onTap: onSwitchSpace, showLabel: showLabel, dense: true),
+            const SizedBox(width: 8),
+            const _SearchButton(dense: true),
+            const SizedBox(width: 6),
+            _ThemeButton(isDark: c.isDark, dense: true),
+            const SizedBox(width: 6),
+            NotificationBell(onOpenPage: onOpenPage, space: space, dense: true),
+            const SizedBox(width: 8),
+            _UserChip(userName: userName, showName: showName, height: 30, avatar: 24),
+            const SizedBox(width: 10),
+          ]),
+      );
+    });
+  }
+}
+
+/// تبديل القسم: أيقونةٌ دائمًا، واسمه معها ما اتّسع الشريط. من يملك مساحةً
+/// واحدة يبقى الاسم معروضًا له لكن بلا تفاعل — لا تبديل إلى لا شيء.
+class _SpacePill extends StatelessWidget {
+  const _SpacePill({required this.space, required this.canSwitch, required this.onTap, required this.showLabel, this.dense = false});
+
+  final bool dense;
+  final String space;
+  final bool canSwitch;
+  final VoidCallback onTap;
+  final bool showLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return MouseRegion(
+      cursor: canSwitch ? ImdCursor.click : MouseCursor.defer,
+      child: ImdTap(
+        onTap: canSwitch ? onTap : null,
+        behavior: HitTestBehavior.opaque,
+        child: Semantics(
+          label: canSwitch ? 'تبديل القسم' : AppSpace.label(space),
+          child: Container(
+            height: dense ? 28 : 34,
+            padding: EdgeInsetsDirectional.fromSTEB(10, dense ? 3 : 6, showLabel ? 12 : 10, dense ? 3 : 6),
+            decoration: BoxDecoration(
+              color: c.subtle,
+              border: Border.all(color: c.line),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              ImdIcon(canSwitch ? 'swap' : (AppSpace.icons[space] ?? 'package'), size: 13, color: c.muted),
+              if (showLabel) ...[
+                const SizedBox(width: 6),
+                Text(AppSpace.label(space),
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: c.text2)),
+              ],
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// البحث العام: الزرُّ نظيرُ Ctrl+K لمن لا يحفظ الاختصار أو لا لوحة مفاتيح
+/// لديه. الإجراء نفسه المسجَّل في [ImdScreenActions.onSearch] (يسجّله الإطار)،
+/// فلا يعرف الشريط شيئًا عن اللوحة ولا عن الصفحات.
+class _SearchButton extends StatelessWidget {
+  const _SearchButton({this.dense = false});
+
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) => ImdIconButton(
+        icon: 'search',
+        // `tooltip` يُضيف التلميحة **واسمًا دلاليًّا** لقارئ الشاشة؛ وغلافُ
+        // `Tooltip` وحده كان يُظهر النصّ للمُبصر ولا يُسمّي الزرَّ.
+        tooltip: ImdShortcuts.supported ? 'البحث العام (Ctrl+K)' : 'البحث العام',
+        dense: dense,
+        onPressed: () => ImdScreenActions.maybeOf(context)?.onSearch?.call(),
+      );
+}
+
+class _ThemeButton extends StatelessWidget {
+  const _ThemeButton({required this.isDark, this.dense = false});
+  final bool isDark;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) => ImdIconButton(
+        icon: isDark ? 'sun' : 'moon',
+        tooltip: isDark ? 'الوضع الفاتح' : 'الوضع الداكن',
+        dense: dense,
+        onPressed: () => _toggleTheme(context),
+      );
+}
+
+/// صورة المستخدم واسمه. (شارة «IAM محمي» أُزيلت من الشريط.)
+class _UserChip extends StatelessWidget {
+  const _UserChip({required this.userName, required this.showName, required this.height, required this.avatar});
+
+  final String userName;
+  final bool showName;
+  final double height;
+  final double avatar;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    // البطاقة بابُ «تغيير كلمة المرور» (M-12): كانت النافذة لا تُفتح إلا من تنبيه
+    // «كلمتك قصيرة» بعد الدخول، فلا يغيّر أحدٌ كلمته متى شاء.
+    final me = context.read<AuthService>().currentUser;
+    // الاسم على عقدة النقر نفسها (ImdTap) — لا على أبٍ لها فيُعلَن زرٌّ بلا اسم.
+    return Tooltip(
+      message: 'تغيير كلمة المرور',
+      excludeFromSemantics: true,
+      child: ImdTap(
+        label: 'حساب $userName — تغيير كلمة المرور',
+        radius: 99,
+        onTap: me == null ? null : () => showChangePasswordDialog(db: context.read<AppDatabase>(), userId: me.id),
+        child: _chip(c),
+      ),
+    );
+  }
+
+  Widget _chip(ImdColors c) {
+    return Container(
+      height: height,
+      padding: EdgeInsetsDirectional.fromSTEB(4, 4, showName ? 12 : 4, 4),
+      decoration: BoxDecoration(color: c.subtle, borderRadius: BorderRadius.circular(99)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        _Avatar(name: userName, size: avatar, fontSize: 13),
+        if (showName) ...[
+          const SizedBox(width: 10),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 140),
+            child: Text(userName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: c.text)),
+          ),
+        ],
+      ]),
+    );
+  }
+}
+
+/// دائرة الحرف الأول من اسم المستخدم.
+class _Avatar extends StatelessWidget {
+  const _Avatar(
+      {required this.name, required this.size, required this.fontSize});
+  final String name;
+  final double size;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+          color: c.accent,
+          shape: BoxShape.circle),
+      child: Text(
+        name.isEmpty ? '؟' : name.characters.first.toUpperCase(),
+        style: TextStyle(
+            fontSize: fontSize,
+            fontWeight: FontWeight.w600,
+            color: c.onAccent),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/home/shell/home_shell_topbar.dart ====================
+
+// ==================== FILE: lib/features/home/space_chooser_screen.dart ====================
+import 'package:flutter/material.dart';
+
+import '../../core/ui/widgets/imd_tap.dart';
+import '../../core/ui/imd_icon.dart';
+import '../../core/ui/imd_tokens.dart';
+import '../../domain/app_space.dart';
+
+/// اختيار مساحة العمل — لا تظهر إلا لمن يملك المساحتين.
+///
+/// ومن يملك واحدة يدخلها مباشرة: شاشةُ اختيارٍ بخيارٍ واحد متاح ليست اختيارًا،
+/// بل نقرةٌ تُدفع كل يوم بلا مقابل.
+class SpaceChooserScreen extends StatelessWidget {
+  const SpaceChooserScreen({
+    super.key,
+    required this.spaces,
+    required this.onPick,
+    required this.userName,
+  });
+
+  final List<String> spaces;
+  final ValueChanged<String> onPick;
+  final String userName;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    final narrow = ImdBp.of(context).tablet;
+
+    return Scaffold(
+      backgroundColor: c.bg,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 880),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'نظام الإمداد والتموين',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 15, color: c.muted, letterSpacing: .3),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    userName.isEmpty ? 'اختر القسم' : 'أهلًا $userName — اختر القسم',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w700,
+                      color: c.text,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'يمكنك التبديل بينهما في أي وقت من أعلى الشريط الجانبي.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 13.5, color: c.muted, height: 1.8),
+                  ),
+                  const SizedBox(height: 28),
+                  if (narrow)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final s in spaces) ...[
+                          _card(context, s),
+                          const SizedBox(height: 14),
+                        ],
+                      ],
+                    )
+                  else
+                    // `stretch` يحتاج ارتفاعًا محدودًا والتمرير يعطي ما لا نهاية،
+                    // فيُحدَّد الارتفاع بأطول بطاقة.
+                    IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (var i = 0; i < spaces.length; i++) ...[
+                            if (i > 0) const SizedBox(width: 16),
+                            Expanded(child: _card(context, spaces[i])),
+                          ],
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _card(BuildContext context, String space) {
+    final c = context.imd;
+    return _SpaceCard(
+      space: space,
+      onTap: () => onPick(space),
+      accent: space == AppSpace.fuel ? c.warn : c.accent,
+    );
+  }
+}
+
+class _SpaceCard extends StatefulWidget {
+  const _SpaceCard({
+    required this.space,
+    required this.onTap,
+    required this.accent,
+  });
+
+  final String space;
+  final VoidCallback onTap;
+  final Color accent;
+
+  @override
+  State<_SpaceCard> createState() => _SpaceCardState();
+}
+
+class _SpaceCardState extends State<_SpaceCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.imd;
+    return MouseRegion(
+      cursor: ImdCursor.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: ImdTap(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
+          decoration: BoxDecoration(
+            color: c.surface,
+            border: Border.all(
+                color: _hover ? widget.accent : c.line, width: _hover ? 2 : 1),
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: _hover ? imdShadow(c) : null,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: widget.accent.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: ImdIcon(AppSpace.icons[widget.space] ?? 'package',
+                    size: 26, color: widget.accent),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                AppSpace.label(widget.space),
+                style: TextStyle(
+                    fontSize: 20, fontWeight: FontWeight.w700, color: c.text),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                AppSpace.descriptions[widget.space] ?? '',
+                style: TextStyle(fontSize: 13, color: c.muted, height: 1.9),
+              ),
+              const SizedBox(height: 18),
+              Row(children: [
+                Text('ادخل',
+                    style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: widget.accent)),
+                const SizedBox(width: 6),
+                ImdIcon('arrow-left', size: 15, color: widget.accent),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ==================== END FILE: lib/features/home/space_chooser_screen.dart ====================
+
+// ==================== FILE: lib/features/home/supply_groups.dart ====================
+import 'package:flutter/material.dart';
+
+import '../../core/ui/imd_tabs_shell.dart';
+import '../alerts/stock_alerts_screen.dart';
+import '../catalog/assets_screen.dart';
+import '../catalog/items_screen.dart';
+import '../catalog/kitchens_screen.dart';
+import '../catalog/suppliers_screen.dart';
+import '../catalog/units_screen.dart';
+import '../catalog/warehouses_screen.dart';
+import '../daily/daily_operations_screen.dart';
+import '../daily/ratios_screen.dart';
+import '../daily/strength_screen.dart';
+import '../insights/activity_intel_screen.dart';
+import '../insights/executive_cmd_screen.dart';
+import '../insights/health_ops_screen.dart';
+import '../insights/sensitive_ops_screen.dart';
+import '../inventory/destruction_screen.dart';
+import '../inventory/issue_screen.dart';
+import '../inventory/opening_screen.dart';
+import '../inventory/pending_screen.dart';
+import '../inventory/ration_order_screen.dart';
+import '../inventory/receive_screen.dart';
+import '../inventory/returns_screen.dart';
+import '../inventory/transfer_screen.dart';
+import '../reports/actual_entitlement_screen.dart';
+import '../reports/balances_screen.dart';
+import '../reports/camp_ledger_screen.dart';
+import '../reports/camp_settlement_screen.dart';
+import '../reports/reports_center_screen.dart';
+import '../settings/audit_screen.dart';
+
+/// أبواب قسم الإمداد والتموين.
+///
+/// **الشريط فهرسٌ لا سجل.** ستّة وعشرون بندًا في خمسة أقسام تُقرأ بالبحث لا
+/// بالنظر. والمتقارب فيها ظاهر: سندات الحركة الخمسة يحرّرها أمينُ مستودعٍ
+/// واحد في جلسةٍ واحدة، والأدلّة الستة تُعرَّف مرةً وتُقرأ دائمًا، والرقابة
+/// خمسُ نظراتٍ على السجل نفسه.
+///
+/// وكلُّ بابٍ يُخفي تبويبةً لا يملك المستخدم صلاحيتها: الجمع تنظيمٌ للقائمة
+/// لا توسيعٌ للأذونات.
+
+/// حركة المخزون — السندات التي تحرّك الرصيد.
+class SupplyMovesScreen extends StatelessWidget {
+  const SupplyMovesScreen({super.key, this.initialTab = 'receive'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية لأي من سندات الحركة',
+        tabs: [
+          ImdShellTab(
+            id: 'receive',
+            label: 'الاستلام',
+            icon: 'download',
+            perm: 'receive',
+            builder: (_) => const ReceiveScreen(),
+          ),
+          ImdShellTab(
+            id: 'issue',
+            label: 'الصرف',
+            icon: 'upload',
+            perm: 'issue',
+            builder: (_) => const IssueScreen(),
+          ),
+          ImdShellTab(
+            id: 'transfer',
+            label: 'التحويل',
+            icon: 'refresh',
+            perm: 'transfer',
+            builder: (_) => const TransferScreen(),
+          ),
+          ImdShellTab(
+            id: 'returns',
+            label: 'المرتجعات',
+            icon: 'undo',
+            perm: 'returns',
+            builder: (_) => const ReturnsScreen(),
+          ),
+          ImdShellTab(
+            id: 'opening',
+            label: 'الأرصدة الافتتاحية',
+            icon: 'clipboard',
+            perm: 'opening',
+            builder: (_) => const OpeningScreen(),
+          ),
+          ImdShellTab(
+            id: 'destruction',
+            label: 'الإتلاف',
+            icon: 'trash',
+            perm: 'destruction',
+            builder: (_) => const DestructionScreen(),
+          ),
+        ],
+      );
+}
+
+/// الطلبيات — ما يُطلب قبل أن يُستلم.
+///
+/// وهي غير الحركة: الطلبية **لا تمسّ الرصيد** حتى تُعتمد ويُحرَّر سندها.
+class SupplyOrdersScreen extends StatelessWidget {
+  const SupplyOrdersScreen({super.key, this.initialTab = 'rationOrders'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية للطلبيات',
+        tabs: [
+          ImdShellTab(
+            id: 'rationOrders',
+            label: 'طلبيات الإعاشة',
+            icon: 'clipboard',
+            perm: 'rationOrders',
+            builder: (_) => const RationOrderScreen(),
+          ),
+          ImdShellTab(
+            id: 'pendingOrders',
+            label: 'أوامر التوريد المعلقة',
+            icon: 'bell',
+            perm: 'pendingOrders',
+            builder: (_) => const PendingScreen(),
+          ),
+        ],
+      );
+}
+
+/// البيانات الأساسية — أدلّة القسم التي يُبنى عليها كل سند.
+class SupplyDataScreen extends StatelessWidget {
+  const SupplyDataScreen({super.key, this.initialTab = 'items'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية لأي من الأدلّة',
+        tabs: [
+          ImdShellTab(
+            id: 'items',
+            label: 'الأصناف',
+            icon: 'package',
+            perm: 'items',
+            builder: (_) => const ItemsScreen(),
+          ),
+          ImdShellTab(
+            id: 'stores',
+            label: 'المستودعات',
+            icon: 'warehouse',
+            perm: 'stores',
+            builder: (_) => const WarehousesScreen(),
+          ),
+          ImdShellTab(
+            id: 'units',
+            label: 'الوحدات المستفيدة',
+            icon: 'users',
+            perm: 'units',
+            builder: (_) => const UnitsScreen(),
+          ),
+          ImdShellTab(
+            id: 'suppliers',
+            label: 'الموردون',
+            icon: 'truck',
+            perm: 'suppliers',
+            builder: (_) => const SuppliersScreen(),
+          ),
+          ImdShellTab(
+            id: 'kitchens',
+            label: 'المطابخ والأفران',
+            icon: 'utensils',
+            perm: 'kitchens',
+            builder: (_) => const KitchensScreen(),
+          ),
+          ImdShellTab(
+            id: 'assets',
+            label: 'الأصول الثابتة',
+            icon: 'package',
+            perm: 'assets',
+            builder: (_) => const AssetsScreen(),
+          ),
+        ],
+      );
+}
+
+/// التشغيل اليومي — ما يُفتح كل صباح.
+class SupplyDailyScreen extends StatelessWidget {
+  const SupplyDailyScreen({super.key, this.initialTab = 'feeding'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية لشاشات التشغيل اليومي',
+        tabs: [
+          ImdShellTab(
+            id: 'feeding',
+            label: 'التفريدة اليومية',
+            icon: 'calendar',
+            perm: 'feeding',
+            builder: (_) => const StrengthScreen(),
+          ),
+          ImdShellTab(
+            id: 'dailyOperations',
+            label: 'التخطيط والتشغيل',
+            icon: 'calendar',
+            perm: 'dailyOperations',
+            builder: (_) => const DailyOperationsScreen(),
+          ),
+          ImdShellTab(
+            id: 'ratios',
+            label: 'نسب الاستحقاق',
+            icon: 'scale',
+            perm: 'ratios',
+            builder: (_) => const RatiosScreen(),
+          ),
+        ],
+      );
+}
+
+/// التقارير — نظراتٌ على البيانات نفسها.
+class SupplyReportsScreen extends StatelessWidget {
+  const SupplyReportsScreen({super.key, this.initialTab = 'reports'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية لأي من التقارير',
+        tabs: [
+          ImdShellTab(
+            id: 'reports',
+            label: 'مركز التقارير',
+            icon: 'chart',
+            perm: 'reports',
+            builder: (_) => const ReportsCenterScreen(),
+          ),
+          ImdShellTab(
+            id: 'balances',
+            label: 'الأرصدة الحالية',
+            icon: 'calculator',
+            perm: 'balances',
+            builder: (_) => const BalancesScreen(),
+          ),
+          ImdShellTab(
+            id: 'stockAlerts',
+            label: 'تنبيهات المخزون',
+            icon: 'alert',
+            perm: 'balances',
+            builder: (_) => const StockAlertsScreen(),
+          ),
+        ],
+      );
+}
+
+/// الرقابة والتدقيق — خمسُ نظراتٍ على السجل نفسه.
+///
+/// السجل يُقرأ سطرًا سطرًا للتحقيق، ويُقرأ مجمَّعًا لكشف الانحراف، ويُقرأ
+/// مرشَّحًا على الحسّاس وحده. وثلاثتها بابٌ واحد.
+class SupplyAuditScreen extends StatelessWidget {
+  const SupplyAuditScreen({super.key, this.initialTab = 'auditTrail'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية للرقابة والتدقيق',
+        tabs: [
+          ImdShellTab(
+            id: 'auditTrail',
+            label: 'سجل النشاط',
+            icon: 'scan',
+            perm: 'auditTrail',
+            builder: (_) => const AuditScreen(),
+          ),
+          ImdShellTab(
+            id: 'activityIntel',
+            label: 'ذكاء النشاط',
+            icon: 'bulb',
+            perm: 'activityIntel',
+            builder: (_) => const ActivityIntelScreen(),
+          ),
+          ImdShellTab(
+            id: 'sensitiveOps',
+            label: 'التغييرات الحساسة',
+            icon: 'alert',
+            perm: 'sensitiveOps',
+            builder: (_) => const SensitiveOpsScreen(),
+          ),
+          ImdShellTab(
+            id: 'executiveCmd',
+            label: 'مركز القيادة',
+            icon: 'target',
+            perm: 'executiveCmd',
+            builder: (_) => const ExecutiveCmdScreen(),
+          ),
+          ImdShellTab(
+            id: 'healthOps',
+            label: 'صحة النظام',
+            icon: 'shield',
+            perm: 'healthOps',
+            builder: (_) => const HealthOpsScreen(),
+          ),
+        ],
+      );
+}
+
+/// حساب المعسكر والاستحقاق — التقارير الثلاثة المترابطة في شاشةٍ واحدة.
+///
+/// الاستحقاق الفعلي يحسب المستحق مقابل الواصل لأي نطاق (الجهة، معسكرٌ ومخزنه،
+/// وحدة، مستودع) على أي مدى؛ وسجل المعسكر يحفظه شهرًا بشهر بالقاعدة نفسها
+/// (`EntitlementScopes`)؛ والتصفية تُقفل الشهر وترحّل رصيده. كانت ثلاثة بنودٍ
+/// متفرقة لحسابٍ واحد.
+class CampAccountsScreen extends StatelessWidget {
+  const CampAccountsScreen({super.key, this.initialTab = 'actualEntitlement'});
+
+  final String initialTab;
+
+  @override
+  Widget build(BuildContext context) => ImdTabsShell(
+        initial: initialTab,
+        emptyMessage: 'لا صلاحية لحسابات المعسكرات والاستحقاق',
+        tabs: [
+          ImdShellTab(
+            id: 'actualEntitlement',
+            label: 'الاستحقاق الفعلي',
+            icon: 'calculator',
+            perm: 'actualEntitlement',
+            builder: (_) => const ActualEntitlementScreen(),
+          ),
+          ImdShellTab(
+            id: 'campLedger',
+            label: 'سجل حساب المعسكر',
+            icon: 'list',
+            perm: 'campLedger',
+            builder: (_) => const CampLedgerScreen(),
+          ),
+          ImdShellTab(
+            id: 'campSettlement',
+            label: 'تصفية الشهر',
+            icon: 'scale',
+            perm: 'campSettlement',
+            builder: (_) => const CampSettlementScreen(),
+          ),
+        ],
+      );
+}
+// ==================== END FILE: lib/features/home/supply_groups.dart ====================

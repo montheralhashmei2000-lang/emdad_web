@@ -1,10 +1,30 @@
+// @vitest-environment jsdom
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { AuthService, AuthServiceProvider } from '../../core/security/auth_service';
 import { SharedPreferences } from '../../core/security/shared_prefs';
+import {
+  AppDatabaseProvider,
+  ImdTheme,
+  ImdThemeProvider,
+  ThemeMode,
+} from '../../core/theme/imd_theme';
+import { ImdScreenActions, ImdScreenActionsProvider } from '../../core/ui/imd_screen_actions';
 import { AppDatabase, UsersCompanion } from '../../data/db/app_database';
 import { NativeDatabase, Value } from '../../data/db/sqlite_driver';
 import type { AuditLog, User } from '../../data/db/tables/core_tables';
 import { ArgumentError, UsersRepo } from '../../data/repos/users_repo';
+import { AutoSyncProvider, AutoSyncService } from '../../data/sync/auto_sync';
+import { HomeShell, type ImdNav } from '../../features/home/home_shell';
 import { AccessControl, UserRole } from '../access_control';
+import { AppSpace } from '../app_space';
 import { SectionBlock } from '../section_block';
 
 /// حجب الأقسام (v25): النموذج، التطبيق fail-closed، المستودع والتوقيع، والقشرة.
@@ -213,28 +233,161 @@ describe('section_block_test', () => {
   });
 
   describe('القشرة', () => {
-    // MISSING: lib/features/home/home_shell.dart
-    // MISSING: lib/data/sync/auto_sync.dart
-    it.skip('حجب fuel: المدير لا يرى القسم ولو كان محفوظًا، وصفحاته مرفوضة بالتنقّل المباشر', () => {
-      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    let db: AppDatabase;
+    let auth: AuthService;
+    let autoSync: AutoSyncService;
+    let imdTheme: ImdTheme;
+    let screenActions: ImdScreenActions;
+
+    beforeEach(async () => {
+      SharedPreferences.setMockInitialValues({});
+      db = AppDatabase.forTesting(NativeDatabase.memory());
+      autoSync = new AutoSyncService(db);
+      imdTheme = new ImdTheme(ThemeMode.light);
+      screenActions = new ImdScreenActions();
+      auth = new AuthService(db);
     });
 
-    // MISSING: lib/features/home/home_shell.dart
-    // MISSING: lib/data/sync/auto_sync.dart
-    it.skip('حجب supply: يبقى المحروقات وحده والإمداد مرفوض', () => {
-      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    afterEach(async () => {
+      cleanup();
+      autoSync.dispose();
+      imdTheme.dispose();
+      await db.close();
     });
 
-    // MISSING: lib/features/home/home_shell.dart
-    // MISSING: lib/data/sync/auto_sync.dart
+    async function bootShell({
+      role = 'admin',
+      blockedJson,
+      savedSpace,
+    }: {
+      readonly role?: string;
+      readonly blockedJson: string;
+      readonly savedSpace: string;
+    }) {
+      await auth.createAdmin({ username: 'admin', password: 'Test@12345' });
+      const created = await db
+        .select(db.users)
+        .where((t) => t.username.equals('admin'))
+        .getSingle();
+      await db
+        .update(db.users)
+        .where((t) => t.id.equals(created.id))
+        .write(
+          UsersCompanion({
+            role: Value.of(role),
+            sectionBlocked: Value.of(blockedJson),
+          }),
+        );
+      await auth.login('admin', 'Test@12345');
+      SharedPreferences.setMockInitialValues({
+        [`imdad.space.${auth.currentUser!.id}`]: savedSpace,
+      });
+
+      const navRef: { current: ImdNav | null } = { current: null };
+      const result = render(
+        <AppDatabaseProvider db={db}>
+          <AuthServiceProvider value={auth}>
+            <ImdScreenActionsProvider value={screenActions}>
+              <AutoSyncProvider service={autoSync}>
+                <ImdThemeProvider theme={imdTheme}>
+                  <HomeShell
+                    viewportWidth={1600}
+                    navRef={navRef}
+                    onSignOut={async () => {}}
+                  />
+                </ImdThemeProvider>
+              </AutoSyncProvider>
+            </ImdScreenActionsProvider>
+          </AuthServiceProvider>
+        </AppDatabaseProvider>,
+      );
+
+      await waitFor(() => {
+        expect(
+          result.container.querySelector('[data-imd-home-shell="true"]'),
+        ).not.toBeNull();
+      });
+
+      return { ...result, navRef };
+    }
+
+    it('حجب fuel: المدير لا يرى القسم ولو كان محفوظًا، وصفحاته مرفوضة بالتنقّل المباشر', async () => {
+      const { container, navRef } = await bootShell({
+        role: 'admin',
+        blockedJson: '["fuel"]',
+        savedSpace: AppSpace.fuel,
+      });
+
+      const shell = container.querySelector('[data-imd-home-shell="true"]');
+      expect(shell?.getAttribute('data-imd-space')).toBe(AppSpace.supply);
+      expect(screen.queryByText('ادخل')).toBeNull();
+      expect(screen.queryByLabelText('تبديل القسم')).toBeNull();
+
+      act(() => {
+        navRef.current!.go('fuelMoves');
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText('صلاحية غير متاحة').length).toBeGreaterThan(0);
+      });
+    });
+
+    it('حجب supply: يبقى المحروقات وحده والإمداد مرفوض', async () => {
+      const { container, navRef } = await bootShell({
+        role: 'admin',
+        blockedJson: '["supply"]',
+        savedSpace: AppSpace.supply,
+      });
+
+      const shell = container.querySelector('[data-imd-home-shell="true"]');
+      expect(shell?.getAttribute('data-imd-space')).toBe(AppSpace.fuel);
+      expect(screen.queryByLabelText('تبديل القسم')).toBeNull();
+
+      act(() => {
+        navRef.current!.go('items');
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText('صلاحية غير متاحة').length).toBeGreaterThan(0);
+      });
+    });
+
+    // MISSING: lib/features/settings/settings_screen.dart
     it.skip('حجب admin.users: قسم «المستخدمون» يختفي من داخل الإعدادات وبقية الأقسام تبقى', () => {
-      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+      // يعتمد على SettingsScreen الفعلية (المرحلة 20).
     });
 
-    // MISSING: lib/features/home/home_shell.dart
-    // MISSING: lib/data/sync/auto_sync.dart
-    it.skip('لا حجب للمالك: يرى كل الأقسام ولو خُزِّن له حجب', () => {
-      // يعتمد على HomeShell وAutoSyncService (المراحل 6 و16).
+    it('لا حجب للمالك: يرى كل الأقسام ولو خُزِّن له حجب', async () => {
+      const { container, navRef } = await bootShell({
+        role: 'owner',
+        blockedJson: '["supply","fuel","admin.users"]',
+        savedSpace: AppSpace.supply,
+      });
+
+      const shell = () => container.querySelector('[data-imd-home-shell="true"]');
+      expect(shell()?.getAttribute('data-imd-space')).toBe(AppSpace.supply);
+      expect(screen.getByLabelText('تبديل القسم')).not.toBeNull();
+
+      fireEvent.click(screen.getByLabelText('تبديل القسم'));
+      await waitFor(() => {
+        expect(shell()?.getAttribute('data-imd-space')).toBe(AppSpace.fuel);
+      });
+
+      act(() => {
+        navRef.current!.go('fuelMoves');
+      });
+      await waitFor(() => {
+        expect(navRef.current!.current).toBe('fuelIssue');
+      });
+      expect(screen.queryByText('صلاحية غير متاحة')).toBeNull();
+
+      act(() => {
+        navRef.current!.go('items');
+      });
+      await waitFor(() => {
+        expect(navRef.current!.current).toBe('items');
+      });
+      expect(screen.queryByText('صلاحية غير متاحة')).toBeNull();
     });
   });
 });

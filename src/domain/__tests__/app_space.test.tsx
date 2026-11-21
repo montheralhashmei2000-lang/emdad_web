@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { SpaceChooserScreen } from '../../features/home/space_chooser_screen';
 import { AppSpace } from '../app_space';
 
 /// مساحتا العمل: الإمداد والمحروقات.
@@ -6,6 +9,10 @@ import { AppSpace } from '../app_space';
 /// القاعدة التي تحرسها هذه الاختبارات: **من يملك مساحةً واحدة لا يُسأل**.
 /// شاشةُ اختيارٍ بخيارٍ واحد متاح ليست اختيارًا، بل نقرةٌ تُدفع كل يوم.
 describe('app_space_test', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   describe('ما يملكه المستخدم من مساحات', () => {
     it('من له صفحات الإمداد وحدها يملك مساحةً واحدة', () => {
       const spaces = AppSpace.availableFor((p) => AppSpace.pages[AppSpace.supply]!.includes(p));
@@ -87,19 +94,73 @@ describe('app_space_test', () => {
   });
 
   describe('شاشة الاختيار', () => {
-    // MISSING: lib/features/home/space_chooser_screen.dart
-    it.skip('تعرض المساحتين بوصفيهما', () => {
-      // يعتمد على SpaceChooserScreen (المرحلة 6).
+    it('تعرض المساحتين بوصفيهما', () => {
+      render(
+        <SpaceChooserScreen
+          spaces={AppSpace.all}
+          userName="أحمد"
+          onPick={() => {}}
+        />,
+      );
+      expect(screen.getByText('أهلًا أحمد — اختر القسم')).not.toBeNull();
+      expect(screen.getByText(AppSpace.label(AppSpace.supply))).not.toBeNull();
+      expect(screen.getByText(AppSpace.label(AppSpace.fuel))).not.toBeNull();
+      expect(
+        screen.getByText(AppSpace.descriptions[AppSpace.supply]!),
+      ).not.toBeNull();
+      expect(
+        screen.getByText(AppSpace.descriptions[AppSpace.fuel]!),
+      ).not.toBeNull();
     });
 
-    // MISSING: lib/features/home/space_chooser_screen.dart
-    it.skip('النقر يعيد المساحة المختارة', () => {
-      // يعتمد على SpaceChooserScreen (المرحلة 6).
+    it('النقر يعيد المساحة المختارة', () => {
+      let picked: string | null = null;
+      render(
+        <SpaceChooserScreen
+          spaces={AppSpace.all}
+          userName=""
+          onPick={(s) => {
+            picked = s;
+          }}
+        />,
+      );
+
+      fireEvent.click(screen.getByText(AppSpace.label(AppSpace.fuel)));
+      expect(picked).toBe(AppSpace.fuel);
+
+      fireEvent.click(screen.getByText(AppSpace.label(AppSpace.supply)));
+      expect(picked).toBe(AppSpace.supply);
     });
 
-    // MISSING: lib/features/home/space_chooser_screen.dart
-    it.skip('تُبنى على عرض ضيّق بلا فيض', () => {
-      // يعتمد على SpaceChooserScreen (المرحلة 6).
+    it('تُبنى على عرض ضيّق بلا فيض', () => {
+      const prevWidth = window.innerWidth;
+      Object.defineProperty(window, 'innerWidth', {
+        writable: true,
+        configurable: true,
+        value: 360,
+      });
+      try {
+        const { container } = render(
+          <SpaceChooserScreen
+            spaces={AppSpace.all}
+            userName="أحمد"
+            onPick={() => {}}
+          />,
+        );
+        expect(
+          container.querySelector('[data-imd-space-chooser="true"]'),
+        ).not.toBeNull();
+        expect(screen.getByText(AppSpace.label(AppSpace.supply))).not.toBeNull();
+        expect(screen.getByText(AppSpace.label(AppSpace.fuel))).not.toBeNull();
+        // في العرض الضيق (< tablet) تصطف البطاقات عموديًا داخل عمود مرن لا شبكة أفقية.
+        expect(container.querySelector('.grid')).toBeNull();
+      } finally {
+        Object.defineProperty(window, 'innerWidth', {
+          writable: true,
+          configurable: true,
+          value: prevWidth,
+        });
+      }
     });
   });
 });

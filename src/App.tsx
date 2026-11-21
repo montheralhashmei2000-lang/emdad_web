@@ -1,742 +1,666 @@
-import { useEffect, useMemo, useState } from 'react';
-import { AppNames } from './core/app_names';
-import { AppTheme } from './core/theme/app_theme';
-import { ImdDensity } from './core/ui/imd_density';
-import { ImdDropZone } from './core/ui/imd_drop_zone';
-import { ImdFonts } from './core/ui/imd_fonts';
-import { arDate, arDay, isoDay, nf, nfMoney } from './core/ui/imd_format';
-import { ImdDateField, ImdF2, ImdLabeled } from './core/ui/imd_form';
-import { ImdFreeTableEditor } from './core/ui/imd_free_table';
-import { ImdKeyScroll } from './core/ui/imd_key_scroll';
-import { ImdDigits, ImdNumbers } from './core/ui/imd_numbers';
-import { ImdOccupancyBar } from './core/ui/imd_occupancy_bar';
-import { ImdOpenPage, ImdPageHost, ImdPageTabs } from './core/ui/imd_page_tabs';
-import { ImdQr } from './core/ui/imd_qr';
-import { ImdScreenActions } from './core/ui/imd_screen_actions';
-import { ImdSectionTheme } from './core/ui/imd_section_theme';
-import { ImdRecordSink, ImdStatusBar } from './core/ui/imd_status_bar';
-import { ImdStyle } from './core/ui/imd_style';
-import { ImdColors } from './core/ui/imd_tokens';
-import { ImdCol, ImdTable } from './core/ui/widgets/imd_table';
-import { FreeCol, FreeTable } from './domain/free_table';
 import {
-  ImdBtnKind,
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
+import { AppNames } from './core/app_names';
+import { ErrorLogger } from './core/error_log';
+import { AuthService, AuthServiceProvider } from './core/security/auth_service';
+import { DeviceActivation } from './core/security/device_activation';
+import { IdleLock } from './core/security/idle_lock';
+import { AppTheme } from './core/theme/app_theme';
+import {
+  AppDatabaseContext,
+  AppDatabaseProvider,
+  ImdTheme,
+  ImdThemeContext,
+  ImdThemeDataProvider,
+  ImdThemeProvider,
+  ThemeMode,
+  useAppDatabase,
+  useImdColors,
+  useImdTheme,
+} from './core/theme/imd_theme';
+import { ImdDensity } from './core/ui/imd_density';
+import { ImdFonts } from './core/ui/imd_fonts';
+import { ImdIcon } from './core/ui/imd_icon';
+import { ImdKeyScroll } from './core/ui/imd_key_scroll';
+import {
+  ImdScreenActions,
+  ImdScreenActionsProvider,
+  ImdShortcuts,
+} from './core/ui/imd_screen_actions';
+import { ImdSectionTheme } from './core/ui/imd_section_theme';
+import { ImdStyle } from './core/ui/imd_style';
+import { ImdWindow } from './core/ui/imd_window';
+import {
   ImdButton,
-  ImdButtonOutline,
-  ImdChip,
   ImdField,
-  ImdIconButton,
-  ImdPage,
-  ImdPageTitle,
   ImdPanel,
-  ImdSelect,
-  ImdTone,
-  showImdModal,
   showImdToast,
 } from './core/ui/imd_widgets';
+import { BackupScheduler } from './data/backup/backup_scheduler';
+import { AppDatabase } from './data/db/app_database';
+import { AuditRepo } from './data/repos/audit_repo';
+import { CampLedgerRepo, SettlementResult } from './data/repos/camp_ledger_repo';
+import { SettingsRepo } from './data/repos/settings_repo';
+import { AutoSyncProvider, AutoSyncService } from './data/sync/auto_sync';
+import { DomainDiagnostics } from './domain/diagnostics';
+import { IdleLockHost } from './features/auth/idle_lock_host';
+import { LoginScreen } from './features/auth/login_screen';
+import { HomeShell } from './features/home/home_shell';
 
-const DEMO_WAREHOUSES: readonly [string, string][] = [
-  ['main', 'المستودع الرئيسي'],
-  ['central', 'مستودع التموين المركزي'],
-  ['north', 'مستودع القطاع الشمالي'],
-  ['fuel-a', 'محطة المحروقات الأولى'],
-  ['fuel-b', 'خزّان الاحتياط الاستراتيجي'],
-  ['medical', 'المستودع الطبي'],
-  ['fleet', 'مستودع قطع الغيار والآليات'],
-];
+export {
+  AppDatabaseContext,
+  AppDatabaseProvider,
+  ImdTheme,
+  ImdThemeContext,
+  ImdThemeDataProvider,
+  ImdThemeProvider,
+  ThemeMode,
+  useAppDatabase,
+  useImdTheme,
+};
 
-interface PreviewSupplyRow {
-  readonly id: string;
-  readonly code: string;
-  readonly name: string;
-  readonly warehouse: string;
-  readonly qty: number;
-  readonly status: string;
+export const IdleLockContext = createContext<IdleLock | null>(null);
+
+export function IdleLockProvider({
+  lock,
+  children,
+}: {
+  readonly lock: IdleLock;
+  readonly children?: ReactNode;
+}) {
+  return createElement(IdleLockContext.Provider, { value: lock }, children);
 }
 
-const PREVIEW_TABLE_ROWS: readonly PreviewSupplyRow[] = [
-  { id: 'r1', code: 'ITM-101', name: 'ديزل مولدات مركزي', warehouse: 'المستودع الرئيسي', qty: 4200, status: 'مضبوط' },
-  { id: 'r2', code: 'ITM-102', name: 'زيوت محركات ثقيلة 15W40', warehouse: 'مستودع قطع الغيار والآليات', qty: 320, status: 'مضبوط' },
-  { id: 'r3', code: 'ITM-103', name: 'بنزين أوكتان ٩٥', warehouse: 'محطة المحروقات الأولى', qty: 1850, status: 'منخفض' },
-  { id: 'r4', code: 'ITM-104', name: 'فلاتر هواء صناعية', warehouse: 'مستودع قطع الغيار والآليات', qty: 95, status: 'قيد المراجعة' },
-  { id: 'r5', code: 'ITM-105', name: 'مستلزمات إسعاف ميدانية', warehouse: 'المستودع الطبي', qty: 640, status: 'مضبوط' },
-  { id: 'r6', code: 'ITM-106', name: 'وقود طوارئ احتياطي', warehouse: 'خزّان الاحتياط الاستراتيجي', qty: 7500, status: 'مضبوط' },
-  { id: 'r7', code: 'ITM-107', name: 'بطاريات تشغيل جافة', warehouse: 'مستودع القطاع الشمالي', qty: 44, status: 'منخفض' },
-  { id: 'r8', code: 'ITM-108', name: 'خراطيم ضخ ضغط عالٍ', warehouse: 'محطة المحروقات الأولى', qty: 120, status: 'مضبوط' },
-];
+export function useIdleLock(): IdleLock | null {
+  return useContext(IdleLockContext);
+}
 
-export default function App() {
-  const [dark, setDark] = useState(false);
-  const [fuelIdentity, setFuelIdentity] = useState(ImdSectionTheme.distinctFuel);
-  const [highDensity, setHighDensity] = useState(ImdDensity.isHigh);
-  const [classic, setClassic] = useState(ImdStyle.classic);
-  const [latinDigits, setLatinDigits] = useState(
-    ImdNumbers.current.uiDigits === ImdDigits.latin,
+export const BackupSchedulerContext = createContext<BackupScheduler | null>(null);
+
+export function BackupSchedulerProvider({
+  scheduler,
+  children,
+}: {
+  readonly scheduler: BackupScheduler;
+  readonly children?: ReactNode;
+}) {
+  return createElement(
+    BackupSchedulerContext.Provider,
+    { value: scheduler },
+    children,
   );
-  const [font, setFont] = useState(ImdFonts.defaultFamily);
+}
 
-  const [pages, setPages] = useState<ImdOpenPage[]>(() => [
-    new ImdOpenPage({ id: 'phase3', title: 'الجدول الذكي والملفات (م٣)', icon: 'table' }),
-    new ImdOpenPage({ id: 'components', title: 'مكونات المرحلة ٢', icon: 'dashboard' }),
-    new ImdOpenPage({ id: 'occupancy', title: 'الإشغال والشارات', icon: 'fuel', stale: true }),
-  ]);
-  const [activeId, setActiveId] = useState('phase3');
+export function useBackupScheduler(): BackupScheduler | null {
+  return useContext(BackupSchedulerContext);
+}
 
-  const [docTitle, setDocTitle] = useState('سند صرف تموين رقم ١٠٤');
-  const [warehouse, setWarehouse] = useState<string | null>('main');
-  const [docDate, setDocDate] = useState(() => isoDay(new Date()));
+/// وجهة البوابة — مستخرَجة لتُختبر بلا واجهة.
+export enum GateTarget {
+  activation = 'activation',
+  login = 'login',
+}
 
-  const [tableSortCol, setTableSortCol] = useState<number | null>(null);
-  const [tableSortAsc, setTableSortAsc] = useState(true);
-  const [tableCards, setTableCards] = useState(false);
-  const [freeTable, setFreeTable] = useState<FreeTable>(() =>
-    new FreeTable({
-      title: 'كشف المستلمين',
-      cols: [new FreeCol('الاسم', 5), new FreeCol('الوحدة', 4), new FreeCol('ملاحظة', 4)],
-      rows: [
-        ['أحمد السالم', 'شعبة التموين', 'استلام كامل'],
-        ['سعد العتيبي', 'قطاع الشمال', 'قيد المطابقة'],
-      ],
-    }),
+/// القرار: هل على الجهاز حساب واحد على الأقل؟ إن كان فشاشة الدخول، وإلا فالبوابة.
+///
+/// [fresh] تعني **لا حساب على الجهاز إطلاقًا** (`AuthService.hasAnyUser`)، لا
+/// «لا حساب محلي».
+export function gateFor({ fresh }: { readonly fresh: boolean }): GateTarget {
+  return fresh ? GateTarget.activation : GateTarget.login;
+}
+
+/// يربط [ErrorLogger] بسجل التدقيق (للحرجة) وبإشعار المستخدم (SnackBar).
+export function wireErrorLogger(db: AppDatabase): void {
+  ErrorLogger.sink = async (e) => {
+    const summaryMsg =
+      e.message.length > 160 ? `${e.message.substring(0, 160)}…` : e.message;
+    await new AuditRepo(db).log({
+      action: 'error.critical',
+      entityType: 'نظام',
+      summary: `${e.source}: ${summaryMsg}`,
+      details: { source: e.source, type: e.type },
+    });
+  };
+  ErrorLogger.userNotifier = (message) => {
+    showImdToast(`⚠ ${message}`, { error: false });
+  };
+}
+
+export interface BootResult {
+  readonly db: AppDatabase;
+  readonly auth: AuthService;
+  readonly signedIn: boolean;
+  readonly themeMode: ThemeMode;
+  readonly fontFamily: string;
+}
+
+/// الإقلاع كاملًا (مقابل `boot()` في `lib/main.dart`).
+///
+/// ملاحظات المنصة (`// NOT-PORTED: ملف خاص بالجهاز الأصلي`):
+/// - فحص `OwnerKey.isConfigured`، و`_keyPreflight` (`DbCipher`)، و`KeyRecoveryApp`،
+///   و`KeyHardening`، و`_cleanupPlainBackups`، و`windowManager` خاصة بالجهاز الأصلي ولا
+///   مقابل لها في المتصفح.
+export async function boot(): Promise<BootResult> {
+  const db = new AppDatabase();
+  wireErrorLogger(db);
+  ErrorLogger.installGlobalHandlers();
+  DomainDiagnostics.sink = (source, error, stack) => {
+    ErrorLogger.log(source, error, stack);
+  };
+  // «فرعٌ» هنا بمعنى: لا يُحدَّد عليه المالك محليًّا (M-15).
+  const auth = new AuthService(db, {
+    isBranchDevice: async () => !(await new DeviceActivation(db).mayAssignOwner()),
+  });
+  const restored = await auth.restoreSession();
+  const identity = await new SettingsRepo(db).identity();
+
+  if (typeof document !== 'undefined') {
+    document.title = AppNames.title;
+  }
+
+  return {
+    db,
+    auth,
+    signedIn: restored !== null,
+    themeMode: ImdTheme.parse(identity.themePref),
+    fontFamily: identity.fontFamily,
+  };
+}
+
+export interface ImdadAppProps {
+  readonly db: AppDatabase;
+  readonly auth: AuthService;
+  readonly signedIn: boolean;
+  readonly themeMode?: ThemeMode;
+  readonly fontFamily?: string;
+}
+
+const LOCK_CHECK_EVERY_MS = 10 * 60 * 1000;
+
+export function ImdadApp({
+  db,
+  auth,
+  signedIn: initialSignedIn,
+  themeMode = ThemeMode.system,
+  fontFamily = ImdFonts.defaultFamily,
+}: ImdadAppProps) {
+  const [signedIn, setSignedIn] = useState(initialSignedIn);
+  const signedInRef = useRef(signedIn);
+  signedInRef.current = signedIn;
+
+  const mountedRef = useRef(true);
+  const [, setThemeTick] = useState(0);
+
+  const theme = useMemo(
+    () => new ImdTheme(themeMode, fontFamily),
+    [themeMode, fontFamily],
   );
-  const [droppedFileInfo, setDroppedFileInfo] = useState<string | null>(null);
+  /// القفل التلقائي بعد الخمول — يعمل ما دام المستخدم مسجَّلًا.
+  const idle = useMemo(() => new IdleLock(db), [db]);
+  /// النسخ الاحتياطي المشفّر المجدول — يعمل في الخلفية ما دام التطبيق مفتوحًا.
+  const backup = useMemo(() => new BackupScheduler(db), [db]);
+  /// المزامنة التلقائية (محوّل ويب `// NOT-PORTED` متوقف محلياً).
+  const autoSync = useMemo(() => new AutoSyncService(db), [db]);
+  /// سجلّ إجراءات الشاشة النشطة لاختصارات لوحة المفاتيح — انظر [ImdScreenActions].
+  const screenActions = useMemo(() => new ImdScreenActions(), []);
 
-  const sinkPhase3 = useMemo(() => new ImdRecordSink(), []);
-  const sinkComponents = useMemo(() => {
-    const s = new ImdRecordSink();
-    s.report('preview-components', { shown: 3, total: 12 });
-    return s;
-  }, []);
-  const sinkOccupancy = useMemo(() => {
-    const s = new ImdRecordSink();
-    s.report('preview-occupancy', { shown: 4, total: 4 });
-    return s;
-  }, []);
-  const actionsPhase3 = useMemo(() => new ImdScreenActions(), []);
-  const actionsComponents = useMemo(() => new ImdScreenActions(), []);
-  const actionsOccupancy = useMemo(() => new ImdScreenActions(), []);
+  const signOut = useCallback(async () => {
+    idle.deactivate();
+    await auth.logout();
+    if (mountedRef.current) setSignedIn(false);
+    await ImdWindow.login();
+  }, [auth, idle]);
+
+  const checkLock = useCallback(async () => {
+    if (!signedInRef.current) return;
+    const reason = await new DeviceActivation(db).lockReason();
+    if (reason === null || !mountedRef.current || !signedInRef.current) return;
+    await new AuditRepo(db).log({
+      action: 'device.locked',
+      entityType: 'جهاز',
+      summary: `أُقفل الجهاز أثناء الجلسة — ${reason}`,
+      risk: AuditRepo.riskHigh,
+    });
+    await signOut();
+  }, [db, signOut]);
 
   useEffect(() => {
-    const theme = fuelIdentity
-      ? AppTheme.fuelSection({ dark, font })
-      : classic && !dark
-        ? AppTheme.classic({ font })
-        : dark
-          ? AppTheme.dark({ font })
-          : AppTheme.light({ font });
+    mountedRef.current = true;
+    // تفضيلات الشكل (نمط كلاسيكي/كثافة) قبل أول إطار ما أمكن.
+    void ImdStyle.load();
+    void ImdDensity.load();
+    void ImdSectionTheme.load();
+    // تنسيق الأرقام من القاعدة.
+    void new SettingsRepo(db).loadNumbers().catch(() => {});
 
-    AppTheme.applyToDocument(theme);
-    if (typeof document !== 'undefined') {
-      if (fuelIdentity) {
-        document.documentElement.dataset.section = 'fuel';
-      } else {
-        delete document.documentElement.dataset.section;
-      }
-    }
-  }, [dark, fuelIdentity, highDensity, classic, font]);
-
-  const activeColors = useMemo(() => {
-    if (fuelIdentity) return dark ? ImdColors.fuelDark : ImdColors.fuelLight;
-    if (dark) return ImdColors.dark;
-    return classic ? ImdColors.classicLight : ImdColors.light;
-  }, [dark, fuelIdentity, classic]);
-
-  const toggleFuel = async () => {
-    await ImdSectionTheme.toggle();
-    setFuelIdentity(ImdSectionTheme.distinctFuel);
-  };
-
-  const toggleDensity = async () => {
-    await ImdDensity.toggle();
-    setHighDensity(ImdDensity.isHigh);
-  };
-
-  const toggleClassic = async () => {
-    await ImdStyle.toggle();
-    setClassic(ImdStyle.classic);
-  };
-
-  const toggleDigits = () => {
-    const nextLatin = !latinDigits;
-    ImdNumbers.apply(
-      ImdNumbers.current.copyWith({
-        uiDigits: nextLatin ? ImdDigits.latin : ImdDigits.arabic,
-      }),
-    );
-    setLatinDigits(nextLatin);
-  };
-
-  const handleClosePage = (id: string) => {
-    if (pages.length <= 1) return;
-    const next = pages.filter((p) => p.id !== id);
-    setPages(next);
-    if (activeId === id && next.length > 0) {
-      setActiveId(next[0].id);
-    }
-  };
-
-  const handleCloseOthers = (id: string) => {
-    const keep = pages.filter((p) => p.id === id);
-    if (keep.length > 0) {
-      setPages(keep);
-      setActiveId(id);
-    }
-  };
-
-  const reopenAllPages = () => {
-    setPages([
-      new ImdOpenPage({ id: 'phase3', title: 'الجدول الذكي والملفات (م٣)', icon: 'table' }),
-      new ImdOpenPage({ id: 'components', title: 'مكونات المرحلة ٢', icon: 'dashboard' }),
-      new ImdOpenPage({ id: 'occupancy', title: 'الإشغال والشارات', icon: 'fuel', stale: true }),
-    ]);
-  };
-
-  const activeSink =
-    activeId === 'phase3'
-      ? sinkPhase3
-      : activeId === 'occupancy'
-        ? sinkOccupancy
-        : sinkComponents;
-  const activeActions =
-    activeId === 'phase3'
-      ? actionsPhase3
-      : activeId === 'occupancy'
-        ? actionsOccupancy
-        : actionsComponents;
-
-  const sortedPreviewRows = useMemo(() => {
-    if (tableSortCol === null) return PREVIEW_TABLE_ROWS;
-    const copy = [...PREVIEW_TABLE_ROWS];
-    copy.sort((a, b) => {
-      let cmp = 0;
-      switch (tableSortCol) {
-        case 0:
-          cmp = a.code.localeCompare(b.code, 'ar');
-          break;
-        case 1:
-          cmp = a.name.localeCompare(b.name, 'ar');
-          break;
-        case 2:
-          cmp = a.warehouse.localeCompare(b.warehouse, 'ar');
-          break;
-        case 3:
-          cmp = a.qty - b.qty;
-          break;
-        case 4:
-          cmp = a.status.localeCompare(b.status, 'ar');
-          break;
-      }
-      return tableSortAsc ? cmp : -cmp;
+    // الإعداد يُقرأ من القاعدة ثم تبدأ المراقبة إن كانت الجلسة مستعادة.
+    void idle.load().then(() => {
+      if (mountedRef.current && signedInRef.current) idle.activate();
     });
-    return copy;
-  }, [tableSortCol, tableSortAsc]);
 
-  const openSampleModal = () => {
-    void showImdModal<void>({
-      title: 'معاينة نافذة حوار المرحلة ٢',
-      icon: 'info',
-      colors: activeColors,
-      builder: (ctx) => (
-        <div className="flex flex-col gap-3" style={{ color: ctx.colors.text.css }}>
-          <p className="text-sm leading-relaxed">
-            هذه نافذة حوار تفاعلية مبنية عبر <code dir="ltr">showImdModal</code> ومغلّفة
-            بـ <code dir="ltr">createPortal</code> مع إغلاق عبر Escape أو النقر خارج الإطار.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <ImdChip label="المستودع المختار" tone={ImdTone.info} colors={ctx.colors} />
-            <ImdChip
-              label={
-                DEMO_WAREHOUSES.find(([k]) => k === warehouse)?.[1] ?? 'غير محدد'
-              }
-              tone={ImdTone.ok}
-              colors={ctx.colors}
-            />
-          </div>
-        </div>
-      ),
-      actions: (ctx) => (
-        <>
-          <ImdButtonOutline
-            label="إغلاق"
-            onPressed={() => ctx.close()}
-            colors={ctx.colors}
-          />
-          <ImdButton
-            label="تأكيد وإشعار"
-            onPressed={() => {
-              ctx.close();
-              showImdToast('تم تأكيد المعاينة بنجاح', { colors: activeColors });
-            }}
-            colors={ctx.colors}
-          />
-        </>
-      ),
-      onEnter: (ctx) => () => ctx.close(),
-    });
-  };
+    // بعد أول إطار: الإقلاع لا ينتظر الشبكة، وفشلها لا يمنع ظهور الواجهة.
+    let wasSyncing = false;
+    const afterSync = () => {
+      const running = autoSync.isRunning;
+      if (wasSyncing && !running) void checkLock();
+      wasSyncing = running;
+    };
 
-  const today = new Date();
+    void checkLock();
+    const lockTimer = setInterval(() => {
+      void checkLock();
+    }, LOCK_CHECK_EVERY_MS);
+
+    autoSync.addListener(afterSync);
+    autoSync.refresh();
+    backup.start();
+
+    // تصفية الشهر المنقضي إن أُذن بها — تتحقق بنفسها من الإذن وانقضاء الشهر.
+    void new CampLedgerRepo(db)
+      .autoSettleIfDue()
+      .catch(() => new SettlementResult({ ok: false, error: '' }));
+
+    ImdWindow.onBeforeExit = async () => {
+      await Promise.all([
+        autoSync.shutdown().catch(() => {}),
+        auth.logout().catch(() => {}),
+      ]);
+    };
+
+    const onThemeChange = () => {
+      if (mountedRef.current) setThemeTick((t) => t + 1);
+    };
+    theme.addListener(onThemeChange);
+    ImdStyle.notifier.addListener(onThemeChange);
+    ImdDensity.addRebuildListener(onThemeChange);
+
+    return () => {
+      mountedRef.current = false;
+      clearInterval(lockTimer);
+      autoSync.removeListener(afterSync);
+      theme.removeListener(onThemeChange);
+      ImdStyle.notifier.removeListener(onThemeChange);
+      ImdDensity.removeRebuildListener(onThemeChange);
+      autoSync.dispose();
+      idle.dispose();
+      backup.dispose();
+      theme.dispose();
+    };
+  }, [auth, autoSync, backup, checkLock, db, idle, theme]);
+
+  // اختصارات لوحة المفاتيح العالمية (سطح المكتب).
+  useEffect(() => {
+    if (!ImdShortcuts.supported || typeof window === 'undefined') return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F5' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (screenActions.onRefresh) {
+          e.preventDefault();
+          screenActions.onRefresh();
+        }
+        return;
+      }
+      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 's') {
+        if (screenActions.onSave) {
+          e.preventDefault();
+          screenActions.onSave();
+        }
+      } else if (k === 'p') {
+        if (screenActions.onPrint) {
+          e.preventDefault();
+          screenActions.onPrint();
+        }
+      } else if (k === 'n') {
+        if (screenActions.onNewDoc) {
+          e.preventDefault();
+          screenActions.onNewDoc();
+        }
+      } else if (k === 'k') {
+        if (screenActions.onSearch) {
+          e.preventDefault();
+          screenActions.onSearch();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [screenActions]);
+
+  const activeThemeData = theme.resolvedTheme();
+
+  useEffect(() => {
+    AppTheme.applyToDocument(activeThemeData);
+  }, [activeThemeData]);
+
+  const content = signedIn ? (
+    <HomeShell onSignOut={signOut} />
+  ) : (
+    <DeviceGate
+      db={db}
+      auth={auth}
+      onSignedIn={() => {
+        void (async () => {
+          await ImdWindow.main();
+          idle.activate();
+          if (mountedRef.current) setSignedIn(true);
+        })();
+      }}
+    />
+  );
+
+  const locked = signedIn ? (
+    <IdleLockHost
+      lock={idle}
+      auth={auth}
+      onSignOut={signOut}
+      colors={activeThemeData.tokens}
+    >
+      {content}
+    </IdleLockHost>
+  ) : (
+    content
+  );
+
+  const body = ImdShortcuts.supported ? (
+    <ImdKeyScroll className="h-screen w-full">{locked}</ImdKeyScroll>
+  ) : (
+    locked
+  );
 
   return (
-    <ImdKeyScroll className="flex min-h-screen flex-col">
-      <div
-        dir="rtl"
-        className="flex min-h-screen flex-col transition-colors"
-        style={{
-          backgroundColor: activeColors.bg.css,
-          color: activeColors.text.css,
-          fontFamily: 'var(--imd-font-family)',
-        }}
-      >
-        <div
-          className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3"
-          style={{
-            backgroundColor: activeColors.surface.css,
-            borderColor: activeColors.line.css,
-          }}
-        >
-          <div className="flex items-center gap-3">
-            <h1 className="text-base font-bold">{AppNames.ui}</h1>
-            <ImdChip
-              label={fuelIdentity ? 'هوية المحروقات' : 'معاينة المرحلة ٢'}
-              tone={fuelIdentity ? ImdTone.pend : ImdTone.info}
-              colors={activeColors}
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <ImdButton
-              label={dark ? 'الوضع الفاتح' : 'الوضع الداكن'}
-              icon={dark ? 'sun' : 'moon'}
-              small={true}
-              kind={ImdBtnKind.primary}
-              onPressed={() => setDark((d) => !d)}
-              colors={activeColors}
-            />
-            <ImdButtonOutline
-              label={`هوية المحروقات: ${fuelIdentity ? 'مفعّلة' : 'موحدة'}`}
-              icon="fuel"
-              small={true}
-              onPressed={toggleFuel}
-              colors={activeColors}
-            />
-            <ImdButtonOutline
-              label={`الكثافة: ${highDensity ? 'عالية' : 'مريحة'}`}
-              small={true}
-              onPressed={toggleDensity}
-              colors={activeColors}
-            />
-            <ImdButtonOutline
-              label={`النمط: ${classic ? 'كلاسيكي' : 'حديث'}`}
-              small={true}
-              onPressed={toggleClassic}
-              colors={activeColors}
-            />
-            <ImdButtonOutline
-              label={`الأرقام: ${latinDigits ? 'لاتينية' : 'عربية'}`}
-              small={true}
-              onPressed={toggleDigits}
-              colors={activeColors}
-            />
-            <div style={{ width: 170 }}>
-              <ImdSelect<string>
-                items={ImdFonts.all.map((f) => [f.family, f.label] as const)}
-                value={font}
-                dense={true}
-                title="الخط"
-                onChanged={(v) => {
-                  if (v) setFont(v);
-                }}
-                colors={activeColors}
-              />
-            </div>
-          </div>
-        </div>
-
-        <ImdPageTabs
-          pages={pages}
-          activeId={activeId}
-          onSelect={(id) => setActiveId(id)}
-          onClose={handleClosePage}
-          onCloseOthers={handleCloseOthers}
-          colors={activeColors}
-        />
-
-        <div className="flex-1 overflow-y-auto">
-          <ImdPageHost
-            active={activeId === 'phase3'}
-            sink={sinkPhase3}
-            actions={actionsPhase3}
-          >
-            <ImdPage className="mx-auto w-full max-w-[1080px]">
-              <ImdPageTitle
-                title="معاينة المرحلة ٣ — الجدول الذكي والملفات"
-                subtitle="بحث فوري، تصفية الأعمدة، فرز، تجميع بالسحب، ترقيم، عرض البطاقات، الجدول الحر، QR، وإفلات الملفات"
-                colors={activeColors}
-                actions={[
-                  <ImdButtonOutline
-                    key="cards-toggle"
-                    label={tableCards ? 'عرض الجدول' : 'عرض البطاقات'}
-                    icon={tableCards ? 'table' : 'list'}
-                    small={true}
-                    onPressed={() => setTableCards((prev) => !prev)}
-                    colors={activeColors}
-                  />,
-                  <ImdIconButton
-                    key="reopen-tabs"
-                    icon="refresh"
-                    tooltip="إعادة فتح التبويبات"
-                    onPressed={reopenAllPages}
-                    colors={activeColors}
-                  />,
-                ]}
-              />
-
-              <ImdPanel
-                title="الجدول الذكي (ImdTable) — مرتبط بعدّاد السجلات في شريط الحالة"
-                colors={activeColors}
-              >
-                <ImdTable
-                  columns={[
-                    new ImdCol('الرمز', { width: 105 }),
-                    new ImdCol('الصنف'),
-                    new ImdCol('المستودع'),
-                    new ImdCol('الكمية', { numeric: true, width: 100 }),
-                    new ImdCol('الحالة', { center: true, width: 120 }),
-                  ]}
-                  rowKeys={sortedPreviewRows.map((r) => r.id)}
-                  rows={sortedPreviewRows.map((r) => [
-                    <span key="c" dir="ltr" className="font-mono text-xs">
-                      {r.code}
-                    </span>,
-                    r.name,
-                    r.warehouse,
-                    nf(r.qty),
-                    <ImdChip
-                      key="st"
-                      label={r.status}
-                      tone={
-                        r.status === 'مضبوط'
-                          ? ImdTone.ok
-                          : r.status === 'قيد المراجعة'
-                            ? ImdTone.pend
-                            : ImdTone.err
-                      }
-                      colors={activeColors}
-                    />,
-                  ])}
-                  values={sortedPreviewRows.map((r) => [
-                    r.code,
-                    r.name,
-                    r.warehouse,
-                    r.qty,
-                    r.status,
-                  ])}
-                  sortIndex={tableSortCol}
-                  sortAsc={tableSortAsc}
-                  onHeaderTap={(colIdx) => {
-                    if (tableSortCol === colIdx) {
-                      setTableSortAsc((prev) => !prev);
-                    } else {
-                      setTableSortCol(colIdx);
-                      setTableSortAsc(true);
-                    }
-                  }}
-                  filterable={true}
-                  groupable={true}
-                  pageSize={5}
-                  cards={tableCards}
-                  zebra={true}
-                  freezeFirst={true}
-                  colors={activeColors}
-                  onRowTap={(idx) => {
-                    const row = sortedPreviewRows[idx];
-                    if (row) {
-                      showImdToast(`تم اختيار الصنف: ${row.name} (${nf(row.qty)})`, {
-                        colors: activeColors,
-                      });
-                    }
-                  }}
-                />
-              </ImdPanel>
-
-              <div style={{ height: 14 }} />
-
-              <ImdPanel
-                title={`محرر الجدول الحر (ImdFreeTableEditor) — ${nf(freeTable.filledRows.length)} صفوف معبأة`}
-                colors={activeColors}
-              >
-                <ImdFreeTableEditor
-                  initial={freeTable}
-                  onChanged={setFreeTable}
-                  colors={activeColors}
-                />
-              </ImdPanel>
-
-              <div style={{ height: 14 }} />
-
-              <ImdF2 cols={2}>
-                <ImdPanel title="رمز الاستجابة السريعة (ImdQr)" colors={activeColors}>
-                  <div className="flex flex-wrap items-center gap-4">
+    <AppDatabaseProvider db={db}>
+      <AuthServiceProvider value={auth}>
+        <ImdScreenActionsProvider value={screenActions}>
+          <ImdThemeProvider theme={theme}>
+            <ImdThemeDataProvider data={activeThemeData}>
+              <AutoSyncProvider service={autoSync}>
+                <IdleLockProvider lock={idle}>
+                  <BackupSchedulerProvider scheduler={backup}>
                     <div
-                      className="rounded-lg border p-2"
-                      style={{ borderColor: activeColors.line.css }}
-                    >
-                      <ImdQr data="IMD-8.0.2-PREVIEW-104" size={160} />
-                    </div>
-                    <div className="flex flex-col gap-1.5 text-xs" style={{ color: activeColors.muted.css }}>
-                      <span className="font-semibold" style={{ color: activeColors.text.css }}>
-                        الرمز المشفر: <code dir="ltr">IMD-8.0.2-PREVIEW-104</code>
-                      </span>
-                      <span>خلفية ورقية بيضاء ثابتة وهامش هادئ ٦٪ لقراءة الكاميرا في الوضعين الفاتح والداكن.</span>
-                    </div>
-                  </div>
-                </ImdPanel>
-
-                <ImdPanel title="منطقة إفلات الملفات (ImdDropZone)" colors={activeColors}>
-                  <ImdDropZone
-                    extensions={['xlsx', 'json', 'csv']}
-                    hint="أفلت ملف JSON أو CSV أو XLSX هنا"
-                    colors={activeColors}
-                    onFileBytes={(file) => {
-                      setDroppedFileInfo(`${file.name} (${nf(file.bytes.length)} بايت)`);
-                      showImdToast(`تمت قراءة الملف: ${file.name}`, { colors: activeColors });
-                    }}
-                  >
-                    <div
-                      className="flex min-h-[140px] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-5 text-center"
+                      dir="rtl"
+                      lang="ar"
+                      className="h-screen w-full"
                       style={{
-                        borderColor: activeColors.line.css,
-                        backgroundColor: activeColors.bg.css,
-                        color: activeColors.muted.css,
+                        backgroundColor: activeThemeData.tokens.bg.css,
+                        color: activeThemeData.tokens.text.css,
+                        fontFamily: activeThemeData.fontFamily,
                       }}
                     >
-                      <span className="text-sm font-semibold" style={{ color: activeColors.text.css }}>
-                        اسحب ملفاً وأفلته هنا للمعاينة الفورية
-                      </span>
-                      <span className="text-xs">
-                        الامتدادات المسموحة: <code dir="ltr">.xlsx, .json, .csv</code>
-                      </span>
-                      {droppedFileInfo ? (
-                        <ImdChip
-                          label={`آخر ملف: ${droppedFileInfo}`}
-                          tone={ImdTone.ok}
-                          colors={activeColors}
-                        />
-                      ) : null}
+                      {body}
                     </div>
-                  </ImdDropZone>
-                </ImdPanel>
-              </ImdF2>
-            </ImdPage>
-          </ImdPageHost>
+                  </BackupSchedulerProvider>
+                </IdleLockProvider>
+              </AutoSyncProvider>
+            </ImdThemeDataProvider>
+          </ImdThemeProvider>
+        </ImdScreenActionsProvider>
+      </AuthServiceProvider>
+    </AppDatabaseProvider>
+  );
+}
 
-          <ImdPageHost
-            active={activeId === 'components'}
-            sink={sinkComponents}
-            actions={actionsComponents}
-          >
-            <ImdPage className="mx-auto w-full max-w-[1040px]">
-              <ImdPageTitle
-                title="معاينة مكونات الواجهة — المرحلة ٢"
-                subtitle={`تاريخ اليوم: ${arDay(arDate(today))} · الكمية: ${nf(1250.5)} · المبلغ: ${nfMoney(30000)}`}
-                colors={activeColors}
-                actions={[
-                  <ImdIconButton
-                    key="refresh"
-                    icon="refresh"
-                    tooltip="إعادة فتح التبويبات"
-                    onPressed={reopenAllPages}
-                    colors={activeColors}
-                  />,
-                  <ImdIconButton
-                    key="print"
-                    icon="printer"
-                    tooltip="طباعة"
-                    onPressed={() =>
-                      showImdToast('إجراء طباعة تجريبي من شريط الإجراءات', {
-                        colors: activeColors,
-                      })
-                    }
-                    colors={activeColors}
-                  />,
-                  <ImdButton
-                    key="modal"
-                    label="فتح نافذة حوار"
-                    icon="info"
-                    small={true}
-                    onPressed={openSampleModal}
-                    colors={activeColors}
-                  />,
-                ]}
-              />
+export interface DeviceGateProps {
+  readonly db: AppDatabase;
+  readonly auth: AuthService;
+  readonly onSignedIn: () => void;
+}
 
-              <ImdPanel
-                title="النماذج والحقول وتوحيد الارتفاع"
-                colors={activeColors}
-              >
-                <p className="mb-3 text-xs" style={{ color: activeColors.muted.css }}>
-                  ImdField و ImdSelect و ImdDateField داخل صف ImdF2 متكافئ الارتفاع
-                </p>
-                <ImdF2 cols={3}>
-                  <ImdField
-                    label="عنوان السند"
-                    value={docTitle}
-                    hint="أدخل وصف السند"
-                    required={true}
-                    onChanged={setDocTitle}
-                    colors={activeColors}
-                  />
-                  <ImdLabeled label="المستودع (ImdSelect)" colors={activeColors}>
-                    <ImdSelect<string>
-                      hint="اختر المستودع"
-                      items={DEMO_WAREHOUSES}
-                      value={warehouse}
-                      onChanged={setWarehouse}
-                      colors={activeColors}
-                    />
-                  </ImdLabeled>
-                  <ImdLabeled label="تاريخ السند (ImdDateField)" colors={activeColors}>
-                    <ImdDateField
-                      value={docDate}
-                      onChanged={setDocDate}
-                      colors={activeColors}
-                    />
-                  </ImdLabeled>
-                </ImdF2>
+/// بوابة الجهاز قبل تسجيل الدخول.
+export function DeviceGate({ db, auth, onSignedIn }: DeviceGateProps) {
+  const c = useImdColors();
+  const [loading, setLoading] = useState(true);
+  const [fresh, setFresh] = useState(false);
+  const [lock, setLock] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <ImdButton
-                    label="إشعار نجاح (Toast)"
-                    icon="check"
-                    onPressed={() =>
-                      showImdToast('تم الحفظ في سجل المعاينة بنجاح', {
-                        colors: activeColors,
-                      })
-                    }
-                    colors={activeColors}
-                  />
-                  <ImdButton
-                    label="إشعار خطأ"
-                    icon="alert"
-                    kind={ImdBtnKind.danger}
-                    onPressed={() =>
-                      showImdToast('تعذّر تنفيذ الإجراء التجريبي', {
-                        error: true,
-                        colors: activeColors,
-                      })
-                    }
-                    colors={activeColors}
-                  />
-                  <ImdButtonOutline
-                    label="معاينة نافذة showImdModal"
-                    icon="search"
-                    onPressed={openSampleModal}
-                    colors={activeColors}
-                  />
-                  <ImdIconButton
-                    icon="printer"
-                    tooltip="معاينة الطباعة"
-                    onPressed={() =>
-                      showImdToast('تم استدعاء زر الأيقونة بالتلميحة', {
-                        colors: activeColors,
-                      })
-                    }
-                    colors={activeColors}
-                  />
-                </div>
-              </ImdPanel>
+  const check = useCallback(async () => {
+    const isFresh = !(await auth.hasAnyUser());
+    const lockReason = isFresh ? null : await new DeviceActivation(db).lockReason();
+    if (!mountedRef.current) return;
+    setFresh(isFresh);
+    setLock(lockReason);
+    setLoading(false);
+    if (lockReason !== null) {
+      await ImdWindow.main();
+      return;
+    }
+    if (gateFor({ fresh: isFresh }) === GateTarget.activation) {
+      await ImdWindow.main();
+    } else {
+      await ImdWindow.login();
+    }
+  }, [auth, db]);
 
-              <div style={{ height: 14 }} />
+  useEffect(() => {
+    mountedRef.current = true;
+    void check();
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [check]);
 
-              <ImdF2 cols={2}>
-                <ImdPanel title="الشارات (ImdChip)" colors={activeColors}>
-                  <div className="flex flex-wrap gap-2">
-                    <ImdChip label="مضبوط" tone={ImdTone.ok} icon="check" colors={activeColors} />
-                    <ImdChip label="قيد المراجعة" tone={ImdTone.pend} icon="alert" colors={activeColors} />
-                    <ImdChip label="مرفوض" tone={ImdTone.err} icon="x" colors={activeColors} />
-                    <ImdChip label="معلومة" tone={ImdTone.info} icon="info" colors={activeColors} />
-                    <ImdChip label="معطّل" tone={ImdTone.off} colors={activeColors} />
-                  </div>
-                  <div className="mt-3" style={{ width: 170 }}>
-                    <ImdChip
-                      label="نص شارة طويل يُقصّ داخل حاوية ضيّقة دون فيض"
-                      tone={ImdTone.pend}
-                      icon="alert"
-                      colors={activeColors}
-                    />
-                  </div>
-                </ImdPanel>
-
-                <ImdPanel title="أشرطة الإشغال (ImdOccupancyBar)" colors={activeColors}>
-                  <div className="flex flex-col gap-3">
-                    <ImdOccupancyBar
-                      name="خزّان الديزل الرئيسي"
-                      used={6200}
-                      capacity={10000}
-                      unit="لتر"
-                      colors={activeColors}
-                    />
-                    <ImdOccupancyBar
-                      name="خزّان البنزين (قرب الامتلاء)"
-                      used={9400}
-                      capacity={10000}
-                      unit="لتر"
-                      colors={activeColors}
-                    />
-                    <ImdOccupancyBar
-                      name="خزّان الطوارئ (منخفض)"
-                      used={1200}
-                      capacity={10000}
-                      unit="لتر"
-                      colors={activeColors}
-                    />
-                  </div>
-                </ImdPanel>
-              </ImdF2>
-            </ImdPage>
-          </ImdPageHost>
-
-          <ImdPageHost
-            active={activeId === 'occupancy'}
-            sink={sinkOccupancy}
-            actions={actionsOccupancy}
-          >
-            <ImdPage className="mx-auto w-full max-w-[900px]">
-              <ImdPageTitle
-                title="متابعة سعة المستودعات والخزّانات"
-                subtitle="تبويبة ثانية معزولة عبر ImdPageHost وImdRecordSink"
-                colors={activeColors}
-              />
-              <ImdPanel title="تفاصيل الإشغال" colors={activeColors}>
-                <div className="flex flex-col gap-4">
-                  <ImdOccupancyBar
-                    name="المستودع الرئيسي"
-                    used={450}
-                    capacity={600}
-                    unit="طرد"
-                    colors={activeColors}
-                  />
-                  <ImdOccupancyBar
-                    name="سعة مفتوحة"
-                    used={85}
-                    capacity={0}
-                    unit="وحدة"
-                    colors={activeColors}
-                  />
-                </div>
-              </ImdPanel>
-            </ImdPage>
-          </ImdPageHost>
-        </div>
-
-        <ImdStatusBar
-          connection="متصل (معاينة)"
-          connectionOk={true}
-          records={activeSink}
-          colors={activeColors}
+  if (loading) {
+    return (
+      <div
+        className="flex h-screen w-full items-center justify-center"
+        style={{ backgroundColor: c.bg.css }}
+      >
+        <div
+          role="progressbar"
+          aria-label="جارٍ التحقق"
+          className="h-7 w-7 animate-spin rounded-full border-2 border-t-transparent"
+          style={{
+            borderColor: c.accent.css,
+            borderTopColor: 'transparent',
+          }}
         />
       </div>
-    </ImdKeyScroll>
+    );
+  }
+
+  if (lock !== null) {
+    // NOT-PORTED: ملف خاص بالجهاز الأصلي (lib/features/auth/activation_lock_screen.dart)
+    return (
+      <div
+        className="flex h-screen w-full items-center justify-center p-6"
+        style={{ backgroundColor: c.bg.css }}
+      >
+        <div className="w-full max-w-md">
+          <ImdPanel title="الجهاز مقفل" colors={c}>
+            <p className="text-sm" style={{ color: c.text2.css }}>
+              {lock}
+            </p>
+          </ImdPanel>
+        </div>
+      </div>
+    );
+  }
+
+  if (gateFor({ fresh }) === GateTarget.activation) {
+    // NOT-PORTED: بديل ويب عن DeviceActivationScreen (lib/features/settings/device_activation_screen.dart)
+    return (
+      <WebFirstAdminInitPanel
+        auth={auth}
+        onActivated={() => {
+          void check();
+        }}
+      />
+    );
+  }
+
+  return <LoginScreen db={db} auth={auth} onSignedIn={onSignedIn} colors={c} />;
+}
+
+// NOT-PORTED: بديل ويب عن DeviceActivationScreen — يستدعي AuthService.createAdmin فقط
+// لتهيئة أول حساب مدير في قاعدة المتصفح الجديدة دون اختراع قواعد أو مفاتيح تفعيل.
+function WebFirstAdminInitPanel({
+  auth,
+  onActivated,
+}: {
+  readonly auth: AuthService;
+  readonly onActivated: () => void;
+}) {
+  const c = useImdColors();
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await auth.createAdmin({
+        username: username.trim(),
+        password,
+        name: name.trim() || undefined,
+      });
+      onActivated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      dir="rtl"
+      data-imd-web-first-admin="true"
+      className="flex min-h-screen w-full items-center justify-center p-6"
+      style={{ backgroundColor: c.bg.css }}
+    >
+      <div className="w-full max-w-[440px]">
+        <ImdPanel title="تهيئة جهاز الإدارة" colors={c}>
+          <div className="mb-4 flex items-center gap-2 text-xs" style={{ color: c.muted.css }}>
+            <ImdIcon name="shield" size={16} color={c.accent} />
+            <span>{AppNames.ui} — إنشاء أول حساب مدير للنظام على المتصفح</span>
+          </div>
+          <form onSubmit={(e) => void handleSubmit(e)} className="flex flex-col gap-3">
+            <ImdField
+              label="الاسم الكامل"
+              value={name}
+              onChanged={setName}
+              colors={c}
+            />
+            <ImdField
+              label="اسم المستخدم"
+              value={username}
+              required={true}
+              onChanged={setUsername}
+              colors={c}
+            />
+            <ImdField
+              label="كلمة المرور"
+              value={password}
+              required={true}
+              obscure={true}
+              onChanged={setPassword}
+              colors={c}
+            />
+            {error.length > 0 && (
+              <div
+                role="alert"
+                className="rounded-lg px-3 py-2 text-xs font-medium"
+                style={{
+                  backgroundColor: c.dangerSoft.css,
+                  color: c.danger.css,
+                }}
+              >
+                {error}
+              </div>
+            )}
+            <div className="mt-2 flex justify-end">
+              <ImdButton
+                label="إنشاء حساب المدير"
+                icon="check"
+                busy={busy}
+                onPressed={() => {
+                  const fakeEvent = { preventDefault() {} } as FormEvent;
+                  void handleSubmit(fakeEvent);
+                }}
+                colors={c}
+              />
+            </div>
+          </form>
+        </ImdPanel>
+      </div>
+    </div>
+  );
+}
+
+/// الجذر التشغيلي للتطبيق في المتصفح — يُقلع القاعدة والهوية والجلسة عبر [boot].
+export default function App() {
+  const [booted, setBooted] = useState<BootResult | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void boot()
+      .then((res) => {
+        if (active) setBooted(res);
+      })
+      .catch((err) => {
+        if (active) {
+          setBootError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (bootError !== null) {
+    return (
+      <div
+        dir="rtl"
+        lang="ar"
+        className="flex h-screen w-full items-center justify-center p-6"
+      >
+        <div role="alert" className="max-w-md text-center text-sm font-semibold">
+          {`تعذّر تشغيل النظام: ${bootError}`}
+        </div>
+      </div>
+    );
+  }
+
+  if (booted === null) {
+    return (
+      <div
+        dir="rtl"
+        lang="ar"
+        className="flex h-screen w-full items-center justify-center"
+      >
+        <div
+          role="progressbar"
+          aria-label="جارٍ تشغيل النظام"
+          className="h-7 w-7 animate-spin rounded-full border-2 border-emerald-700 border-t-transparent"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <ImdadApp
+      db={booted.db}
+      auth={booted.auth}
+      signedIn={booted.signedIn}
+      themeMode={booted.themeMode}
+      fontFamily={booted.fontFamily}
+    />
   );
 }

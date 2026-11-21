@@ -99,6 +99,15 @@
 | `lib/features/auth/login/login_buttons.dart` | `src/features/auth/login/login_buttons.tsx` |
 | `lib/features/auth/idle_lock_host.dart` | `src/features/auth/idle_lock_host.tsx` |
 | `lib/features/auth/login_screen.dart` | `src/features/auth/login_screen.tsx` |
+| `lib/main.dart` | `src/App.tsx` (و`src/core/theme/imd_theme.ts` لسياق `ImdTheme` و`AppDatabaseProvider`) |
+| `lib/features/home/home_shell.dart` | `src/features/home/home_shell.tsx` |
+| `lib/features/home/space_chooser_screen.dart` | `src/features/home/space_chooser_screen.tsx` |
+| `lib/features/home/supply_groups.dart` | `src/features/home/supply_groups.tsx` |
+| `lib/features/home/shell/home_shell_menu.dart` | `src/features/home/shell/home_shell_menu.ts` |
+| `lib/features/home/shell/home_shell_placeholders.dart` | `src/features/home/shell/home_shell_placeholders.tsx` |
+| `lib/features/home/shell/home_shell_bottom_nav.dart` | `src/features/home/shell/home_shell_bottom_nav.tsx` |
+| `lib/features/home/shell/home_shell_sidebar.dart` | `src/features/home/shell/home_shell_sidebar.tsx` |
+| `lib/features/home/shell/home_shell_topbar.dart` | `src/features/home/shell/home_shell_topbar.tsx` |
 
 ## ملاحظات التحويل والمنصة
 - `iso_date.ts` و`date_span.ts`: السنوات `0–99` عولجت عبر `setFullYear(y, mo - 1, d)` لمنع تحويلها تلقائياً في JS إلى `1900–1999`.
@@ -158,6 +167,11 @@
   - `sys_notice.ts` و`idle_lock.ts`: تخزين حالة تنبيه الانتقال وإعداد مهلة الخمول عبر `SettingsRepo`، ومراقبة النشاط وإلغاء التركيز وتبديل الرؤية في المتصفح (`keydown`، `visibilitychange`، `setInterval`، `blur`) مع الاحتفاظ بـ`AppLifecycleState` و`didChangeAppLifecycleState` للتوافق مع الاختبارات.
   - استبدال البديلين المؤقتين `auth_service.ts` و`perm.ts` بالكامل: ربط `AuthService` بمراقبة جدول `users` عبر `db.tableUpdates` (`_watchCurrent`) وتحديث `RepoGuard.current` مع الإبقاء التام على `AuthServiceContext` و`AuthServiceProvider` و`useAuthService()` و`usePerm()` و`Perm.of()`.
   - تحويل مكوّنات واجهة المصادقة (`change_password_dialog.tsx`، `login_inputs.tsx`، `login_buttons.tsx`، `idle_lock_host.tsx`، `login_screen.tsx`) مع عزل المحتوى خلف غطاء القفل (`inert` + `pointer-events: none`) وإعادة بناء حقل كلمة المرور عند العودة من الخلفية أو الفشل، واستخدام `showImdModal` و`showImdToast` مباشرةً بدل `imdNavigatorKey`.
+- **المرحلة 6 (قشرة التطبيق، اختيار المساحة، والتنقل الرئيسي)**:
+  - استخراج `ImdTheme` و`ThemeMode` و`ImdThemeProvider`/`useImdTheme` و`AppDatabaseProvider`/`useAppDatabase` في `src/core/theme/imd_theme.ts` لمنع الاستيراد الدائري مع `src/App.tsx` وإبقاء `src/main.tsx` نقطة التحميل الوحيدة لـ`createRoot` (بلا تنفيذ تلقائي عند استيراد `App.tsx` في اختبارات Vitest).
+  - تحويل `HomeShell` و`ImdNav` ومكوّنات `shell/` الخمسة و`SpaceChooserScreen` و`SupplyGroups`: الحفاظ المتوازي على حالتَي القسمين (`supply` و`fuel`)، تطبيق حجب الأقسام (`SectionBlock`) مع استثناء المالك، التجاوب الكامل (شريط كامل + فاصل قابل للسحب، قضيب أيقونات `901–1150px`، شريط سفلي ودرج للجوال `<= 900px` بلا سؤال خروج عند اختيار البند)، تبديل السمة مع الحفظ في `SettingsRepo`، وهوية المحروقات (`ImdSectionTheme.distinctFuel`)، وتنسيق الوقت بـ`arDigits` دون `intl`.
+  - استبدال واجهة المعاينة المؤقتة في `src/App.tsx` بتحويل `lib/main.dart` الكامل (`ImdadApp`، `GateTarget`، `gateFor`، `DeviceGate`، `wireErrorLogger`، `boot`)، مع اعتماد بديل ويب بسيط في `DeviceGate` عند `fresh === true` موسوم بـ`// NOT-PORTED: بديل ويب عن DeviceActivationScreen` يستدعي `auth.createAdmin(...)` فقط ثم يعيد فحص البوابة.
+  - تجميع البدائل الصورية لشاشات المراحل 7–27 و`NotificationBell` و`showSearchModal` في `src/features/home/pending_screens_stubs.tsx` (عبر `missing_screen_stub.tsx`)، وإبقاء محوّلات المنصة المستبعدة (`imd_window.ts`، `device_activation.ts`، `auto_sync.ts`) موسومة بـ`// NOT-PORTED` وفق القاعدة 12.
 
 ## ملفات الاختبارات المحوَّلة (المرحلة 1)
 
@@ -168,7 +182,7 @@
 | `test/ids_test.dart` | `src/core/__tests__/ids.test.ts` |
 | `test/iso_date_strict_test.dart` | `src/domain/__tests__/iso_date_strict.test.ts` |
 | `test/number_format_test.dart` | `src/core/ui/__tests__/number_format.test.ts` |
-| `test/app_space_test.dart` | `src/domain/__tests__/app_space.test.ts` |
+| `test/app_space_test.dart` | `src/domain/__tests__/app_space.test.tsx` |
 | `test/menu_doors_test.dart` | `src/domain/__tests__/menu_doors.test.ts` |
 
 ## ملفات الاختبارات المحوَّلة (المرحلة 2)
@@ -217,7 +231,7 @@
 | `test/perm_catalog_test.dart` | `src/domain/__tests__/perm_catalog.test.ts` |
 | `test/pbkdf2_test.dart` | `src/core/security/__tests__/pbkdf2.test.ts` |
 | `test/password_upgrade_test.dart` | `src/core/security/__tests__/password_upgrade.test.ts` |
-| `test/section_block_test.dart` | `src/domain/__tests__/section_block.test.ts` |
+| `test/section_block_test.dart` | `src/domain/__tests__/section_block.test.tsx` |
 | `test/maker_checker_test.dart` | `src/domain/__tests__/maker_checker.test.ts` |
 | `test/warehouse_scope_test.dart` | `src/core/security/__tests__/warehouse_scope.test.ts` |
 | `test/idle_lock_test.dart` | `src/core/security/__tests__/idle_lock.test.tsx` |
@@ -225,16 +239,25 @@
 | `test/sys_perm_test.dart` | `src/core/security/__tests__/sys_perm.test.ts` |
 | `test/auth_storage_test.dart` | `src/core/security/__tests__/auth_storage.test.ts` |
 
+## ملفات الاختبارات المحوَّلة (المرحلة 6)
+
+| ملف الاختبار (Dart) | ملف Vitest المقابل |
+|---|---|
+| `test/home_shell_test.dart` | `src/features/home/__tests__/home_shell.test.tsx` |
+| `test/section_switch_test.dart` | `src/features/home/__tests__/section_switch.test.tsx` |
+| `test/mobile_drawer_test.dart` | `src/features/home/__tests__/mobile_drawer.test.tsx` |
+
 ## ربط مؤجل لمراحل لاحقة
 
 | الملف الحالي | الرمز / الاعتماد الناقص | مرحلة التنفيذ المستهدفة | حالة البديل المؤقت |
 |---|---|---|---|
 | `src/core/ui/imd_toolbar.tsx` | مكتبة `xlsx` (`ImdExcel.build`) | المرحلة 3 / 19 | تعليق `// MISSING: xlsx (المرحلة 3/19)` يُرجع مصفوفة بايتات فارغة لحين ربط حزمة Excel |
-| `src/core/ui/imd_drop_zone.tsx` و`login_screen.tsx` | `lib/core/ui/imd_window.dart` (`ImdWindow.supported`، `ImdWindow.exit`) | مرحلة لاحقة | بديل صوري مؤقت `src/core/ui/imd_window.ts` موسوم بـ`// MISSING` دون اختراع منطق سطح مكتب |
+| `src/core/ui/imd_drop_zone.tsx` و`login_screen.tsx` و`home_shell.tsx` و`App.tsx` | `lib/core/ui/imd_window.dart` (`ImdWindow`) | مستبعد عن الويب (القاعدة 12) | محوّل ويب `src/core/ui/imd_window.ts` موسوم بـ`// NOT-PORTED` (ملف خاص بالجهاز الأصلي؛ `micaActive` و`supported` و`login`/`main`/`syncMica`/`exit`) |
 | `src/features/auth/login_screen.tsx` | `lib/core/security/biometric_service.dart` (`BiometricService`، `BiometricAvailability`) | مرحلة لاحقة (غير مرفق في دفعة 5) | بديل صوري مؤقت `src/core/security/biometric_service.ts` موسوم بـ`// MISSING` يعيد `unavailable` دون منطق بصمة |
 | `src/features/auth/login_screen.tsx` | `lib/features/auth/login/login_bio_dialog.dart` (`BioChoice`، `BioOfferDialog`) | مرحلة لاحقة (غير مرفق في دفعة 5) | بديل صوري مؤقت `src/features/auth/login/login_bio_dialog.tsx` موسوم بـ`// MISSING` دون اختراع حوار بصمة |
 | `src/core/ui/imd_scan.tsx` | `lib/domain/stocktake_scan.dart` (`ScanDebouncer`) | المرحلة 11 | بديل صوري مؤقت `src/domain/stocktake_scan.ts` موسوم بـ`// MISSING` يصدّر `ScanDebouncer` فقط دون اختراع أي قواعد جرد |
-| `src/data/repos/doc_numbering.ts` و`users_repo.ts` | `lib/core/security/device_activation.dart` (`DeviceActivation`) | مرحلة لاحقة (غير مرفق في دفعة 5) | بديل صوري مؤقت `src/core/security/device_activation.ts` موسوم بـ`// MISSING` موسَّع بـ`canIssue`/`importPrivateKey` دون منطق تفعيل جهاز |
+| `src/data/repos/doc_numbering.ts` و`users_repo.ts` و`App.tsx` | `lib/core/security/device_activation.dart` (`DeviceActivation`) | مستبعد عن الويب (القاعدة 12) | محوّل ويب `src/core/security/device_activation.ts` موسوم بـ`// NOT-PORTED` (ملف خاص بالجهاز الأصلي؛ `deviceId`/`isBranch`/`canIssue`/`importPrivateKey`/`mayAssignOwner`/`lockReason`) |
+| `src/features/home/home_shell.tsx` و`src/App.tsx` | `lib/data/sync/auto_sync.dart` (`AutoSyncService`) | مستبعد عن الويب (القاعدة 12) | محوّل ويب `src/data/sync/auto_sync.ts` موسوم بـ`// NOT-PORTED` (ملف خاص بالجهاز الأصلي؛ يحفظ حالة «العمل محلي — المزامنة متوقفة» لشريط الحالة) |
 | `src/data/repos/settings_repo.ts` | `lib/core/security/owner_promotion.dart` (`OwnerPromotion`) | مرحلة لاحقة (غير مرفق في دفعة 5) | بديل صوري مؤقت `src/core/security/owner_promotion.ts` موسوم بـ`// MISSING` موسَّع بـ`needsSelection`/`assign` دون قواعد ترقية المالك |
 | `src/data/repos/users_repo.ts` | `lib/core/security/owner_signature.dart` (`OwnerSignature`) | مرحلة لاحقة (غير مرفق في دفعة 5) | بديل صوري مؤقت `src/core/security/owner_signature.ts` موسوم بـ`// MISSING` دون قواعد توقيع أو تشفير ECDSA |
 | `src/core/security/perm.ts` | `lib/domain/cable_clearance.dart` (`CableClearance.allowed`) | المرحلة 14 | بديل صوري مؤقت `src/domain/cable_clearance.ts` موسوم بـ`// MISSING` موسَّع بـ`allowed()` دون اختراع قواعد تصاريح البرقيات |
@@ -245,6 +268,10 @@
 | `src/data/repos/settings_repo.ts` | `lib/domain/esign_policy.dart` (`EsignPolicy`) | المرحلة 18 | بديل صوري مؤقت `src/domain/esign_policy.ts` موسوم بـ`// MISSING` دون قواعد التوقيع الإلكتروني |
 | `src/data/repos/settings_repo.ts` | `lib/domain/print_layout.dart` (`PrintLayout`, `PrintHeaderFooter`) | المرحلة 18 | بديل صوري مؤقت `src/domain/print_layout.ts` موسوم بـ`// MISSING` دون اختراع تخطيطات طباعة |
 | `src/data/repos/settings_repo.ts` | `lib/domain/voucher_copies.dart` (`VoucherCopies`) | المرحلة 18 | بديل صوري مؤقت `src/domain/voucher_copies.ts` موسوم بـ`// MISSING` دون قواعد نسخ السندات |
+| `src/features/home/home_shell.tsx` و`supply_groups.tsx` و`home_shell_topbar.tsx` | شاشات المراحل 7–27 و`NotificationBell` و`showSearchModal` | المراحل 7–27 | بدائل صورية مجمّعة في `src/features/home/pending_screens_stubs.tsx` (معتمدة على `src/features/home/missing_screen_stub.tsx`) موسومة بـ`// MISSING` |
+| `src/features/home/home_shell.tsx` | `lib/data/repos/reports_repo.dart` (`ReportId`) | المرحلة 19 | بديل أدنى `src/data/repos/reports_repo.ts` موسوم بـ`// MISSING` يصدّر تعداد `ReportId` فقط |
+| `src/features/home/supply_groups.tsx` | `lib/data/repos/camp_ledger_repo.dart` (`CampLedgerRepo`، `SettlementResult`) | المرحلة 15 | بديل أدنى `src/data/repos/camp_ledger_repo.ts` موسوم بـ`// MISSING` |
+| `src/App.tsx` | `lib/data/backup/backup_scheduler.dart` (`BackupScheduler`) | المرحلة 16 | بديل أدنى `src/data/backup/backup_scheduler.ts` موسوم بـ`// MISSING` |
 
 ## اختبارات مؤجلة
 
@@ -257,9 +284,6 @@
 | `src/core/ui/__tests__/number_format.test.ts` | مطبوعاتٌ هندية | `lib/core/print/print_format.dart` | المرحلة 18 |
 | `src/core/ui/__tests__/number_format.test.ts` | خانات الكميات تُقصّ أصفارها، وخانات المبالغ ثابتة | `lib/core/print/print_format.dart` | المرحلة 18 |
 | `src/core/ui/__tests__/number_format.test.ts` | `يُحفظ ويُقرأ ويسري على المطبوعات معًا (printMoney(10))` *(فُعِّل جزء `SettingsRepo`/`nf(10)` في المرحلة 4 وبقي سطر `printMoney(10)` فقط)* | `lib/core/print/print_format.dart` | المرحلة 18 |
-| `src/domain/__tests__/app_space.test.ts` | تعرض المساحتين بوصفيهما | `lib/features/home/space_chooser_screen.dart` | المرحلة 6 |
-| `src/domain/__tests__/app_space.test.ts` | النقر يعيد المساحة المختارة | `lib/features/home/space_chooser_screen.dart` | المرحلة 6 |
-| `src/domain/__tests__/app_space.test.ts` | تُبنى على عرض ضيّق بلا فيض | `lib/features/home/space_chooser_screen.dart` | المرحلة 6 |
 | `src/core/ui/__tests__/icon_button_label.test.tsx` | كل زرِّ أيقونةٍ في الشِّفرة يحمل اسمًا | `lib/features/*_screen.dart` | المراحل 5+ |
 | `src/core/ui/__tests__/screen_actions.test.tsx` | كل شاشةٍ لها حفظ تسجّل Ctrl+S | `lib/features/*_screen.dart` | المراحل 5+ |
 | `src/domain/__tests__/free_table.test.ts` | البرقية تُطبع بجدول حر وبدونه | `lib/data/db/app_database.dart`، `lib/data/repos/cable_repo.dart`، `lib/core/print/cable_print.dart` | المراحل 4 و 14 و 18 |
@@ -271,6 +295,9 @@
 | `src/data/repos/__tests__/audit_prune.test.ts` | الحذف يترك شاهدًا فينتقل إلى النظراء | `lib/data/sync/sync_marks.dart` | المرحلة 16 |
 | `src/data/repos/__tests__/delete_permission.test.ts` | حالات الشاشات والكتالوج (4 حالات: الأصناف/الموردون/المطابخ بلا حذف، وحذف الأصناف للمدير — بعد تفعيل الحالتين 1 و 6 في المرحلة 5) | `lib/data/repos/catalog_repo.dart`، `lib/features/catalog/*_screen.dart` | المرحلة 7 |
 | `src/domain/__tests__/maker_checker.test.ts` | `في المستودعات` (3 حالات: محضر الإتلاف ×2، تسوية الجرد) | `lib/data/repos/catalog_repo.dart`، `movements_repo.dart`، `destructions_repo.dart`، `stocktake_repo.dart`، `lib/domain/destruction.dart` | المراحل 7 و 9 و 10 و 11 |
-| `src/domain/__tests__/section_block.test.ts` | `المستودع والتوقيع`: 4 حالات توقيع الأقسام وفكّ الحجب (`إضافة الحجب بلا توقيع`، `فكّ الحجب مع مفتاح المالك`، `فكّ الحجب بلا مفتاح`، `إضافة حجبٍ بعد فكٍّ موقَّع`) | `lib/core/security/esign.dart`، `device_activation.dart`، `owner_signature.dart` | مرحلة لاحقة |
-| `src/domain/__tests__/section_block.test.ts` | `القشرة` (4 حالات: حجب `fuel`/`supply`/`admin.users`/المالك في الواجهة) | `lib/features/home/home_shell.dart`، `lib/data/sync/auto_sync.dart` | المراحل 6 و 16 |
+| `src/domain/__tests__/section_block.test.tsx` | `المستودع والتوقيع`: 4 حالات توقيع الأقسام وفكّ الحجب (`إضافة الحجب بلا توقيع`، `فكّ الحجب مع مفتاح المالك`، `فكّ الحجب بلا مفتاح`، `إضافة حجبٍ بعد فكٍّ موقَّع`) | `lib/core/security/esign.dart`، `device_activation.dart`، `owner_signature.dart` | مرحلة لاحقة |
+| `src/domain/__tests__/section_block.test.tsx` | `القشرة` (حالة واحدة متبقية بعد تفعيل 3 حالات في المرحلة 6): `حجب admin.users: قسم «المستخدمون» يختفي من داخل الإعدادات وبقية الأقسام تبقى` | `lib/features/settings/settings_screen.dart` | المرحلة 20 |
 | `src/core/security/__tests__/duplicate_username.test.ts` | فحص السلامة يكشف الاسم المكرّر ويسكت عن المفرد | `lib/data/repos/selfcheck_repo.dart` | مرحلة لاحقة |
+| `src/features/home/__tests__/home_shell.test.tsx` | الدرج على الجوال يفتح شاشة البند المختار ويُغلق بلا سؤال خروج | `lib/features/catalog/items_screen.dart` | المرحلة 7 |
+| `src/features/home/__tests__/home_shell.test.tsx` | المعرّفات القديمة تفتح الإعدادات على القسم نفسه | `lib/features/settings/settings_screen.dart` | المرحلة 20 |
+| `src/features/home/__tests__/section_switch.test.tsx` | التبديل لا يهدم تبويبات القسم الذي غادرناه ولا حالة صفحاته | `lib/data/repos/fuel_repo.dart` | المرحلة 13 |
